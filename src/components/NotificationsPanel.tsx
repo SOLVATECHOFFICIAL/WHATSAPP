@@ -1,0 +1,173 @@
+import React, { useState } from 'react';
+import { Bell, MessageSquare, Link2, AlertCircle, Info, Trash2, CheckCircle2, Send } from 'lucide-react';
+
+export interface WhatsAppNotification {
+  id: string;
+  type: 'pairing' | 'connection' | 'message_received' | 'message_sent' | 'system' | 'error';
+  title: string;
+  body: string;
+  timestamp: string;
+  sender?: string;
+  data?: any;
+}
+
+interface NotificationsPanelProps {
+  notifications: WhatsAppNotification[];
+  onClear: () => void;
+  isOpen: boolean;
+  onClose: () => void;
+}
+
+export const NotificationsPanel: React.FC<NotificationsPanelProps> = ({
+  notifications,
+  onClear,
+  isOpen,
+  onClose,
+}) => {
+  const [filter, setFilter] = useState<'all' | 'messages' | 'pairing'>('all');
+
+  if (!isOpen) return null;
+
+  const filteredNotifications = notifications.filter((n) => {
+    if (filter === 'messages') return n.type === 'message_received' || n.type === 'message_sent';
+    if (filter === 'pairing') return n.type === 'pairing' || n.type === 'connection';
+    return true;
+  });
+
+  const getIcon = (type: WhatsAppNotification['type']) => {
+    switch (type) {
+      case 'pairing':
+        return <Link2 className="w-4 h-4 text-emerald-500" />;
+      case 'connection':
+        return <CheckCircle2 className="w-4 h-4 text-teal-500" />;
+      case 'message_received':
+        return <MessageSquare className="w-4 h-4 text-emerald-600" />;
+      case 'message_sent':
+        return <Send className="w-4 h-4 text-blue-500" />;
+      case 'error':
+        return <AlertCircle className="w-4 h-4 text-rose-500" />;
+      default:
+        return <Info className="w-4 h-4 text-slate-400" />;
+    }
+  };
+
+  return (
+    <div className="fixed inset-y-0 right-0 w-full sm:w-96 bg-white dark:bg-slate-900 shadow-2xl z-50 border-l border-slate-200 dark:border-slate-800 flex flex-col animate-in slide-in-from-right duration-200">
+      {/* Header */}
+      <div className="p-4 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between bg-slate-50 dark:bg-slate-900/60">
+        <div className="flex items-center gap-2.5">
+          <div className="p-2 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 rounded-xl">
+            <Bell className="w-5 h-5" />
+          </div>
+          <div>
+            <h3 className="font-bold text-slate-900 dark:text-white text-sm">WhatsApp Notifications</h3>
+            <p className="text-xs text-slate-500">Live Baileys stream ({notifications.length} events)</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-1">
+          {notifications.length > 0 && (
+            <button
+              onClick={onClear}
+              title="Clear all"
+              className="p-1.5 text-slate-400 hover:text-rose-500 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+            >
+              <Trash2 className="w-4 h-4" />
+            </button>
+          )}
+          <button
+            onClick={onClose}
+            className="px-2.5 py-1 text-xs font-medium text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg"
+          >
+            ✕
+          </button>
+        </div>
+      </div>
+
+      {/* Tabs */}
+      <div className="px-4 py-2 border-b border-slate-100 dark:border-slate-800 flex gap-1.5 bg-white dark:bg-slate-900">
+        <button
+          onClick={() => setFilter('all')}
+          className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
+            filter === 'all'
+              ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300'
+              : 'text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-800'
+          }`}
+        >
+          All ({notifications.length})
+        </button>
+        <button
+          onClick={() => setFilter('messages')}
+          className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
+            filter === 'messages'
+              ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300'
+              : 'text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-800'
+          }`}
+        >
+          Messages
+        </button>
+        <button
+          onClick={() => setFilter('pairing')}
+          className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
+            filter === 'pairing'
+              ? 'bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300'
+              : 'text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-800'
+          }`}
+        >
+          Pairing
+        </button>
+      </div>
+
+      {/* Notification list */}
+      <div className="flex-1 overflow-y-auto p-4 space-y-3">
+        {filteredNotifications.length === 0 ? (
+          <div className="h-full flex flex-col items-center justify-center text-center p-6 text-slate-400">
+            <Bell className="w-10 h-10 mb-2 opacity-30" />
+            <p className="text-sm font-medium">No notifications yet</p>
+            <p className="text-xs text-slate-500 mt-1">
+              Events such as pairing codes, socket link, and incoming messages will appear here live.
+            </p>
+          </div>
+        ) : (
+          filteredNotifications.map((notif) => (
+            <div
+              key={notif.id}
+              className={`p-3 rounded-xl border text-left text-xs transition-all ${
+                notif.type === 'message_received'
+                  ? 'bg-emerald-50/50 dark:bg-emerald-950/20 border-emerald-200 dark:border-emerald-800/50'
+                  : notif.type === 'pairing'
+                  ? 'bg-amber-50/50 dark:bg-amber-950/20 border-amber-200 dark:border-amber-800/50'
+                  : notif.type === 'error'
+                  ? 'bg-rose-50/50 dark:bg-rose-950/20 border-rose-200 dark:border-rose-800/50'
+                  : 'bg-slate-50 dark:bg-slate-800/50 border-slate-200 dark:border-slate-700/60'
+              }`}
+            >
+              <div className="flex items-start gap-2.5">
+                <div className="p-1 rounded-md bg-white dark:bg-slate-800 shadow-2xs mt-0.5">
+                  {getIcon(notif.type)}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="font-semibold text-slate-900 dark:text-white truncate">
+                      {notif.title}
+                    </span>
+                    <span className="text-[10px] text-slate-400 shrink-0 font-mono">
+                      {notif.timestamp}
+                    </span>
+                  </div>
+                  <p className="text-slate-600 dark:text-slate-300 mt-1 break-words">
+                    {notif.body}
+                  </p>
+                  {notif.sender && (
+                    <span className="inline-block mt-2 px-2 py-0.5 bg-white dark:bg-slate-800 rounded font-mono text-[10px] text-emerald-600 dark:text-emerald-400 border border-slate-100 dark:border-slate-700">
+                      From: {notif.sender}
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+};

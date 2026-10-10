@@ -1,0 +1,6 @@
+{
+  "name": "WhatBot",
+  "description": "Smart WhatsApp Bot builder and interactive simulator with automated flows and AI generation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
