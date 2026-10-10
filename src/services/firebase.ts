@@ -13,7 +13,7 @@ import {
 } from 'firebase/auth';
 
 export const firebaseConfig = {
-  apiKey: "AIzaSyDCVp_T6gO6HeTDeevls9MSb9quEzU5YiM",
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyDCVp_T6gO6HeTDeevls9MSb9quEzU5YiM",
   authDomain: "solvatechbot.firebaseapp.com",
   projectId: "solvatechbot",
   storageBucket: "solvatechbot.firebasestorage.app",
