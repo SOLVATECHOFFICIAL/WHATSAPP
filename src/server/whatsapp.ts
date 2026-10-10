@@ -528,6 +528,7 @@ class WhatsAppManager {
     this.currentStatus = {
       state: 'disconnected',
       isConnected: false,
+      pairingStage: 'idle',
       user: undefined,
       pairingCode: undefined,
       qrCodeUrl: undefined,
