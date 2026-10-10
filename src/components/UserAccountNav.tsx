@@ -51,7 +51,7 @@ export const UserAccountNav: React.FC<UserAccountNavProps> = ({ user, onOpenAuth
     );
   }
 
-  const isOwner = user.email === 'awoyinfasolomon1@gmail.com' || user.email?.includes('awoyinfasolomon') || user.uid === 'owner_master';
+  const isOwner = Boolean(user.email && user.email.trim().toLowerCase() === 'awoyinfasolomon1@gmail.com');
   const licenseKey = isOwner ? 'SOLVA-OWNER-UNLIMITED-MASTER' : `SOLVA-${user.uid.slice(0, 6).toUpperCase()}-2026`;
 
   return (

@@ -22,7 +22,7 @@ import {
   User as UserIcon,
   ArrowRight,
 } from 'lucide-react';
-import { User } from 'firebase/auth';
+import type { User } from 'firebase/auth';
 import { doc, onSnapshot } from 'firebase/firestore';
 import {
   db,
@@ -47,8 +47,6 @@ import {
   redeemKey,
   LICENSE_PLANS,
   PAYMENT_INFO,
-  checkUserTrialStatus,
-  claim30MinuteTrial,
 } from './services/license';
 
 interface WhatsAppStatus {
@@ -120,10 +118,7 @@ export default function App() {
   const [inTabError, setInTabError] = useState<string | null>(null);
   const [commandSearch, setCommandSearch] = useState('');
 
-  // 30-Minute Test trial state
-  const [hasUsedTrial, setHasUsedTrial] = useState<boolean>(true);
-  const [trialRolling, setTrialRolling] = useState<boolean>(false);
-  const [trialRollStep, setTrialRollStep] = useState<number>(1);
+  const [isRefreshingStatus, setIsRefreshingStatus] = useState(false);
 
   const isStudioEnv =
     typeof window !== 'undefined' &&
@@ -131,10 +126,54 @@ export default function App() {
       window.location.hostname === 'localhost' ||
       window.location.hostname.includes('127.0.0.1'));
 
-  // STRICT RULE: No one can be admin except awoyinfasolomon1@gmail.com!
-  const isOwner =
-    currentUser?.email?.toLowerCase() === OWNER_EMAIL.toLowerCase() ||
-    (isStudioEnv && !currentUser);
+  // STRICT RULE: Only awoyinfasolomon1@gmail.com is authorized owner/admin!
+  const isOwner = Boolean(
+    currentUser?.email &&
+    currentUser.email.trim().toLowerCase() === OWNER_EMAIL.toLowerCase()
+  );
+
+  // Manual status refresh: forces immediate fetch from backend
+  const handleRefreshStatus = async () => {
+    setIsRefreshingStatus(true);
+    try {
+      const [resStatus, resNotifs] = await Promise.all([
+        fetch('/api/whatsapp/status'),
+        fetch('/api/whatsapp/notifications'),
+      ]);
+
+      if (resStatus.ok) {
+        const data = await resStatus.json();
+        if (data.status) {
+          setStatus(data.status);
+          if (data.status.pairingCode) {
+            setPairingCode(data.status.pairingCode);
+          } else if (data.status.isConnected) {
+            setPairingCode(null);
+          }
+        }
+      }
+
+      if (resNotifs.ok) {
+        const dataNotifs = await resNotifs.json();
+        if (Array.isArray(dataNotifs.notifications)) {
+          setNotifications(dataNotifs.notifications);
+        }
+      }
+
+      setToastNotification({
+        id: 'refreshed_' + Date.now(),
+        type: 'system',
+        title: 'Status Synchronized 🟢',
+        body: 'WhatsApp connection state is completely up to date with server.',
+        timestamp: new Date().toLocaleTimeString(),
+      });
+      setTimeout(() => setToastNotification(null), 3500);
+    } catch (e) {
+      console.error('Refresh status error:', e);
+    } finally {
+      setIsRefreshingStatus(false);
+    }
+  };
 
   // Listen to Auth State and real-time Firestore license sync
   useEffect(() => {
@@ -143,11 +182,6 @@ export default function App() {
       setAuthLoading(false);
 
       if (user) {
-        // Check if user has used the lifetime 30-minute test
-        checkUserTrialStatus(user.uid, user.email).then((used) => {
-          setHasUsedTrial(used);
-        });
-
         const saved = localStorage.getItem(`solvatech_user_${user.uid}`);
         if (saved) {
           try {
@@ -158,9 +192,6 @@ export default function App() {
               plan: parsed.licensePlan || 'Active Plan',
               key: parsed.licenseKey || null,
             });
-            if (parsed.hasUsedTrial) {
-              setHasUsedTrial(true);
-            }
           } catch (e) {
             console.error('Failed to parse saved user license:', e);
           }
@@ -171,9 +202,6 @@ export default function App() {
           onSnapshot(doc(db, 'users', user.uid), (snap) => {
             if (snap.exists()) {
               const data = snap.data();
-              if (data.hasUsedTrial) {
-                setHasUsedTrial(true);
-              }
               setUserLicenseData({
                 expiresAt: data.licenseExpiresAt || null,
                 isUnlimited: !!data.isUnlimited,
@@ -208,34 +236,6 @@ export default function App() {
     const interval = setInterval(updateTime, 1000);
     return () => clearInterval(interval);
   }, [userLicenseData, isOwner]);
-
-  // STRICT RULE: Never should a user be connected to bot while license is expired (except on unlimited or active 30 min)
-  useEffect(() => {
-    if (status.isConnected && !isOwner && !userLicenseData.isUnlimited) {
-      const licCheck = calculateRemainingTime(userLicenseData.expiresAt, false);
-      if (licCheck.isExpired) {
-        // Automatically disconnect socket immediately
-        fetch('/api/whatsapp/disconnect', { method: 'POST' }).catch(() => {});
-        setStatus((prev) => ({
-          ...prev,
-          isConnected: false,
-          state: 'disconnected',
-          pairingStage: 'idle',
-        }));
-        setInTabError(
-          '🚨 BOT CONNECTION TERMINATED: Your license key has expired! Users can NEVER remain connected to the bot while their license is expired. Please renew your key or enter a valid key to reconnect.'
-        );
-        setToastNotification({
-          id: 'lic_expired_' + Date.now(),
-          type: 'system',
-          title: '🚨 Bot Automatically Disconnected',
-          body: 'Your license key has expired. In accordance with system policy, bot access has been shut down until a new license is activated.',
-          timestamp: new Date().toLocaleTimeString(),
-        });
-        setTimeout(() => setToastNotification(null), 8000);
-      }
-    }
-  }, [status.isConnected, isOwner, userLicenseData]);
 
   // Polling backend status and real-time notifications
   useEffect(() => {
@@ -294,8 +294,10 @@ export default function App() {
     return () => clearInterval(timer);
   }, [pairingCode, countdown, status.isConnected]);
 
-  // Handle URL hash, query param, keyboard shortcut, and typing 'admin dashboard'
+  // Handle URL hash, query param, keyboard shortcut, and typing 'admin dashboard' (Owner only)
   useEffect(() => {
+    if (!isOwner) return;
+
     const checkHash = () => {
       if (
         window.location.hash === '#admin' ||
@@ -321,15 +323,16 @@ export default function App() {
       window.removeEventListener('hashchange', checkHash);
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, []);
+  }, [isOwner]);
 
-  // When user types 'admin dashboard' into command search, auto-launch
+  // When owner types 'admin dashboard' into command search, auto-launch
   useEffect(() => {
+    if (!isOwner) return;
     const clean = commandSearch.trim().toLowerCase();
     if (clean === 'admin dashboard' || clean === 'open admin' || clean === '/admin' || clean === 'admin os') {
       setIsAdminModalOpen(true);
     }
-  }, [commandSearch]);
+  }, [commandSearch, isOwner]);
 
   // Clear live notifications
   const handleClearNotifications = async () => {
@@ -394,54 +397,13 @@ export default function App() {
     setAuthSubmitting(true);
     setAuthError(null);
     try {
-      const user = await signInFastTrack('taletroveanimation@gmail.com', 'Studio Developer');
+      const user = await signInFastTrack('preview.user@solvatech.com', 'Studio Preview User');
       setCurrentUser(user);
     } catch (err: any) {
       setAuthError(err.message || 'Studio preview login error');
     } finally {
       setAuthSubmitting(false);
     }
-  };
-
-  // Start the lifetime 30-minute test with 3-second rolling activation
-  const handleStart30MinuteTest = async () => {
-    if (!currentUser || trialRolling || hasUsedTrial) return;
-
-    setTrialRolling(true);
-    setTrialRollStep(1);
-
-    setTimeout(() => setTrialRollStep(2), 1000);
-    setTimeout(() => setTrialRollStep(3), 2000);
-
-    setTimeout(async () => {
-      try {
-        const res = await claim30MinuteTrial(currentUser.uid, currentUser.email || '');
-        if (res.success && res.expiresAt) {
-          setHasUsedTrial(true);
-          setUserLicenseData((prev) => ({
-            ...prev,
-            expiresAt: res.expiresAt || null,
-            plan: '⚡ 30-Minute Test (Active)',
-            isUnlimited: false,
-          }));
-          setToastNotification({
-            id: 'trial_' + Date.now(),
-            type: 'system',
-            title: '🎉 30-Minute Test Activated!',
-            body: 'Your 30-minute countdown has begun! You can now link your WhatsApp and run all 35+ commands.',
-            timestamp: new Date().toLocaleTimeString(),
-          });
-          setTimeout(() => setToastNotification(null), 6000);
-          setActiveTab('pair');
-        } else {
-          setInTabError(res.message);
-        }
-      } catch (err: any) {
-        setInTabError(err.message || 'Error claiming 30-minute test');
-      } finally {
-        setTrialRolling(false);
-      }
-    }, 3000);
   };
 
   // Handle request pairing code
@@ -583,6 +545,7 @@ export default function App() {
     { cmd: '.menu', desc: 'Display all bot commands & active bot info' },
     { cmd: '.ping', desc: 'Check network speed and response latency' },
     { cmd: '.uptime', desc: 'Bot continuous runtime and server status' },
+    { cmd: '.signature', desc: 'Official verified developer signature & credentials' },
     { cmd: '.expire', desc: 'Check your license expiry & remaining days/minutes' },
     { cmd: '.ai <prompt>', desc: 'Ask AI question, writing or explanations' },
     { cmd: '.sticker', desc: 'Convert image or video to WhatsApp sticker' },
@@ -869,6 +832,17 @@ export default function App() {
             </div>
 
             <div className="flex items-center gap-2">
+              {/* Force Immediate Refresh WhatsApp Status Button */}
+              <button
+                type="button"
+                onClick={handleRefreshStatus}
+                disabled={isRefreshingStatus}
+                className="p-1.5 rounded-xl bg-slate-800/80 hover:bg-slate-800 text-slate-300 hover:text-emerald-400 border border-slate-700/80 transition-colors"
+                title="Refresh WhatsApp Status Immediately"
+              >
+                <RefreshCw className={`w-4 h-4 ${isRefreshingStatus ? 'animate-spin text-emerald-400' : ''}`} />
+              </button>
+
               {/* WhatsApp Live Notifications Button */}
               <button
                 onClick={() => setIsNotificationsOpen(true)}
@@ -883,8 +857,8 @@ export default function App() {
                 )}
               </button>
 
-              {/* Owner Admin Hub Button */}
-              {(isOwner || isStudioEnv) && (
+              {/* Owner Admin Hub Button - strictly for owner */}
+              {isOwner && (
                 <button
                   onClick={() => setIsAdminModalOpen(true)}
                   className="px-2.5 py-1 rounded-xl bg-gradient-to-r from-amber-500/20 via-emerald-500/20 to-teal-500/20 hover:from-amber-500/30 hover:to-teal-500/30 text-amber-300 border border-amber-500/40 text-[11px] font-bold flex items-center gap-1.5 transition-all shadow-xs active:scale-95"
@@ -1189,51 +1163,42 @@ export default function App() {
               {/* Pairing Request Form */}
               {!status.isConnected && (
                 <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-3">
-                  <div className="flex items-center gap-2 pb-2 border-b border-slate-800/80">
-                    <Radio className="w-4 h-4 text-emerald-400 animate-pulse" />
-                    <h3 className="font-bold text-sm text-white">Link Your WhatsApp</h3>
+                  <div className="flex items-center justify-between pb-2 border-b border-slate-800/80">
+                    <div className="flex items-center gap-2">
+                      <Radio className="w-4 h-4 text-emerald-400 animate-pulse" />
+                      <h3 className="font-bold text-sm text-white">Link Your WhatsApp</h3>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleRefreshStatus}
+                      disabled={isRefreshingStatus}
+                      className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-slate-900 hover:bg-slate-850 text-emerald-400 border border-slate-800 text-[11px] font-bold transition-all active:scale-95 shadow-xs"
+                      title="Force immediate fetch of WhatsApp status from backend"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingStatus ? 'animate-spin' : ''}`} />
+                      <span>{isRefreshingStatus ? 'Refreshing...' : 'Refresh Status'}</span>
+                    </button>
                   </div>
 
-                  {!isLicenseActive && !hasUsedTrial && (
-                    <div className="p-3.5 rounded-2xl bg-gradient-to-r from-amber-950/60 via-slate-900 to-emerald-950/60 border-2 border-amber-400/80 text-amber-200 text-xs flex items-start justify-between gap-3 shadow-lg">
-                      <div className="flex items-start gap-2.5">
-                        <div className="w-8 h-8 rounded-xl bg-amber-500 text-slate-950 flex items-center justify-center font-black shrink-0 mt-0.5 shadow-md">
-                          <Zap className="w-4 h-4 fill-slate-950" />
-                        </div>
+                  {!isLicenseActive && (
+                    <div className="p-3 rounded-xl bg-amber-950/30 border border-amber-500/40 text-amber-300 text-xs flex items-start justify-between gap-2">
+                      <div className="flex items-start gap-2">
+                        <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-amber-400" />
                         <div>
-                          <p className="font-extrabold text-white text-xs">Free 30-Minute Test Available!</p>
-                          <p className="text-[11px] text-amber-200/90 mt-0.5">
-                            You haven't used your 1-time 30-minute test on this Gmail yet. Tap below to start testing the bot free!
+                          <p className="font-semibold text-white">License Key Required</p>
+                          <p className="text-[11px] text-amber-300/80 mt-0.5">
+                            You need an active license key to link WhatsApp.
                           </p>
                         </div>
                       </div>
                       <button
                         type="button"
                         onClick={() => setActiveTab('license')}
-                        className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-amber-400 to-emerald-400 text-slate-950 font-black text-[11px] shrink-0 transition-all shadow-md active:scale-95"
+                        className="px-2.5 py-1 rounded-lg bg-amber-500 text-slate-950 font-bold text-[11px] flex items-center gap-1 shrink-0 active:scale-95"
                       >
-                        Claim 30m Test →
+                        <span>Get Key</span>
+                        <Zap className="w-3 h-3" />
                       </button>
-                    </div>
-                  )}
-
-                  {!isLicenseActive && hasUsedTrial && (
-                    <div className="p-3 rounded-xl bg-amber-950/30 border border-amber-500/40 text-amber-300 text-xs flex items-start gap-2">
-                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-amber-400" />
-                      <div>
-                        <p className="font-semibold">License Key Required</p>
-                        <p className="text-[11px] text-amber-300/80 mt-0.5">
-                          You need an active key to link WhatsApp.
-                        </p>
-                        <button
-                          type="button"
-                          onClick={() => setActiveTab('license')}
-                          className="mt-1.5 px-2.5 py-1 rounded-lg bg-amber-500 text-slate-950 font-bold text-[11px] flex items-center gap-1"
-                        >
-                          <span>Get / Redeem Key</span>
-                          <Zap className="w-3 h-3" />
-                        </button>
-                      </div>
                     </div>
                   )}
 
@@ -1313,57 +1278,7 @@ export default function App() {
           {/* TAB 2: LICENSE */}
           {activeTab === 'license' && (
             <div className="space-y-4">
-              {/* 30-MINUTE TEST CARD (LIFETIME LOCK PER GMAIL — DISAPPEARS FOREVER ONCE CLAIMED) */}
-              {!hasUsedTrial && (
-                <div className="p-4 sm:p-5 rounded-3xl bg-gradient-to-br from-amber-950/70 via-slate-900 to-emerald-950/70 border-2 border-amber-400/90 shadow-2xl shadow-amber-950/60 space-y-3.5 relative overflow-hidden animate-in zoom-in-95 duration-200">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2.5">
-                      <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-amber-400 to-emerald-400 text-slate-950 flex items-center justify-center font-black shadow-lg shadow-amber-500/30">
-                        <Zap className="w-5 h-5 fill-slate-950" />
-                      </div>
-                      <div>
-                        <div className="flex items-center gap-1.5">
-                          <h3 className="font-extrabold text-sm text-white">30-Minute Free Test</h3>
-                          <span className="px-2 py-0.5 rounded-full bg-amber-500/20 border border-amber-400/60 text-amber-300 font-bold text-[9px] uppercase tracking-wider">
-                            1-Time Only
-                          </span>
-                        </div>
-                        <p className="text-[11px] text-amber-200/80">
-                          Linked to Gmail: <span className="font-mono text-white font-semibold">{currentUser?.email}</span>
-                        </p>
-                      </div>
-                    </div>
-                    <span className="px-2.5 py-1 rounded-xl bg-amber-500/20 text-amber-300 font-mono text-[11px] font-bold border border-amber-500/40">
-                      30:00
-                    </span>
-                  </div>
 
-                  <p className="text-xs text-slate-300 leading-relaxed">
-                    Test all 35+ automated bot commands, link your WhatsApp account, and experience full multi-device features free for 30 minutes. Once activated, this 30-minute test will disappear forever for this Gmail account!
-                  </p>
-
-                  {/* 3-Second Rolling Activation Button */}
-                  {trialRolling ? (
-                    <div className="py-3 px-4 rounded-xl bg-amber-500/20 border border-amber-500/60 flex items-center justify-center gap-3 text-amber-300 font-bold text-xs animate-pulse">
-                      <RefreshCw className="w-4 h-4 animate-spin text-amber-400" />
-                      <span>
-                        {trialRollStep === 1 && 'Connecting Gmail to Baileys engine... (1/3)'}
-                        {trialRollStep === 2 && 'Activating 30-minute high-speed access token... (2/3)'}
-                        {trialRollStep === 3 && 'Finalizing 30-minute countdown... (3/3)'}
-                      </span>
-                    </div>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={handleStart30MinuteTest}
-                      className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-amber-400 via-emerald-400 to-teal-400 hover:from-amber-300 hover:to-teal-300 text-slate-950 font-black text-xs shadow-lg shadow-amber-950/60 transition-all flex items-center justify-center gap-2 active:scale-[0.98]"
-                    >
-                      <Zap className="w-4 h-4 fill-slate-950" />
-                      <span>Claim Free 30-Minute Test Now</span>
-                    </button>
-                  )}
-                </div>
-              )}
 
               {/* NUMBER ONE REQUIREMENT: PROMINENT, BOLD OPAY BANK SHOWCASE */}
               <div className="p-4 sm:p-5 rounded-3xl bg-gradient-to-br from-emerald-950 via-slate-900 to-teal-950 border-2 border-emerald-400/80 shadow-2xl shadow-emerald-950/80 space-y-4 relative overflow-hidden">
@@ -1457,26 +1372,35 @@ export default function App() {
                 </p>
               </div>
 
-              {/* License Plans List */}
+              {/* License Plans List - Tap any plan to select / order */}
               <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-3">
                 <div className="flex items-center justify-between pb-2 border-b border-slate-800/80">
                   <h4 className="font-bold text-xs uppercase tracking-wider text-emerald-400">
-                    ⚔️ LICENSE PLANS
+                    ⚔️ LICENSE PLANS (TAP TO SELECT)
                   </h4>
                   <span className="text-[10px] text-slate-400 font-mono">OPay Bank Verified</span>
                 </div>
 
-                <div className="grid grid-cols-2 gap-1.5 text-[11px]">
+                <div className="grid grid-cols-2 gap-2 text-[11px]">
                   {LICENSE_PLANS.map((plan) => (
-                    <div
+                    <button
                       key={plan.id}
-                      className="p-2 rounded-lg bg-slate-900 border border-slate-800/80 flex items-center justify-between"
+                      type="button"
+                      onClick={() => {
+                        const whatsappMsg = `https://wa.me/2349049979183?text=Hello%20Solomon,%20I%20want%20to%20pay%20${plan.priceFormatted}%20for%20the%20${encodeURIComponent(plan.name)}%20SOLVATECH%20license.`;
+                        window.open(whatsappMsg, '_blank');
+                      }}
+                      className="p-2.5 rounded-xl bg-slate-900 border border-slate-800/90 hover:border-emerald-500/60 hover:bg-slate-850 flex items-center justify-between transition-all active:scale-[0.98] text-left group"
+                      title="Tap to order this plan directly on WhatsApp"
                     >
-                      <span className="text-slate-300">• {plan.name}</span>
-                      <strong className="text-emerald-400 font-mono">{plan.priceFormatted}</strong>
-                    </div>
+                      <span className="text-slate-300 font-semibold group-hover:text-white">• {plan.name}</span>
+                      <strong className="text-emerald-400 font-mono font-bold">{plan.priceFormatted}</strong>
+                    </button>
                   ))}
                 </div>
+                <p className="text-[10px] text-slate-400 text-center">
+                  💡 Tap any plan above to contact Solomon with your selected order!
+                </p>
               </div>
 
               {/* Redeem License Key Card */}
@@ -1490,14 +1414,14 @@ export default function App() {
                 </div>
 
                 <p className="text-[11px] text-slate-400">
-                  Have a license key? Enter it below. Adding a key automatically stacks duration on top of your existing remaining test/plan time!
+                  Enter your official license key below. Adding a key automatically stacks duration on top of your existing remaining balance!
                 </p>
 
-                <form onSubmit={handleRedeemInTab} className="space-y-3">
+                <form onSubmit={handleRedeemInTab} className="space-y-3 pt-1">
                   <div>
                     <input
                       type="text"
-                      placeholder="e.g. SOLVA-1D-XXXX-YYYY"
+                      placeholder="Enter License Key (e.g. SOLVA-1D-XXXX-YYYY)"
                       value={inTabKeyInput}
                       onChange={(e) => setInTabKeyInput(e.target.value.toUpperCase())}
                       className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500 font-mono uppercase tracking-wider"
@@ -1508,7 +1432,7 @@ export default function App() {
                   <button
                     type="submit"
                     disabled={inTabRedeeming || !inTabKeyInput.trim()}
-                    className="w-full py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-500 text-slate-950 font-bold text-xs shadow-md disabled:opacity-50 transition-all"
+                    className="w-full py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-500 text-slate-950 font-bold text-xs shadow-md disabled:opacity-50 transition-all flex items-center justify-center gap-2 active:scale-[0.98]"
                   >
                     {inTabRedeeming ? (
                       <RefreshCw className="w-3.5 h-3.5 animate-spin mx-auto" />
@@ -1544,72 +1468,56 @@ export default function App() {
             </div>
           )}
 
-          {/* TAB 3: COMMANDS */}
+          {/* TAB 3: COMMANDS (TAP ANY COMMAND TO COPY) */}
           {activeTab === 'commands' && (
             <div className="space-y-3">
               <div className="p-3 rounded-2xl bg-slate-950 border border-slate-800 space-y-2">
-                <div className="flex items-center gap-2">
-                  <Terminal className="w-4 h-4 text-emerald-400" />
-                  <h3 className="font-bold text-sm text-white">Bot Commands</h3>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Terminal className="w-4 h-4 text-emerald-400" />
+                    <h3 className="font-bold text-sm text-white">Bot Commands</h3>
+                  </div>
+                  <span className="text-[10px] text-slate-400">Tap to Copy</span>
                 </div>
 
                 <div className="relative">
                   <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
                   <input
                     type="text"
-                    placeholder="Search commands or type 'admin dashboard'..."
+                    placeholder="Search bot command (.ping, .signature, .sticker...)"
                     value={commandSearch}
                     onChange={(e) => setCommandSearch(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && commandSearch.toLowerCase().includes('admin')) {
-                        setIsAdminModalOpen(true);
-                      }
-                    }}
                     className="w-full bg-slate-900 border border-slate-800 rounded-xl pl-8 pr-3 py-1.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
                   />
                 </div>
-
-                {commandSearch.toLowerCase().includes('admin') && (
-                  <div className="p-3 rounded-2xl bg-gradient-to-r from-amber-500 via-emerald-500 to-teal-400 text-slate-950 space-y-1.5 animate-in fade-in shadow-xl">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-1.5">
-                        <Zap className="w-4 h-4 fill-slate-950" />
-                        <strong className="text-xs uppercase tracking-wider">
-                          Detected 'admin dashboard'
-                        </strong>
-                      </div>
-                      <span className="px-2 py-0.5 rounded-full bg-slate-950 text-emerald-400 font-mono text-[9px] font-bold">
-                        New App View
-                      </span>
-                    </div>
-                    <p className="text-[11px] font-medium leading-tight">
-                      You typed 'admin'. Tap below or press Enter to launch the complete enterprise Admin Dashboard operating system!
-                    </p>
-                    <button
-                      type="button"
-                      onClick={() => setIsAdminModalOpen(true)}
-                      className="w-full py-2 rounded-xl bg-slate-950 text-white font-bold text-xs hover:bg-slate-900 transition-all flex items-center justify-center gap-1.5 active:scale-95 shadow-md"
-                    >
-                      <Key className="w-3.5 h-3.5 text-amber-400" />
-                      <span>Launch Admin Dashboard OS →</span>
-                    </button>
-                  </div>
-                )}
               </div>
 
               <div className="space-y-1.5 max-h-[460px] overflow-y-auto pr-1">
                 {filteredCommands.map((item) => (
-                  <div
+                  <button
                     key={item.cmd}
-                    className="p-2.5 rounded-xl bg-slate-950 border border-slate-800/80 flex items-start justify-between gap-2"
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard.writeText(item.cmd);
+                      setToastNotification({
+                        id: Math.random().toString(),
+                        type: 'system',
+                        title: 'Command Copied!',
+                        body: `Copied ${item.cmd} to clipboard`,
+                        timestamp: new Date().toLocaleTimeString(),
+                      });
+                      setTimeout(() => setToastNotification(null), 2500);
+                    }}
+                    className="w-full text-left p-2.5 rounded-xl bg-slate-950 border border-slate-800/80 hover:border-emerald-500/50 hover:bg-slate-900/60 flex items-start justify-between gap-2 transition-all active:scale-[0.99] group"
                   >
                     <div>
-                      <span className="font-mono text-emerald-400 font-bold text-xs">
+                      <span className="font-mono text-emerald-400 group-hover:text-emerald-300 font-bold text-xs">
                         {item.cmd}
                       </span>
                       <p className="text-[11px] text-slate-400 mt-0.5">{item.desc}</p>
                     </div>
-                  </div>
+                    <Copy className="w-3.5 h-3.5 text-slate-500 group-hover:text-emerald-400 shrink-0 mt-0.5" />
+                  </button>
                 ))}
               </div>
             </div>
@@ -1648,7 +1556,7 @@ export default function App() {
             <span className="text-[10px]">Commands</span>
           </button>
 
-          {(isOwner || isStudioEnv) && (
+          {isOwner && (
             <button
               onClick={() => setIsAdminModalOpen(true)}
               className="flex flex-col items-center gap-1 py-1 px-4 rounded-xl text-amber-400 hover:text-amber-300 transition-all"
@@ -1678,8 +1586,8 @@ export default function App() {
         onClose={() => setIsAuthModalOpen(false)}
       />
 
-      {/* Admin Dashboard */}
-      {isAdminModalOpen && (
+      {/* Admin Dashboard - Strictly restricted to verified owner */}
+      {isOwner && isAdminModalOpen && (
         <AdminDashboard
           currentUserEmail={currentUser?.email}
           onClose={() => setIsAdminModalOpen(false)}

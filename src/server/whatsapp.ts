@@ -3,7 +3,7 @@ import makeWASocket, {
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
   Browsers,
-  WASocket,
+  type WASocket,
   proto,
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
@@ -63,6 +63,15 @@ class WhatsAppManager {
   }
 
   public getStatus(): WhatsAppStatus {
+    const credsFile = path.join(this.authDir, 'creds.json');
+    if (!fs.existsSync(credsFile) && !this.isConnecting && this.currentStatus.state !== 'awaiting_pairing') {
+      this.currentStatus.isConnected = false;
+      if (this.currentStatus.state === 'connected') {
+        this.currentStatus.state = 'disconnected';
+      }
+      this.currentStatus.user = undefined;
+      this.currentStatus.pairingStage = 'idle';
+    }
     return this.currentStatus;
   }
 
@@ -346,7 +355,11 @@ class WhatsAppManager {
             });
 
             try {
-              await sock.sendMessage(remoteJid, { text: res.reply }, { quoted: msg });
+              let finalText = res.reply;
+              if (!finalText.includes('SOLVATECH') && !finalText.includes('Solomon')) {
+                finalText += `\n\n> ⚡ *SOLVATECH BOT* • _Solomon Oladimeji_`;
+              }
+              await sock.sendMessage(remoteJid, { text: finalText }, { quoted: msg });
               this.addNotification({
                 type: 'command',
                 title: `⚡ Command Executed: .${command}`,

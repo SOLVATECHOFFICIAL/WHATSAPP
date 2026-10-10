@@ -41,6 +41,7 @@ export const SOLVATECH_MENU = `╭━━━〔 ⚡ *SOLVATECH BOT COMMAND DIRECT
 │ • *.link* — _Retrieve active group invite link_
 │ • *.groupinfo* — _Complete group metadata, creator, and admin roster_
 │ • *.profile* [@user] — _View WhatsApp bio, account details & group role_
+│ • *.signature* — _Official verified developer signature & credentials_
 │
 ╰────────────────────────────────
 
@@ -450,6 +451,20 @@ Max Warnings Threshold: *3 Warnings before kick*`,
     if (cmd === 'stop') {
       this.spamActive = false;
       return { reply: `🛑 *EMERGENCY STOP:* Repeated controller operation terminated.` };
+    }
+
+    if (cmd === 'signature' || cmd === 'sign') {
+      return {
+        reply: `✍️ *SOLVATECH OFFICIAL SIGNATURE*\n\n` +
+          `┃ ⚡ *Bot Name:* SOLVATECH Multi-Device Engine\n` +
+          `┃ 👑 *Developer / Owner:* Solomon Oladimeji\n` +
+          `┃ 📧 *Email:* awoyinfasolomon1@gmail.com\n` +
+          `┃ 💳 *OPay Account:* 9049979183\n` +
+          `┃ 🔊 *Updates Channel:* https://whatsapp.com/channel/0029Vb86yuY7j6gCHqMqcU37\n` +
+          `┃ 👥 *Community Group:* https://chat.whatsapp.com/HKBAnW6XJmB9fBqSPJUN1F?s=cl&p=a&mlu=4&ilr=4\n` +
+          `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n` +
+          `_Certified Official Signature Verified_ 🛡️`,
+      };
     }
 
     return {

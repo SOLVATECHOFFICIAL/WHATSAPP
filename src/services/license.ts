@@ -23,6 +23,7 @@ export interface LicensePlan {
 
 export const LICENSE_PLANS: LicensePlan[] = [
   { id: '1d', name: '1 Day', durationDays: 1, priceNgn: 200, priceFormatted: '₦200' },
+  { id: '2d', name: '2 Days', durationDays: 2, priceNgn: 400, priceFormatted: '₦400' },
   { id: '3d', name: '3 Days', durationDays: 3, priceNgn: 500, priceFormatted: '₦500' },
   { id: '5d', name: '5 Days (Special)', durationDays: 5, priceNgn: 750, priceFormatted: '₦750' },
   { id: '7d', name: '7 Days', durationDays: 7, priceNgn: 1000, priceFormatted: '₦1,000' },
@@ -63,9 +64,14 @@ export const OWNER_EMAIL = 'awoyinfasolomon1@gmail.com';
 // There are no backdoor codes, no default keys, and no reuse permitted!
 
 export function generateKeyString(planPrefix: string): string {
-  const randPart = Math.random().toString(36).substring(2, 6).toUpperCase();
-  const randPart2 = Math.random().toString(36).substring(2, 6).toUpperCase();
-  return `SOLVA-${planPrefix.toUpperCase()}-${randPart}-${randPart2}`;
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let p1 = '';
+  let p2 = '';
+  for (let i = 0; i < 4; i++) {
+    p1 += chars.charAt(Math.floor(Math.random() * chars.length));
+    p2 += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return `SOLVA-${planPrefix.toUpperCase()}-${p1}-${p2}`;
 }
 
 export async function createLicense(plan: LicensePlan, createdBy: string = OWNER_EMAIL): Promise<LicenseRecord> {

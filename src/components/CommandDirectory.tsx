@@ -19,6 +19,7 @@ export const CommandDirectory: React.FC<CommandDirectoryProps> = ({ onRunCommand
         { cmd: '.ping', desc: 'Instant network latency and server response time' },
         { cmd: '.ai <question>', desc: 'AI assistant questions, explanations & writing (Gemini 3.8 Flash)' },
         { cmd: '.uptime', desc: 'Show continuous bot uptime & server telemetry' },
+        { cmd: '.signature', desc: 'Official verified developer signature & credentials' },
         { cmd: '.owner', desc: 'Official SOLVATECH BOT developer contact' },
         { cmd: '.expire', desc: 'Real-time license expiry countdown & key details' },
         { cmd: '.share', desc: 'Share SOLVATECH BOT features with friends/groups' },

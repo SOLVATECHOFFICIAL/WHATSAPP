@@ -9,11 +9,21 @@ import {
   updateProfile,
   signOut as fbSignOut,
   onAuthStateChanged,
-  User
+  type User
 } from 'firebase/auth';
 
+const getEnvKey = () => {
+  if (typeof import.meta !== 'undefined' && (import.meta as any)?.env?.VITE_FIREBASE_API_KEY) {
+    return (import.meta as any).env.VITE_FIREBASE_API_KEY;
+  }
+  if (typeof process !== 'undefined' && process.env?.VITE_FIREBASE_API_KEY) {
+    return process.env.VITE_FIREBASE_API_KEY;
+  }
+  return "AIzaSyDCVp_T6gO6HeTDeevls9MSb9quEzU5YiM";
+};
+
 export const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyDCVp_T6gO6HeTDeevls9MSb9quEzU5YiM",
+  apiKey: getEnvKey(),
   authDomain: "solvatechbot.firebaseapp.com",
   projectId: "solvatechbot",
   storageBucket: "solvatechbot.firebasestorage.app",

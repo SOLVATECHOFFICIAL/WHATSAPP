@@ -36,6 +36,7 @@ import {
   Eye,
   Sliders,
   Trash2,
+  X,
 } from 'lucide-react';
 import {
   LICENSE_PLANS,
@@ -78,9 +79,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
       window.location.hostname.includes('127.0.0.1'));
 
   // STRICT RULE: No one can be admin EXCEPT awoyinfasolomon1@gmail.com!
-  const isOwner =
-    currentUserEmail?.toLowerCase() === OWNER_EMAIL.toLowerCase() ||
-    (isStudioEnv && !currentUserEmail);
+  const isOwner = currentUserEmail?.toLowerCase() === OWNER_EMAIL.toLowerCase();
 
   // Portable Tab Navigation: Clean 3 Powerhouse Hubs
   const [activeTab, setActiveTab] = useState<'users' | 'keys_opay' | 'system'>('users');
@@ -125,6 +124,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
   const [batchCount, setBatchCount] = useState<number>(5);
   const [batchGenerated, setBatchGenerated] = useState<LicenseRecord[]>([]);
   const [batchLoading, setBatchLoading] = useState(false);
+  const [copiedAllBatch, setCopiedAllBatch] = useState(false);
+  const [copiedAllReceipts, setCopiedAllReceipts] = useState(false);
 
   // OPay Payment Hub Manual Verification & Key Dispenser
   const [opayCustomerName, setOpayCustomerName] = useState('');
@@ -134,7 +135,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
   const [opayDispensedSlip, setOpayDispensedSlip] = useState<string | null>(null);
 
   // Inventory Filter & Search
-  const [inventoryFilter, setInventoryFilter] = useState<'all' | 'unclaimed' | 'active' | 'revoked'>('all');
+  const [inventoryFilter, setInventoryFilter] = useState<'all' | 'unclaimed' | 'active' | 'expired' | 'revoked'>('all');
   const [inventorySearch, setInventorySearch] = useState('');
   const [wipingUnused, setWipingUnused] = useState(false);
   const [wipingExpired, setWipingExpired] = useState(false);
@@ -342,6 +343,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
 
       const newLic = await createLicense(planToUse, OWNER_EMAIL);
       setGeneratedKey(newLic);
+      setBatchGenerated([]);
       setLicenses((prev) => [newLic, ...prev]);
       showToast(`Minted ${newLic.key}!`);
     } catch (err) {
@@ -356,8 +358,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
   const handleBatchMint = async () => {
     setBatchLoading(true);
     try {
-      const created = await batchCreateLicenses(selectedPlan, batchCount, OWNER_EMAIL);
+      const planToUse: LicensePlan = isCustomDuration
+        ? {
+            id: `custom_${customDays}d`,
+            name: `${customDays} Day${customDays > 1 ? 's' : ''} (Custom)`,
+            durationDays: customDays,
+            priceNgn: customDays * 200,
+            priceFormatted: `₦${(customDays * 200).toLocaleString()}`,
+          }
+        : selectedPlan;
+
+      const count = Math.max(1, Math.min(100, Number(batchCount) || 5));
+      const created = await batchCreateLicenses(planToUse, count, OWNER_EMAIL);
       setBatchGenerated(created);
+      setGeneratedKey(null);
       setLicenses((prev) => [...created, ...prev]);
       showToast(`Successfully minted ${created.length} keys in bulk!`);
     } catch (err) {
@@ -366,6 +380,33 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
     } finally {
       setBatchLoading(false);
     }
+  };
+
+  // COPY ALL BATCH KEYS
+  const handleCopyAllBatchKeys = () => {
+    if (!batchGenerated.length) return;
+    const text = batchGenerated.map((l) => l.key).join('\n');
+    navigator.clipboard.writeText(text);
+    setCopiedAllBatch(true);
+    showToast(`Copied all ${batchGenerated.length} license keys!`);
+    setTimeout(() => setCopiedAllBatch(false), 2500);
+  };
+
+  // COPY ALL BATCH RECEIPTS
+  const handleCopyAllBatchReceipts = () => {
+    if (!batchGenerated.length) return;
+    const text = batchGenerated
+      .map(
+        (lic, i) =>
+          `🔑 Key #${i + 1}: ${lic.key}\n` +
+          `📦 Plan: ${lic.planName} (${lic.durationDays} Days)\n` +
+          `Redeem inside SOLVATECH app -> License tab`
+      )
+      .join('\n\n-------------------------\n\n');
+    navigator.clipboard.writeText(text);
+    setCopiedAllReceipts(true);
+    showToast(`Copied all ${batchGenerated.length} customer receipt slips!`);
+    setTimeout(() => setCopiedAllReceipts(false), 2500);
   };
 
   // COPY TEXT HELPER
@@ -610,6 +651,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
   // FILTERED INVENTORY
   const filteredInventory = useMemo(() => {
     const q = inventorySearch.trim().toLowerCase();
+    const now = Date.now();
     return licenses.filter((lic) => {
       if (q) {
         const match =
@@ -618,8 +660,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
           (lic.claimedEmail && lic.claimedEmail.toLowerCase().includes(q));
         if (!match) return false;
       }
-      if (inventoryFilter === 'unclaimed') return lic.status === 'unclaimed';
-      if (inventoryFilter === 'active') return lic.status === 'active';
+      const isExpired = lic.status === 'expired' || Boolean(lic.expiresAt && new Date(lic.expiresAt).getTime() < now);
+      if (inventoryFilter === 'unclaimed') return lic.status === 'unclaimed' && !lic.claimedBy;
+      if (inventoryFilter === 'active') return lic.status === 'active' && !isExpired;
+      if (inventoryFilter === 'expired') return isExpired;
       if (inventoryFilter === 'revoked') return lic.status === 'revoked';
       return true;
     });
@@ -1351,82 +1395,152 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
                 </div>
 
                 <div>
-                  <div className="flex items-center justify-between mb-2 text-[11px] font-bold text-slate-300">
-                    <span>Duration Preset:</span>
+                  {/* Segmented Mode Selector */}
+                  <div className="flex p-1 bg-slate-950 rounded-xl border border-slate-800 mb-3 text-xs">
                     <button
                       type="button"
-                      onClick={() => setIsCustomDuration(!isCustomDuration)}
-                      className="text-amber-400 hover:underline"
+                      onClick={() => setIsCustomDuration(false)}
+                      className={`flex-1 py-1.5 px-3 rounded-lg font-bold transition-all flex items-center justify-center gap-1.5 ${
+                        !isCustomDuration
+                          ? 'bg-emerald-600 text-slate-950 shadow-md'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
                     >
-                      {isCustomDuration ? '← Back to Presets' : 'Custom Days →'}
+                      <Key className="w-3.5 h-3.5" />
+                      <span>Normal Preset Keys (1D, 2D, 3D...)</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setIsCustomDuration(true)}
+                      className={`flex-1 py-1.5 px-3 rounded-lg font-bold transition-all flex items-center justify-center gap-1.5 ${
+                        isCustomDuration
+                          ? 'bg-amber-500 text-slate-950 shadow-md'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      <Clock className="w-3.5 h-3.5" />
+                      <span>Custom Duration Key</span>
                     </button>
                   </div>
 
                   {!isCustomDuration ? (
-                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
-                      {LICENSE_PLANS.slice(0, 6).map((plan) => (
-                        <button
-                          key={plan.id}
-                          type="button"
-                          onClick={() => setSelectedPlan(plan)}
-                          className={`p-2 rounded-xl border text-left transition-all ${
-                            selectedPlan.id === plan.id
-                              ? 'bg-emerald-950/60 border-emerald-500 text-white font-bold'
-                              : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-white'
-                          }`}
-                        >
-                          <div className="flex items-center justify-between">
-                            <span>{plan.name}</span>
-                            <span className="font-mono text-emerald-400 text-[10px]">{plan.priceFormatted}</span>
-                          </div>
-                        </button>
-                      ))}
+                    <div className="space-y-2">
+                      <label className="block text-[11px] font-bold text-slate-300">
+                        Select Normal Key Duration:
+                      </label>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                        {LICENSE_PLANS.slice(0, 8).map((plan) => (
+                          <button
+                            key={plan.id}
+                            type="button"
+                            onClick={() => setSelectedPlan(plan)}
+                            className={`p-2.5 rounded-xl border text-left transition-all active:scale-95 ${
+                              selectedPlan.id === plan.id
+                                ? 'bg-emerald-950/80 border-emerald-400 text-white font-bold ring-1 ring-emerald-400/50 shadow-md'
+                                : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-slate-700 hover:text-white'
+                            }`}
+                          >
+                            <div className="font-bold text-xs">{plan.name}</div>
+                            <div className="font-mono text-emerald-400 text-[10px] mt-0.5">{plan.priceFormatted}</div>
+                          </button>
+                        ))}
+                      </div>
                     </div>
                   ) : (
-                    <div className="p-3 rounded-2xl bg-slate-950 border border-slate-800 flex items-center gap-3">
-                      <Clock className="w-4 h-4 text-amber-400 shrink-0" />
-                      <div className="flex-1">
-                        <label className="block text-[10px] text-slate-400">Enter Custom Days:</label>
-                        <input
-                          type="number"
-                          min="1"
-                          max="365"
-                          value={customDays}
-                          onChange={(e) => setCustomDays(parseInt(e.target.value) || 1)}
-                          className="w-full bg-transparent text-white font-mono font-bold text-sm focus:outline-none"
-                        />
+                    <div className="p-3.5 rounded-2xl bg-slate-950 border border-amber-500/40 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <Clock className="w-4 h-4 text-amber-400" />
+                          <span className="text-xs font-bold text-white">Custom Days Duration</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setIsCustomDuration(false)}
+                          className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-emerald-300 text-[11px] font-bold flex items-center gap-1 border border-slate-700 transition-all active:scale-95"
+                        >
+                          <span>← Back to Normal Keys</span>
+                        </button>
                       </div>
-                      <span className="text-xs text-amber-300 font-bold font-mono">
-                        {customDays} Days (₦{(customDays * 200).toLocaleString()})
-                      </span>
+
+                      <div className="flex items-center gap-3 bg-slate-900 p-2.5 rounded-xl border border-slate-800">
+                        <div className="flex-1">
+                          <label className="block text-[10px] text-slate-400 mb-0.5">Enter Number of Days:</label>
+                          <input
+                            type="number"
+                            min="1"
+                            max="365"
+                            value={customDays}
+                            onChange={(e) => setCustomDays(parseInt(e.target.value) || 1)}
+                            className="w-full bg-transparent text-white font-mono font-bold text-base focus:outline-none"
+                          />
+                        </div>
+                        <div className="text-right">
+                          <span className="text-xs text-amber-300 font-bold font-mono block">
+                            {customDays} Day{customDays !== 1 ? 's' : ''}
+                          </span>
+                          <span className="text-[10px] text-slate-400 font-mono">
+                            ₦{(customDays * 200).toLocaleString()}
+                          </span>
+                        </div>
+                      </div>
+
+                      <p className="text-[11px] text-slate-400 leading-tight">
+                        Enter any custom duration in days. You can also tap the button above to go back to normal 1 day, 2 days, 3 days presets anytime.
+                      </p>
                     </div>
                   )}
                 </div>
 
-                {/* Mint Buttons: Single + Batch */}
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={handleGenerateKey}
-                    disabled={generating}
-                    className="flex-1 py-3 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-500 text-slate-950 font-black text-xs shadow-md transition-all flex items-center justify-center gap-2 active:scale-95 disabled:opacity-50"
-                  >
-                    {generating ? <RefreshCw className="w-4 h-4 animate-spin" /> : <PlusCircle className="w-4 h-4" />}
-                    <span>Mint 1 Key</span>
-                  </button>
+                {/* Batch Quantity Selector & Mint Controls */}
+                <div className="space-y-2 pt-1">
+                  <div className="flex items-center justify-between text-[11px] font-bold text-slate-300">
+                    <span>Batch Quantity Preset:</span>
+                    <span className="text-amber-400 font-mono text-[11px]">{batchCount} Keys Selected</span>
+                  </div>
 
-                  <button
-                    type="button"
-                    onClick={handleBatchMint}
-                    disabled={batchLoading}
-                    className="py-3 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 font-bold text-xs border border-amber-500/30 transition-all flex items-center gap-1.5 active:scale-95 disabled:opacity-50"
-                  >
-                    {batchLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Layers className="w-4 h-4" />}
-                    <span>Batch 5x</span>
-                  </button>
+                  {/* Quantity selector pills */}
+                  <div className="grid grid-cols-4 gap-1.5">
+                    {[5, 10, 20, 50].map((qty) => (
+                      <button
+                        key={qty}
+                        type="button"
+                        onClick={() => setBatchCount(qty)}
+                        className={`py-2 rounded-xl text-xs font-bold transition-all border ${
+                          batchCount === qty
+                            ? 'bg-amber-500/20 border-amber-400 text-amber-300 shadow-sm'
+                            : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-white hover:border-slate-700'
+                        }`}
+                      >
+                        {qty} Keys
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Mint Buttons: Single + Batch */}
+                  <div className="flex gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={handleGenerateKey}
+                      disabled={generating || batchLoading}
+                      className="flex-1 py-3 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-500 text-slate-950 font-black text-xs shadow-md transition-all flex items-center justify-center gap-2 active:scale-95 disabled:opacity-50"
+                    >
+                      {generating ? <RefreshCw className="w-4 h-4 animate-spin" /> : <PlusCircle className="w-4 h-4" />}
+                      <span>Mint 1 Key</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleBatchMint}
+                      disabled={batchLoading || generating}
+                      className="flex-1 py-3 rounded-xl bg-gradient-to-r from-amber-600 to-orange-500 hover:from-amber-500 text-slate-950 font-black text-xs shadow-md transition-all flex items-center justify-center gap-2 active:scale-95 disabled:opacity-50"
+                    >
+                      {batchLoading ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Layers className="w-4 h-4" />}
+                      <span>Batch Mint {batchCount} Keys</span>
+                    </button>
+                  </div>
                 </div>
 
-                {/* Generated Key Result */}
+                {/* Single Generated Key Result */}
                 {generatedKey && (
                   <div className="p-4 rounded-2xl bg-slate-950 border border-emerald-500/50 space-y-3 animate-in fade-in">
                     <div className="flex items-center justify-between text-xs">
@@ -1435,7 +1549,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
                     </div>
 
                     <div className="p-3 rounded-xl bg-slate-900 border border-slate-800 flex items-center justify-between gap-2">
-                      <span className="font-mono text-sm sm:text-base font-extrabold text-emerald-300 tracking-wider select-all">
+                      <span
+                        onClick={() => copyKeyText(generatedKey.key)}
+                        className="font-mono text-sm sm:text-base font-extrabold text-emerald-300 tracking-wider select-all cursor-pointer hover:text-emerald-200"
+                        title="Click to copy"
+                      >
                         {generatedKey.key}
                       </span>
                       <button
@@ -1443,8 +1561,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
                         onClick={() => copyKeyText(generatedKey.key)}
                         className="p-1.5 rounded-lg bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 transition-colors flex items-center gap-1 text-[11px] font-bold"
                       >
-                        {copiedKey === generatedKey.key ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                        <span>Copy</span>
+                        {copiedKey === generatedKey.key ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                        <span>{copiedKey === generatedKey.key ? 'Copied!' : 'Copy'}</span>
                       </button>
                     </div>
 
@@ -1456,6 +1574,119 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
                       <MessageSquare className="w-3.5 h-3.5" />
                       <span>{copiedMessage ? 'Copied Receipt!' : 'Copy WhatsApp Customer Receipt Slip'}</span>
                     </button>
+                  </div>
+                )}
+
+                {/* BATCH GENERATED KEYS RESULT: Lists all 5, 10, 20 etc. keys with individual and bulk copy */}
+                {batchGenerated && batchGenerated.length > 0 && (
+                  <div className="p-4 rounded-2xl bg-slate-950 border-2 border-amber-500/50 space-y-3 animate-in fade-in shadow-xl">
+                    {/* Master Action Header */}
+                    <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-800">
+                      <div className="flex items-center gap-2">
+                        <div className="w-8 h-8 rounded-xl bg-amber-500/20 text-amber-300 flex items-center justify-center font-bold text-xs border border-amber-500/40">
+                          <Layers className="w-4 h-4" />
+                        </div>
+                        <div>
+                          <h4 className="text-xs font-black text-amber-300">
+                            ✓ Batch of {batchGenerated.length} Keys Minted!
+                          </h4>
+                          <p className="text-[10px] text-slate-400 font-mono">
+                            {batchGenerated[0]?.planName} • All Unclaimed & Ready
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={handleCopyAllBatchKeys}
+                          className="px-2.5 py-1.5 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 text-[11px] font-bold flex items-center gap-1 transition-all active:scale-95"
+                          title="Copy all keys to clipboard"
+                        >
+                          {copiedAllBatch ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                          <span>{copiedAllBatch ? 'Copied All Keys!' : `Copy All (${batchGenerated.length})`}</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={handleCopyAllBatchReceipts}
+                          className="px-2.5 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 hover:text-emerald-300 border border-slate-700 text-[11px] font-bold flex items-center gap-1 transition-all"
+                          title="Copy all customer slips"
+                        >
+                          {copiedAllReceipts ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <MessageSquare className="w-3.5 h-3.5 text-emerald-400" />}
+                          <span>{copiedAllReceipts ? 'Copied Slips!' : 'All Slips'}</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setBatchGenerated([])}
+                          className="p-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 text-xs border border-slate-800 transition-all"
+                          title="Dismiss list"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Scrollable List of All Generated Keys */}
+                    <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
+                      {batchGenerated.map((lic, index) => (
+                        <div
+                          key={lic.key}
+                          className="p-2.5 rounded-xl bg-slate-900/90 border border-slate-800/80 hover:border-emerald-500/50 transition-all flex flex-col sm:flex-row sm:items-center justify-between gap-2"
+                        >
+                          <div className="flex items-center gap-2 min-w-0">
+                            <span className="w-6 h-6 rounded-lg bg-slate-800 text-slate-300 font-mono text-[11px] font-bold flex items-center justify-center shrink-0 border border-slate-700">
+                              #{index + 1}
+                            </span>
+                            <div className="min-w-0">
+                              <span
+                                onClick={() => copyKeyText(lic.key)}
+                                className="font-mono text-xs sm:text-sm font-extrabold text-emerald-300 tracking-wider hover:text-emerald-200 cursor-pointer select-all truncate block"
+                                title="Click to copy key"
+                              >
+                                {lic.key}
+                              </span>
+                              <div className="flex items-center gap-2 text-[10px] text-slate-400">
+                                <span>{lic.planName}</span>
+                                <span>•</span>
+                                <span className="text-emerald-400 font-medium">Unclaimed</span>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-1.5 shrink-0 self-end sm:self-center">
+                            <button
+                              type="button"
+                              onClick={() => copyKeyText(lic.key)}
+                              className="p-1.5 px-2.5 rounded-lg bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 transition-colors flex items-center gap-1 text-[11px] font-bold active:scale-95"
+                            >
+                              {copiedKey === lic.key ? (
+                                <>
+                                  <Check className="w-3.5 h-3.5 text-emerald-400" />
+                                  <span>Copied!</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Copy className="w-3.5 h-3.5" />
+                                  <span>Copy</span>
+                                </>
+                              )}
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => copyWhatsAppReceipt(lic)}
+                              className="p-1.5 px-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-emerald-300 transition-colors flex items-center gap-1 text-[11px] font-bold"
+                              title="Copy customer slip"
+                            >
+                              <MessageSquare className="w-3.5 h-3.5 text-emerald-400" />
+                              <span className="hidden sm:inline">Slip</span>
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 )}
               </div>
@@ -1594,9 +1825,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
                     className="bg-slate-950 border border-slate-800 rounded-xl px-3 py-1.5 text-xs text-white focus:outline-none"
                   >
                     <option value="all">All Statuses</option>
-                    <option value="unclaimed">Unclaimed ({unclaimedKeysCount})</option>
-                    <option value="active">Active Claimed</option>
-                    <option value="revoked">Revoked</option>
+                    <option value="all">All Statuses ({licenses.length})</option>
+                    <option value="unclaimed">Unclaimed / Unused Keys ({unclaimedKeysCount})</option>
+                    <option value="active">Active Claimed Keys</option>
+                    <option value="expired">Expired Keys</option>
+                    <option value="revoked">Revoked Keys</option>
                   </select>
 
                   <input
@@ -1652,51 +1885,105 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
                 <table className="w-full text-left text-xs border-collapse font-mono">
                   <thead className="sticky top-0 bg-slate-950 border-b border-slate-800 text-[10px] text-slate-400 uppercase">
                     <tr>
-                      <th className="py-2.5 px-3">License Key</th>
+                      <th className="py-2.5 px-3">License Key (Tap to Copy)</th>
                       <th className="py-2.5 px-3">Plan / Duration</th>
                       <th className="py-2.5 px-3">Status</th>
                       <th className="py-2.5 px-3">Claimed By</th>
-                      <th className="py-2.5 px-3 text-right">Action</th>
+                      <th className="py-2.5 px-3 text-right">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/60 text-[11px]">
-                    {filteredInventory.map((lic) => (
-                      <tr key={lic.key} className="hover:bg-slate-800/40">
-                        <td className="py-2 px-3 font-bold text-white select-all">{lic.key}</td>
-                        <td className="py-2 px-3 text-slate-300">{lic.planName}</td>
-                        <td className="py-2 px-3">
-                          <span
-                            className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                              lic.status === 'unclaimed'
-                                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                                : lic.status === 'active'
-                                ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
-                                : 'bg-slate-800 text-slate-400'
-                            }`}
-                          >
-                            {lic.status}
-                          </span>
-                        </td>
-                        <td className="py-2 px-3 text-slate-400 truncate max-w-[150px]">{lic.claimedEmail || '—'}</td>
-                        <td className="py-2 px-3 text-right">
-                          <div className="flex items-center justify-end gap-1.5">
-                            <button
-                              onClick={() => copyKeyText(lic.key)}
-                              className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-emerald-400 text-[10px] font-bold"
-                            >
-                              {copiedKey === lic.key ? 'Copied' : 'Copy'}
-                            </button>
-                            <button
-                              onClick={() => handleDeleteKey(lic.key)}
-                              title="Delete this key"
-                              className="p-1 rounded bg-rose-950/40 hover:bg-rose-900 border border-rose-800/40 text-rose-400 hover:text-rose-200 transition-colors"
-                            >
-                              <Trash2 className="w-3 h-3" />
-                            </button>
-                          </div>
+                    {filteredInventory.length === 0 ? (
+                      <tr>
+                        <td colSpan={5} className="py-8 text-center text-slate-500 font-mono">
+                          No license keys match this filter.
                         </td>
                       </tr>
-                    ))}
+                    ) : (
+                      filteredInventory.map((lic) => {
+                        const isLicExpired =
+                          lic.status === 'expired' ||
+                          Boolean(lic.expiresAt && new Date(lic.expiresAt).getTime() < Date.now());
+
+                        return (
+                          <tr
+                            key={lic.key}
+                            onClick={() => copyKeyText(lic.key)}
+                            className="hover:bg-slate-800/60 cursor-pointer transition-colors group active:bg-emerald-950/30"
+                            title="Tap to copy this license key"
+                          >
+                            <td className="py-2.5 px-3">
+                              <div className="flex items-center gap-2">
+                                <span className="font-bold text-white group-hover:text-emerald-300 select-all transition-colors">
+                                  {lic.key}
+                                </span>
+                                {copiedKey === lic.key ? (
+                                  <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[9px] font-bold animate-in fade-in">
+                                    ✓ Copied!
+                                  </span>
+                                ) : (
+                                  <span className="opacity-0 group-hover:opacity-100 text-[9px] text-slate-400 font-sans transition-opacity">
+                                    (Tap to copy)
+                                  </span>
+                                )}
+                              </div>
+                            </td>
+                            <td className="py-2.5 px-3 text-slate-300 font-sans font-medium">{lic.planName}</td>
+                            <td className="py-2.5 px-3">
+                              <span
+                                className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                  lic.status === 'unclaimed' && !lic.claimedBy
+                                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                                    : isLicExpired
+                                    ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                                    : 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
+                                }`}
+                              >
+                                {lic.status === 'unclaimed' && !lic.claimedBy
+                                  ? 'Unused'
+                                  : isLicExpired
+                                  ? 'Expired'
+                                  : 'Active'}
+                              </span>
+                            </td>
+                            <td className="py-2.5 px-3 text-slate-400 truncate max-w-[150px] font-sans">
+                              {lic.claimedEmail || '—'}
+                            </td>
+                            <td className="py-2.5 px-3 text-right">
+                              <div
+                                className="flex items-center justify-end gap-1.5"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <button
+                                  type="button"
+                                  onClick={() => copyKeyText(lic.key)}
+                                  className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-emerald-400 text-[10px] font-bold flex items-center gap-1 active:scale-95"
+                                >
+                                  {copiedKey === lic.key ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                                  <span>{copiedKey === lic.key ? 'Copied' : 'Copy'}</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => copyWhatsAppReceipt(lic)}
+                                  title="Copy WhatsApp Dispatch Slip"
+                                  className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors"
+                                >
+                                  <MessageSquare className="w-3 h-3 text-emerald-400" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteKey(lic.key)}
+                                  title="Delete this key"
+                                  className="p-1 rounded bg-rose-950/40 hover:bg-rose-900 border border-rose-800/40 text-rose-400 hover:text-rose-200 transition-colors"
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
                   </tbody>
                 </table>
               </div>
