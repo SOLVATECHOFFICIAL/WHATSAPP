@@ -108,15 +108,20 @@ async function startServer() {
       const command = parts[0];
       const args = parts.slice(1);
 
+      const status = whatsappManager.getStatus();
       const result = await commandHandler.handle({
         command,
         args,
         fullText: cleanText,
         senderJid: 'web-simulator@s.whatsapp.net',
-        senderNumber: '2348000000000',
+        senderNumber: status.user?.phone?.replace(/\D/g, '') || '2349049979183',
         isGroup: false,
         pushName: 'Solvatech Tester',
         isOwner: isOwner ?? true,
+        linkedSince: whatsappManager.getConnectedAt(),
+        linkedPhone: status.user?.phone || null,
+        licenseExpiresAt: req.body.licenseExpiresAt || null,
+        licensePlan: req.body.licensePlan || null,
       });
 
       res.json({ success: true, result });

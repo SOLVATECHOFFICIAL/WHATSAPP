@@ -1,4 +1,3 @@
-import { GoogleGenAI } from '@google/genai';
 import { db } from '../services/firebase.ts';
 import { collection, doc, setDoc, getDoc, getDocs, updateDoc } from 'firebase/firestore';
 
@@ -12,6 +11,10 @@ export interface CommandContext {
   groupJid?: string;
   pushName?: string;
   isOwner: boolean;
+  linkedSince?: number | null;
+  linkedPhone?: string | null;
+  licenseExpiresAt?: string | null;
+  licensePlan?: string | null;
 }
 
 export interface CommandResult {
@@ -25,66 +28,72 @@ export const SOLVATECH_MENU = `╭━━━〔 ⚡ *SOLVATECH BOT COMMAND DIRECT
 ┃ 🔒 *Bot Access Mode:* _100% Private (Owner-Only)_
 ┃ 🛡️ *Deleted-Message Recovery:* _Auto-Forwarded to Personal DM_
 ┃ 👁️ *View-Once Recovery:* _Personal DM (Owner Protected)_
+┃ 🚄 *Production Domain:* _solvatech.up.railway.app_
 ┃ ⚙️ *Group Cloud Sync:* _Active (Firebase Cloud)_
 
 ╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯
 
-╭──〔 ⚡ *CORE UTILITY* 〕──╮
+╭──〔 ⚡ *BATCH 1: CORE UTILITY* 〕──╮
 │
-│ • *.ping* — _Instant network latency and server response time_
-│ • *.ai* <question> — _AI assistant questions, explanations & writing_
-│ • *.uptime* — _Show continuous bot uptime & server telemetry_
+│ • *.ping* — _Instant network latency & server speed_
+│ • *.uptime* — _Show how long your account has been linked_
 │ • *.owner* — _Official SOLVATECH BOT developer contact_
-│ • *.expire* — _Real-time license expiry countdown & key details_
-│ • *.share* — _Share SOLVATECH BOT features with friends/groups_
-│ • *.menu* — _Display this command directory_
-│ • *.link* — _Retrieve active group invite link_
-│ • *.groupinfo* — _Complete group metadata, creator, and admin roster_
-│ • *.profile* [@user] — _View WhatsApp bio, account details & group role_
-│ • *.signature* — _Official verified developer signature & credentials_
+│ • *.expire* — _Real-time license validity & countdown_
+│ • *.menu* / *.help* — _Display this command directory_
 │
 ╰────────────────────────────────
 
-╭──〔 📸 *MEDIA & MESSAGE RECOVERY* 〕──╮
+╭──〔 💳 *BATCH 2: BILLING & ACCESS* 〕──╮
 │
+│ • *.plans / .buy* — _View license packages & OPay pricing_
+│ • *.share* — _Share SOLVATECH BOT features with friends_
+│ • *.link / .channel* — _Official updates channel & community group_
+│ • *.groupinfo* — _Complete group metadata & protection_
+│
+╰────────────────────────────────
+
+╭──〔 📸 *BATCH 3 & 4: MEDIA & RECOVERY* 〕──╮
+│
+│ • *.profile [@user]* — _View user warning counts & group role_
+│ • *.signature* — _Official verified developer credentials_
 │ • *.sticker* — _Convert photo to sticker or video to animated sticker_
 │ • *.antisticker* — _Convert static sticker to image or animated to video_
-│ • *.read* — _Extract verbatim text from image via High-Precision OCR_
+│ • *.read* — _Extract verbatim text from image via OCR_
 │ • *.open / .vv* — _Reveal view-once media privately to your personal DM_
-│ • *.send* — _Reply to any WhatsApp Status to extract and send into chat_
-│ • *.gcstatus* [caption] — _Upload replied or attached media to 24h WhatsApp Status for current group_
-│ • *.gcstatus everyone* [caption] — _Upload to 24h WhatsApp Status for all groups you belong to_
+│ • *.send* — _Extract and send target WhatsApp status_
+│ • *.gcstatus [caption]* — _Upload to group 24h WhatsApp status_
+│ • *.gcstatus everyone* — _Upload to all groups 24h WhatsApp status_
 │
 ╰──────────────────────────────────────
 
-╭──〔 🛡️ *GROUP SECURITY & ADMIN* 〕──╮
+╭──〔 🛡️ *BATCH 5, 6 & 7: GROUP SECURITY* 〕──╮
 │
 │ • *.pin* — _Pin replied message in group (7 days)_
-│ • *.del* [count] — _Delete last N messages (Admin: all; Member: own)_
-│ • *.tagall* [msg] — _Mention all group members_
-│ • *.admin* / *.admins* — _Mention all group administrators_
-│ • *.kick* @user — _Remove participant from group_
-│ • *.add* <phone> — _Add new member to group with country code_
-│ • *.promote* @user — _Promote member to group admin_
-│ • *.demote* @user — _Demote group admin to member_
+│ • *.del [count]* — _Delete last N messages_
+│ • *.tagall [msg]* — _Mention all group members_
+│ • *.admin / .admins* — _Mention all group administrators_
+│ • *.kick @user* — _Remove participant from group_
+│ • *.add <phone>* — _Add new member to group_
+│ • *.promote @user* — _Promote member to group admin_
+│ • *.demote @user* — _Demote group admin to member_
 │ • *.lock* — _Restrict group messaging to admins only_
 │ • *.unlock* — _Allow all members to send messages_
-│ • *.antilink on/off* — _Auto-remove external links with shared warnings_
+│ • *.antilink on/off* — _Auto-remove external links_
 │ • *.antibot on/off* — _Auto-remove rogue automated bot accounts_
 │ • *.antistatus on/off* — _Auto-remove WhatsApp status group mentions_
 │ • *.autowelcome on/off* — _Auto-welcome new participants upon joining_
 │ • *.autogoodbye on/off* — _Auto-goodbye departing members upon leaving_
 │ • *.anti* — _Inspect group protections & warning threshold_
 │ • *.warn @user* — _Issue official warning to a member_
-│ • *.warns* — _Inspect member warnings & group warning limit_
+│ • *.warns* — _Inspect member warnings & group limit_
 │ • *.clearwarns @user* — _Clear warnings for a specific member_
 │ • *.resetwarns* — _Reset all group member warnings to zero_
 │
 ╰─────────────────────────────────────
 
-╭──〔 👑 *CONTROLLER ONLY* 〕──╮
+╭──〔 👑 *BATCH 8: CONTROLLER ONLY* 〕──╮
 │
-│ • *.spam* <message> — _Send controlled repeated broadcast_
+│ • *.spam <message>* — _Send controlled repeated broadcast_
 │ • *.stop* — _Terminate active repeated operation immediately_
 │
 ╰──────────────────────────────`;
@@ -94,17 +103,6 @@ class CommandHandler {
   private spamActive = false;
   private warnings: Record<string, number> = {};
   private securitySettings: Record<string, { antilink: boolean; antibot: boolean; antistatus: boolean; autowelcome: boolean; autogoodbye: boolean }> = {};
-  private genAI: GoogleGenAI | null = null;
-
-  constructor() {
-    try {
-      if (process.env.GEMINI_API_KEY) {
-        this.genAI = new GoogleGenAI();
-      }
-    } catch (e) {
-      console.warn('Google GenAI initialization deferred:', e);
-    }
-  }
 
   // Sync settings or warnings to Firebase
   public async syncToFirebase(collectionName: string, id: string, data: any) {
@@ -120,56 +118,115 @@ class CommandHandler {
     const cmd = ctx.command.toLowerCase();
     const startTime = Date.now();
 
-    // 1. Core Utility Commands
+    // 1. Core Utility Commands (Batch 1)
     if (cmd === 'menu' || cmd === 'help') {
       return { reply: SOLVATECH_MENU };
     }
 
     if (cmd === 'ping') {
-      const latency = Date.now() - startTime + Math.floor(Math.random() * 25 + 15);
+      const latency = Date.now() - startTime + Math.floor(Math.random() * 20 + 15);
       return {
         reply: `⚡ *PONG!*
 Speed: *${latency}ms*
-Server: *Google AI Studio / SOLVATECH Engine*
-Status: *Active & Operational*
-Firebase Cloud: *Connected* 🟢`,
+Status: *Active & Operational* 🟢
+Engine: *SOLVATECH Engine*
+Railway Node: *Ready* 🚄
+Domain: *solvatech.up.railway.app*`,
       };
     }
 
     if (cmd === 'uptime') {
-      const totalSec = Math.floor((Date.now() - this.startTime) / 1000);
-      const hours = Math.floor(totalSec / 3600);
-      const mins = Math.floor((totalSec % 3600) / 60);
-      const secs = totalSec % 60;
+      if (ctx.linkedSince) {
+        const diffMs = Math.max(0, Date.now() - ctx.linkedSince);
+        const totalSec = Math.floor(diffMs / 1000);
+        const days = Math.floor(totalSec / 86400);
+        const hours = Math.floor((totalSec % 86400) / 3600);
+        const mins = Math.floor((totalSec % 3600) / 60);
+        const secs = totalSec % 60;
+        const totalMins = Math.floor(totalSec / 60);
+
+        const durationParts: string[] = [];
+        if (days > 0) durationParts.push(`${days} day${days > 1 ? 's' : ''}`);
+        if (hours > 0 || days > 0) durationParts.push(`${hours} hour${hours > 1 ? 's' : ''}`);
+        durationParts.push(`${mins} min${mins > 1 ? 's' : ''}`);
+        durationParts.push(`${secs}s`);
+
+        return {
+          reply: `⏱️ *SOLVATECH ACCOUNT LINKED TIME*
+
+📱 Linked Account: *${ctx.linkedPhone || `+${ctx.senderNumber}`}*
+⏳ Linked Duration: *${durationParts.join(' ')}* (${totalMins} minutes active)
+🟢 Status: *Actively Connected via Multi-Device*
+🛡️ Protections: *Anti-Delete & Recovery Live*
+🚄 Server: *Railway (solvatech.up.railway.app)*`,
+        };
+      }
+
       return {
-        reply: `⏱️ *SOLVATECH BOT UPTIME*
-Uptime: *${hours}h ${mins}m ${secs}s*
-Node Runtime: *${process.version}*
-Platform: *Linux (Cloud Container)*
-Database: *Firebase (solvatechbot)*
-Memory: *${Math.round(process.memoryUsage().rss / 1024 / 1024)} MB*`,
+        reply: `⏱️ *SOLVATECH ACCOUNT LINKED TIME*
+
+📱 Linked Account: *No WhatsApp account actively linked* ⚪
+⏳ Linked Duration: *0 minutes*
+ℹ️ Use the Web Pairing Code on *solvatech.up.railway.app* to link your WhatsApp number.`,
       };
     }
 
     if (cmd === 'owner') {
       return {
         reply: `👑 *SOLVATECH BOT OWNER & DEVELOPER*
-Developer: *Solomon Awoyinfa*
-Bot: *SOLVATECH Multi-Device Engine*
-Contact: *awoyinfasolomon1@gmail.com*
-Status: *Official Certified Developer*
-Protection: *100% Private (Owner-Only Access)*`,
+
+👤 Developer: *Solomon Oladimeji*
+📧 Contact: *awoyinfasolomon1@gmail.com*
+💳 OPay Account: *9049979183* (Solomon Oladimeji)
+💬 Official WhatsApp: *+234 904 997 9183*
+🔒 Bot Mode: *100% Private (Owner Protected)*
+🚄 Production: *https://solvatech.up.railway.app*
+🛡️ Status: *Official Certified Developer*`,
       };
     }
 
     if (cmd === 'expire') {
+      if (ctx.isOwner) {
+        return {
+          reply: `📜 *SOLVATECH LICENSE DETAILS*
+
+👑 Clearance: *Bot Master / Owner*
+🔑 License Key: *SOLVA-OWNER-UNLIMITED-MASTER*
+⏳ Duration: *👑 Unlimited Lifetime Master Access*
+🟢 Status: *ACTIVE FOREVER*
+🚄 Deployment: *solvatech.up.railway.app*
+💳 Support: *wa.me/2349049979183*`,
+        };
+      }
+
+      let remainingText = 'Active Standard Plan';
+      if (ctx.licenseExpiresAt) {
+        const expDate = new Date(ctx.licenseExpiresAt);
+        const now = new Date();
+        const diffMs = expDate.getTime() - now.getTime();
+        if (diffMs <= 0) {
+          return {
+            reply: `⚠️ *SOLVATECH LICENSE EXPIRED*
+
+Your license validity has ended!
+To restore full bot execution:
+Type *.plans* or *.buy* to select a duration and pay to OPay *9049979183*.`,
+          };
+        }
+        const days = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+        const hours = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+        const mins = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+        remainingText = `${days} Days, ${hours} Hours, ${mins} Minutes`;
+      }
+
       return {
         reply: `📜 *SOLVATECH LICENSE DETAILS*
-License Key: *${ctx.isOwner ? 'SOLVA-OWNER-UNLIMITED-MASTER' : 'SOLVA-PRO-USER-KEY'}*
-Status: *ACTIVE* 🟢
-Duration: *${ctx.isOwner ? '👑 Unlimited Lifetime (Master)' : 'Standard User License'}*
-Firebase Project: *solvatechbot.firebaseapp.com*
-To renew or upgrade, type *.plans* or *.buy*`,
+
+🔑 Plan: *${ctx.licensePlan || 'Active User License'}*
+⏳ Time Remaining: *${remainingText}*
+🟢 Status: *ACTIVE*
+💳 Renew / Upgrade: Type *.plans* or *.buy*
+📞 Help / Verification: *wa.me/2349049979183*`,
       };
     }
 
@@ -200,42 +257,16 @@ To renew or upgrade, type *.plans* or *.buy*`,
     if (cmd === 'share') {
       return {
         reply: `🚀 *SHARE SOLVATECH BOT*
-Empower your WhatsApp groups with next-generation automated security, Anti-Delete recovery, View-Once bypass, and Gemini AI.
+Empower your WhatsApp account and groups with next-generation automated security, Anti-Delete recovery, View-Once bypass, and high-speed multi-device automation.
 
 ⚡ *Features:*
 • Anti-Delete & View-Once personal DM forwarding
 • Group Anti-Link, Anti-Bot & Warning enforcement
-• Gemini AI Assistant & OCR text extraction
-• 24/7 Cloud sync via Firebase
+• Media conversion, status extraction & OCR
+• 24/7 Cloud sync & multi-device companion
 
-👉 *Contact owner to deploy to your WhatsApp account!*`,
+👉 *Visit https://solvatech.up.railway.app to connect your WhatsApp!*`,
       };
-    }
-
-    if (cmd === 'ai') {
-      const query = ctx.args.join(' ');
-      if (!query) {
-        return { reply: `🤖 *SOLVATECH AI*\nPlease ask a question. Example:\n*.ai Explain quantum computing in simple words*` };
-      }
-
-      try {
-        if (!this.genAI) {
-          this.genAI = new GoogleGenAI();
-        }
-        const resp = await this.genAI.models.generateContent({
-          model: 'gemini-3.8-flash',
-          contents: query,
-        });
-
-        const text = resp.text || 'No response generated from Gemini AI.';
-        return {
-          reply: `🤖 *SOLVATECH AI (Powered by Gemini)*\n\n${text}`,
-        };
-      } catch (err: any) {
-        return {
-          reply: `⚠️ *AI Service Note:* ${err.message || 'Unable to generate response. Please check API Key.'}`,
-        };
-      }
     }
 
     if (cmd === 'link' || cmd === 'channel' || cmd === 'community' || cmd === 'updates') {

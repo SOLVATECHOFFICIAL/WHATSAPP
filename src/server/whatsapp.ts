@@ -32,6 +32,7 @@ export interface WhatsAppStatus {
   qrCodeUrl?: string;
   targetPhone?: string;
   uptime?: number;
+  connectedAt?: number;
   lastError?: string;
   latestHandshakeTime?: string;
   user?: {
@@ -53,6 +54,7 @@ class WhatsAppManager {
   };
   private pairingCodeTimer: NodeJS.Timeout | null = null;
   private isConnecting = false;
+  private connectedAt: number | null = null;
 
   constructor() {
     this.addNotification({
@@ -71,8 +73,15 @@ class WhatsAppManager {
       }
       this.currentStatus.user = undefined;
       this.currentStatus.pairingStage = 'idle';
+      this.connectedAt = null;
+      this.currentStatus.connectedAt = undefined;
     }
+    this.currentStatus.connectedAt = this.connectedAt || undefined;
     return this.currentStatus;
+  }
+
+  public getConnectedAt(): number | null {
+    return this.connectedAt;
   }
 
   public getNotifications(): WhatsAppNotification[] {
@@ -221,8 +230,10 @@ class WhatsAppManager {
           }, 3000);
         }
       } else if (connection === 'open') {
+        this.connectedAt = Date.now();
         this.currentStatus.state = 'connected';
         this.currentStatus.isConnected = true;
+        this.currentStatus.connectedAt = this.connectedAt;
         this.currentStatus.pairingStage = 'connected';
         this.currentStatus.pairingCode = undefined;
         this.currentStatus.qrCodeUrl = undefined;
@@ -352,6 +363,8 @@ class WhatsAppManager {
               groupJid: isGroup ? remoteJid : undefined,
               pushName: msg.pushName || undefined,
               isOwner,
+              linkedSince: this.connectedAt,
+              linkedPhone: this.currentStatus.user?.phone,
             });
 
             try {
@@ -607,6 +620,7 @@ class WhatsAppManager {
       console.error('Error clearing auth dir:', e);
     }
 
+    this.connectedAt = null;
     this.currentStatus = {
       state: 'disconnected',
       isConnected: false,
@@ -615,6 +629,7 @@ class WhatsAppManager {
       pairingCode: undefined,
       qrCodeUrl: undefined,
       targetPhone: undefined,
+      connectedAt: undefined,
     };
 
     this.addNotification({

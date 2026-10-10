@@ -122,7 +122,8 @@ export default function App() {
 
   const isStudioEnv =
     typeof window !== 'undefined' &&
-    (window.location.hostname.includes('europe-west2.run.app') ||
+    (window.location.hostname.includes('.run.app') ||
+      window.location.hostname.includes('railway.app') ||
       window.location.hostname === 'localhost' ||
       window.location.hostname.includes('127.0.0.1'));
 
@@ -544,10 +545,11 @@ export default function App() {
   const BOT_COMMANDS = [
     { cmd: '.menu', desc: 'Display all bot commands & active bot info' },
     { cmd: '.ping', desc: 'Check network speed and response latency' },
-    { cmd: '.uptime', desc: 'Bot continuous runtime and server status' },
-    { cmd: '.signature', desc: 'Official verified developer signature & credentials' },
+    { cmd: '.uptime', desc: 'Show how long your account has been linked' },
+    { cmd: '.owner', desc: 'Developer & Solomon contact details' },
     { cmd: '.expire', desc: 'Check your license expiry & remaining days/minutes' },
-    { cmd: '.ai <prompt>', desc: 'Ask AI question, writing or explanations' },
+    { cmd: '.plans / .buy', desc: 'Official license duration plans & OPay pricing' },
+    { cmd: '.signature', desc: 'Official verified developer signature & credentials' },
     { cmd: '.sticker', desc: 'Convert image or video to WhatsApp sticker' },
     { cmd: '.antisticker', desc: 'Convert sticker back into photo or video' },
     { cmd: '.read', desc: 'Extract text from photo via OCR' },
@@ -563,7 +565,6 @@ export default function App() {
     { cmd: '.antilink on/off', desc: 'Automatically remove external group links' },
     { cmd: '.antibot on/off', desc: 'Auto-kick unauthorized bot accounts' },
     { cmd: '.warn @user', desc: 'Issue warning to group participant' },
-    { cmd: '.owner', desc: 'Developer & Solomon contact details' },
   ];
 
   const filteredCommands = BOT_COMMANDS.filter(

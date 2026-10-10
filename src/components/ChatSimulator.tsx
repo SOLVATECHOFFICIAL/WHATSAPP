@@ -205,7 +205,7 @@ export const ChatSimulator: React.FC<ChatSimulatorProps> = ({
         >
           <input
             type="text"
-            placeholder="Type a command (e.g. .menu, .ping, .ai What is quantum computing?, .owner)..."
+            placeholder="Type a command (e.g. .menu, .ping, .uptime, .owner, .expire)..."
             value={inputText}
             onChange={(e) => setInputText(e.target.value)}
             className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
