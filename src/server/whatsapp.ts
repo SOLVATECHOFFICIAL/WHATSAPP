@@ -131,17 +131,19 @@ class WhatsAppManager {
       saveCreds();
       // Detect companion handshake received from WhatsApp
       if (
-        this.currentStatus.pairingStage === 'code_generated' &&
-        (creds.me?.id || creds.account || (creds as any).pairingCode === undefined)
+        (this.currentStatus.pairingStage === 'code_generated' || this.currentStatus.state === 'awaiting_pairing') &&
+        (creds.me?.id || creds.account || (creds as any).pairingCode === undefined || (creds as any).signalIdentities)
       ) {
-        this.currentStatus.pairingStage = 'pairing_handshake';
-        this.currentStatus.state = 'pairing_handshake';
-        this.currentStatus.latestHandshakeTime = new Date().toLocaleTimeString();
-        this.addNotification({
-          type: 'pairing',
-          title: 'WhatsApp Handshake Confirmed',
-          body: 'Handshake received from WhatsApp phone! Companion link accepted.',
-        });
+        if (this.currentStatus.pairingStage !== 'pairing_handshake' && this.currentStatus.pairingStage !== 'connected') {
+          this.currentStatus.pairingStage = 'pairing_handshake';
+          this.currentStatus.state = 'pairing_handshake';
+          this.currentStatus.latestHandshakeTime = new Date().toLocaleTimeString();
+          this.addNotification({
+            type: 'pairing',
+            title: 'WhatsApp Handshake Confirmed',
+            body: 'Handshake received from WhatsApp phone! Companion link accepted.',
+          });
+        }
       }
     });
 
@@ -149,15 +151,20 @@ class WhatsAppManager {
       const { connection, lastDisconnect, qr } = update;
 
       // Detect WhatsApp handshake stage
-      if (update.isNewLogin || (update as any).isOnline) {
-        this.currentStatus.pairingStage = 'pairing_handshake';
-        this.currentStatus.state = 'pairing_handshake';
-        this.currentStatus.latestHandshakeTime = new Date().toLocaleTimeString();
-        this.addNotification({
-          type: 'pairing',
-          title: 'WhatsApp Handshake Confirmed',
-          body: 'Handshake received from WhatsApp phone! Companion link accepted.',
-        });
+      if (
+        (update.isNewLogin || (update as any).isOnline || update.receivedPendingNotifications) &&
+        this.currentStatus.pairingStage !== 'connected'
+      ) {
+        if (this.currentStatus.pairingStage !== 'pairing_handshake') {
+          this.currentStatus.pairingStage = 'pairing_handshake';
+          this.currentStatus.state = 'pairing_handshake';
+          this.currentStatus.latestHandshakeTime = new Date().toLocaleTimeString();
+          this.addNotification({
+            type: 'pairing',
+            title: 'WhatsApp Handshake Confirmed',
+            body: 'Handshake received from WhatsApp phone! Companion link accepted.',
+          });
+        }
       }
 
       if (qr) {
@@ -423,39 +430,68 @@ class WhatsAppManager {
     // Re-initialize fresh socket
     const sock = await this.initSocket();
 
-    // Wait for socket to be ready to accept pairing code (QR or open signal)
+    // Wait for socket to be ready to accept pairing code (QR or open signal or readiness)
     const code = await new Promise<string>((resolve, reject) => {
       let isDone = false;
 
-      const timeout = setTimeout(() => {
+      const finish = (result: string) => {
         if (!isDone) {
           isDone = true;
-          reject(new Error('Timeout waiting for WhatsApp server handshake. Please try again.'));
+          clearTimeout(timeout);
+          resolve(result);
         }
-      }, 15000);
+      };
+
+      const fail = (err: any) => {
+        if (!isDone) {
+          isDone = true;
+          clearTimeout(timeout);
+          reject(err);
+        }
+      };
+
+      const timeout = setTimeout(async () => {
+        if (!isDone) {
+          try {
+            const rawCode = await sock.requestPairingCode(cleanPhone);
+            finish(rawCode);
+          } catch {
+            fail(new Error('Timeout waiting for WhatsApp server handshake. Please try again.'));
+          }
+        }
+      }, 20000);
 
       const handleUpdate = async (update: any) => {
         if (update.qr && !isDone) {
-          isDone = true;
-          clearTimeout(timeout);
           try {
             const rawCode = await sock.requestPairingCode(cleanPhone);
-            resolve(rawCode);
+            finish(rawCode);
           } catch (err) {
-            reject(err);
+            fail(err);
           }
         } else if (update.connection === 'open' && !isDone) {
-          isDone = true;
-          clearTimeout(timeout);
-          resolve('ALREADY_PAIRED');
+          finish('ALREADY_PAIRED');
         } else if (update.connection === 'close' && !isDone) {
-          isDone = true;
-          clearTimeout(timeout);
-          reject(update.lastDisconnect?.error || new Error('Connection closed by WhatsApp'));
+          const reason = (update.lastDisconnect?.error as any)?.data?.reason;
+          if (reason !== 'restart') {
+            fail(update.lastDisconnect?.error || new Error('Connection closed by WhatsApp'));
+          }
         }
       };
 
       sock.ev.on('connection.update', handleUpdate);
+
+      // Also trigger requestPairingCode after 2 seconds in case connection is open without QR
+      setTimeout(async () => {
+        if (!isDone) {
+          try {
+            const rawCode = await sock.requestPairingCode(cleanPhone);
+            finish(rawCode);
+          } catch {
+            // Socket still establishing connection, will be handled by handleUpdate or timeout
+          }
+        }
+      }, 2000);
     });
 
     const formattedCode = code === 'ALREADY_PAIRED'
@@ -463,6 +499,7 @@ class WhatsAppManager {
       : code?.match(/.{1,4}/g)?.join('-') || code;
 
     this.currentStatus.pairingCode = formattedCode;
+    this.currentStatus.pairingStage = 'code_generated';
     this.currentStatus.state = 'awaiting_pairing';
 
     this.addNotification({

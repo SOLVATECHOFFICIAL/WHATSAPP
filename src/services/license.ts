@@ -546,3 +546,154 @@ export function calculateRemainingTime(expiresAt?: string | null, isUnlimited?: 
     formatted,
   };
 }
+
+// 30-MINUTE TEST SYSTEM — LIFETIME LOCK PER GMAIL ACCOUNT
+export async function checkUserTrialStatus(
+  userUid: string,
+  userEmail?: string | null
+): Promise<boolean> {
+  if (!userUid) return false;
+
+  // 1. Check local storage
+  const localUid = localStorage.getItem(`solvatech_trial_${userUid}`);
+  if (localUid === 'true') return true;
+
+  if (userEmail) {
+    const localEmail = localStorage.getItem(`solvatech_trial_${userEmail.toLowerCase()}`);
+    if (localEmail === 'true') return true;
+  }
+
+  // 2. Check Firestore user document
+  try {
+    const userRef = doc(db, 'users', userUid);
+    const snap = await getDoc(userRef);
+    if (snap.exists() && snap.data()?.hasUsedTrial) {
+      localStorage.setItem(`solvatech_trial_${userUid}`, 'true');
+      if (userEmail) {
+        localStorage.setItem(`solvatech_trial_${userEmail.toLowerCase()}`, 'true');
+      }
+      return true;
+    }
+  } catch (e) {
+    console.warn('Trial status check warning:', e);
+  }
+
+  // 3. Check claimed_trials collection indexed by email
+  if (userEmail) {
+    const cleanEmailKey = userEmail.toLowerCase().replace(/[^a-z0-9]/g, '_');
+    try {
+      const trialRef = doc(db, 'claimed_trials', cleanEmailKey);
+      const snap = await getDoc(trialRef);
+      if (snap.exists()) {
+        localStorage.setItem(`solvatech_trial_${userUid}`, 'true');
+        localStorage.setItem(`solvatech_trial_${userEmail.toLowerCase()}`, 'true');
+        return true;
+      }
+    } catch (e) {
+      console.warn('Claimed trial check warning:', e);
+    }
+  }
+
+  return false;
+}
+
+export async function claim30MinuteTrial(
+  userUid: string,
+  userEmail: string
+): Promise<{ success: boolean; message: string; expiresAt?: string }> {
+  if (!userUid || !userEmail) {
+    return {
+      success: false,
+      message: 'You must be signed in with your Google account to activate the 30-minute test.',
+    };
+  }
+
+  const alreadyClaimed = await checkUserTrialStatus(userUid, userEmail);
+  if (alreadyClaimed) {
+    return {
+      success: false,
+      message: 'The 30-minute test has already been used on this Google account. It can only be claimed once in a lifetime.',
+    };
+  }
+
+  // Fetch current remaining time to stack 30 minutes on top
+  let currentExpiryTime = 0;
+  try {
+    const userRef = doc(db, 'users', userUid);
+    const userSnap = await getDoc(userRef);
+    if (userSnap.exists()) {
+      const userData = userSnap.data();
+      if (userData.licenseExpiresAt) {
+        const parsed = new Date(userData.licenseExpiresAt).getTime();
+        if (parsed > Date.now()) {
+          currentExpiryTime = parsed;
+        }
+      }
+    }
+  } catch {
+    const localUser = JSON.parse(localStorage.getItem(`solvatech_user_${userUid}`) || '{}');
+    if (localUser.licenseExpiresAt) {
+      const parsed = new Date(localUser.licenseExpiresAt).getTime();
+      if (parsed > Date.now()) {
+        currentExpiryTime = parsed;
+      }
+    }
+  }
+
+  const now = Date.now();
+  const currentRemainingMs = currentExpiryTime > now ? currentExpiryTime - now : 0;
+  const TRIAL_DURATION_MS = 30 * 60 * 1000; // 30 Minutes
+  const newExpiryMs = now + currentRemainingMs + TRIAL_DURATION_MS;
+  const newExpiresAt = new Date(newExpiryMs).toISOString();
+  const cleanEmailKey = userEmail.toLowerCase().replace(/[^a-z0-9]/g, '_');
+
+  // Persist to Firestore: users collection and claimed_trials collection
+  try {
+    const userRef = doc(db, 'users', userUid);
+    await setDoc(
+      userRef,
+      {
+        licenseExpiresAt: newExpiresAt,
+        licensePlan: '⚡ 30-Minute Test (Active)',
+        hasUsedTrial: true,
+        trialClaimedAt: new Date().toISOString(),
+        trialEmail: userEmail,
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true }
+    );
+
+    const trialRef = doc(db, 'claimed_trials', cleanEmailKey);
+    await setDoc(trialRef, {
+      userUid,
+      userEmail,
+      claimedAt: new Date().toISOString(),
+      expiresAt: newExpiresAt,
+    });
+  } catch (err) {
+    console.error('Error saving 30-minute trial to Firestore:', err);
+  }
+
+  // Lock locally forever
+  localStorage.setItem(`solvatech_trial_${userUid}`, 'true');
+  localStorage.setItem(`solvatech_trial_${userEmail.toLowerCase()}`, 'true');
+
+  const cachedUser = JSON.parse(localStorage.getItem(`solvatech_user_${userUid}`) || '{}');
+  localStorage.setItem(
+    `solvatech_user_${userUid}`,
+    JSON.stringify({
+      ...cachedUser,
+      licenseExpiresAt: newExpiresAt,
+      licensePlan: '⚡ 30-Minute Test (Active)',
+      hasUsedTrial: true,
+      trialClaimedAt: new Date().toISOString(),
+    })
+  );
+
+  return {
+    success: true,
+    message: '🎉 30-minute test activated! Your countdown has begun.',
+    expiresAt: newExpiresAt,
+  };
+}
+

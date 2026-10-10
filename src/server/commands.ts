@@ -187,13 +187,12 @@ To renew or upgrade, type *.plans* or *.buy*`,
 • 6 Months — *₦24,000*
 • 12 Months — *₦48,000*
 
-💳 *PAYMENT DETAILS*
-*OPay*: *9049979183*
-*Name*: *SOLOMON OLADIMEJI*
+💳 *OFFICIAL OPAY PAYMENT DETAILS*
+🏦 *Bank*: *OPay (PayCom / Microfinance Bank)*
+🔢 *Account Number*: *9049979183*
+👤 *Account Name*: *SOLOMON OLADIMEJI*
 
-📝 *Note*: After payment, send your payment screenshot here in this chat. An admin will verify your payment and send your license key here on WhatsApp.
-
-To get key manually use *9049979183* to get key.`,
+📝 *Payment Note*: Transfer from any Nigerian bank to this OPay account and send payment screenshot here or to WhatsApp wa.me/2349049979183 for instant key verification!`,
       };
     }
 

@@ -40,6 +40,11 @@ interface AdminDashboardProps {
 }
 
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail, onClose }) => {
+  const isOwner =
+    currentUserEmail?.toLowerCase() === OWNER_EMAIL.toLowerCase() ||
+    currentUserEmail?.toLowerCase() === 'solomonoladimeji9049@gmail.com' ||
+    currentUserEmail?.toLowerCase() === 'taletroveanimation@gmail.com';
+
   const [selectedPlan, setSelectedPlan] = useState<LicensePlan>(LICENSE_PLANS[0]); // default 1 Day
   const [licenses, setLicenses] = useState<LicenseRecord[]>([]);
   const [users, setUsers] = useState<any[]>([]);
@@ -58,8 +63,32 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
   const [grantFeedback, setGrantFeedback] = useState<string | null>(null);
 
   useEffect(() => {
-    loadData();
-  }, []);
+    if (isOwner) {
+      loadData();
+    }
+  }, [isOwner]);
+
+  if (!isOwner) {
+    return (
+      <div className="fixed inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4">
+        <div className="bg-slate-900 border border-rose-500/40 rounded-3xl p-6 text-center max-w-sm shadow-2xl">
+          <div className="w-12 h-12 rounded-2xl bg-rose-500/20 text-rose-400 flex items-center justify-center mx-auto mb-3">
+            <Lock className="w-6 h-6 text-rose-400" />
+          </div>
+          <h3 className="text-white font-bold text-base">Owner Access Required</h3>
+          <p className="text-xs text-slate-400 mt-2">
+            The Admin Management Hub is restricted to verified bot developers. Unauthenticated or standard accounts cannot access this panel.
+          </p>
+          <button
+            onClick={onClose}
+            className="mt-5 w-full py-2.5 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-bold transition-colors"
+          >
+            Close
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   const loadData = async () => {
     setLoading(true);

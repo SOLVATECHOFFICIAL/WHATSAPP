@@ -24,6 +24,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onSuccess, onClose
   if (!isOpen) return null;
 
   const currentHost = typeof window !== 'undefined' ? window.location.hostname : '';
+  const isStudioEnv = typeof window !== 'undefined' && (currentHost.includes('europe-west2.run.app') || currentHost === 'localhost' || currentHost.includes('127.0.0.1'));
 
   const handleGoogleSignIn = async () => {
     setLoading(true);
@@ -37,7 +38,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onSuccess, onClose
       console.warn('Firebase Google Auth:', err);
       if (err.code === 'auth/unauthorized-domain' || err.message?.includes('unauthorized-domain')) {
         setDomainError(true);
-        setError(`This preview domain (${currentHost}) is not yet added to Firebase Console Authorized Domains.`);
+        setError(`This domain (${currentHost}) is awaiting Firebase Authorized Domains whitelist.`);
       } else if (err.code === 'auth/popup-blocked') {
         setError('Google login popup was blocked by your browser. Please allow popups.');
       } else {
@@ -52,12 +53,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onSuccess, onClose
     setLoading(true);
     setError(null);
     try {
-      const targetEmail = customEmail || email || 'awoyinfasolomon1@gmail.com';
-      const targetName = customName || name || 'Solomon Awoyinfa';
+      const targetEmail = customEmail || email || 'taletroveanimation@gmail.com';
+      const targetName = customName || name || 'Studio Developer';
       const user = await signInFastTrack(targetEmail, targetName);
       onSuccess(user);
     } catch (err: any) {
-      setError(err.message || 'Fast-track sign-in failed');
+      setError(err.message || 'Developer sign-in failed');
     } finally {
       setLoading(false);
     }
@@ -79,9 +80,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onSuccess, onClose
       }
       onSuccess(user);
     } catch (err: any) {
-      // If user not found, try signing up automatically or suggest signup
       if (err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential') {
-        setError('Invalid credentials. If this is your first time, choose "Create New Account" below.');
+        setError('Invalid credentials. If you are new, choose "Create New Account" below.');
       } else {
         setError(err.message || 'Authentication error.');
       }
@@ -106,12 +106,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onSuccess, onClose
           </div>
           <h2 className="text-xl font-bold text-white tracking-tight">Sign in to SOLVATECH</h2>
           <p className="text-xs text-slate-400 mt-1">
-            Personal Firebase Account Sync • License & Session Protection
+            Personal Firebase Account Sync • WhatsApp Bot & License Protection
           </p>
         </div>
 
         <div className="p-6 space-y-4">
-          {/* Unauthorized domain warning with 1-click Fast-Track Solution */}
+          {/* Domain Notice (Shown only if Firebase OAuth popup encounters unauthorized domain) */}
           {domainError && (
             <div className="p-4 rounded-2xl bg-amber-950/30 border border-amber-500/40 space-y-3 animate-in fade-in duration-150">
               <div className="flex items-start gap-2.5">
@@ -119,23 +119,25 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onSuccess, onClose
                 <div className="text-xs text-amber-200 space-y-1">
                   <p className="font-bold text-amber-300">Firebase Authorized Domain Notice</p>
                   <p className="text-[11px] text-amber-300/80 leading-relaxed">
-                    Firebase OAuth popup requires domains to be listed in your Firebase Console.
+                    Google OAuth popup requires this domain to be whitelisted in Firebase Console. You can also sign up with Email & Password below!
                   </p>
                 </div>
               </div>
 
-              {/* Fast-track Instant Button */}
-              <div className="pt-1">
-                <button
-                  type="button"
-                  onClick={() => handleFastTrack('awoyinfasolomon1@gmail.com', 'Solomon Awoyinfa')}
-                  disabled={loading}
-                  className="w-full flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-500 hover:to-teal-400 text-slate-950 font-bold text-xs shadow-md transition-all active:scale-[0.98]"
-                >
-                  <ArrowRight className="w-4 h-4" />
-                  <span>One-Click Sign In as awoyinfasolomon1@gmail.com</span>
-                </button>
-              </div>
+              {/* Only shown in Google Studio Dev Environment */}
+              {isStudioEnv && (
+                <div className="pt-1">
+                  <button
+                    type="button"
+                    onClick={() => handleFastTrack('taletroveanimation@gmail.com', 'Studio Developer')}
+                    disabled={loading}
+                    className="w-full flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-emerald-500/30 font-bold text-xs shadow-md transition-all active:scale-[0.98]"
+                  >
+                    <ArrowRight className="w-4 h-4" />
+                    <span>Studio Developer Preview (Google Studio)</span>
+                  </button>
+                </div>
+              )}
 
               {/* Whitelist Domain helper */}
               <div className="pt-1 border-t border-amber-500/20 text-[11px] text-amber-300/80 flex items-center justify-between">
@@ -152,7 +154,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onSuccess, onClose
             </div>
           )}
 
-          {/* Mode 1: Google Sign-In */}
+          {/* Mode 1: Google Sign-In (Primary First Action) */}
           {mode === 'google' && (
             <div className="space-y-4">
               <button
@@ -182,31 +184,44 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onSuccess, onClose
                 <span>{loading ? 'Connecting with Google...' : 'Continue with Google'}</span>
               </button>
 
-              {/* Fast track Google account button */}
-              <button
-                type="button"
-                onClick={() => handleFastTrack('awoyinfasolomon1@gmail.com', 'Solomon Awoyinfa')}
-                disabled={loading}
-                className="w-full flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-medium text-xs transition-all"
-              >
-                <span>Fast-Track Sign In as awoyinfasolomon1@gmail.com</span>
-              </button>
-
               <div className="relative flex items-center justify-center py-2">
                 <div className="border-t border-slate-800 w-full"></div>
                 <span className="bg-slate-900 px-3 text-[11px] text-slate-500 uppercase tracking-wider absolute">
-                  or use email
+                  or continue with email
                 </span>
               </div>
 
-              <button
-                type="button"
-                onClick={() => setMode('email_login')}
-                className="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl bg-slate-950 hover:bg-slate-800 text-slate-300 border border-slate-800 text-xs font-semibold transition-all"
-              >
-                <Mail className="w-4 h-4 text-emerald-400" />
-                <span>Sign in with Email & Password</span>
-              </button>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setMode('email_signup')}
+                  className="w-full flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl bg-slate-950 hover:bg-slate-800 text-slate-200 border border-slate-800 text-xs font-semibold transition-all"
+                >
+                  <UserIcon className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Create Account</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMode('email_login')}
+                  className="w-full flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-xl bg-slate-950 hover:bg-slate-800 text-slate-200 border border-slate-800 text-xs font-semibold transition-all"
+                >
+                  <Mail className="w-3.5 h-3.5 text-teal-400" />
+                  <span>Sign In</span>
+                </button>
+              </div>
+
+              {/* Discreet Studio developer option strictly for Google AI Studio testing */}
+              {isStudioEnv && !domainError && (
+                <div className="pt-2 text-center">
+                  <button
+                    type="button"
+                    onClick={() => handleFastTrack('taletroveanimation@gmail.com', 'Studio Developer')}
+                    className="text-[10px] text-slate-500 hover:text-slate-400 underline font-mono"
+                  >
+                    Studio Developer Preview Mode
+                  </button>
+                </div>
+              )}
             </div>
           )}
 

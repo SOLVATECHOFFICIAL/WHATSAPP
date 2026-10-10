@@ -187,69 +187,76 @@ export const PricingModal: React.FC<PricingModalProps> = ({
             </div>
           </div>
 
-          {/* Payment Details Card */}
-          <div className="p-5 rounded-2xl bg-slate-950 border border-slate-800 space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <CreditCard className="w-4 h-4 text-amber-400" />
-                <h4 className="font-bold text-white text-xs uppercase tracking-wider">
-                  💳 PAYMENT DETAILS (OPAY)
-                </h4>
-              </div>
-            </div>
-
-            <div className="p-3.5 rounded-xl bg-slate-900 border border-slate-800/80 space-y-1.5 text-xs">
-              <div className="flex items-center justify-between">
-                <span className="text-slate-400">Bank / FinTech:</span>
-                <strong className="text-white font-mono">{PAYMENT_INFO.bank}</strong>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-slate-400">Account Number:</span>
-                <div className="flex items-center gap-2">
-                  <strong className="text-emerald-400 font-mono text-sm tracking-wide select-all">
-                    {PAYMENT_INFO.accountNumber}
-                  </strong>
-                  <button
-                    onClick={handleCopyAccount}
-                    className="p-1 hover:text-emerald-400 transition-colors text-slate-400"
-                    title="Copy Account Number"
-                  >
-                    {copiedAccount ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                  </button>
+          {/* Prominent OPay Payment Showcase */}
+          <div className="p-5 rounded-3xl bg-gradient-to-br from-emerald-950 via-slate-900 to-teal-950 border-2 border-emerald-400/80 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-emerald-500/30 pb-3">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-emerald-400 to-cyan-400 flex items-center justify-center font-black text-slate-950 text-lg shadow-md shadow-emerald-500/30">
+                  OP
+                </div>
+                <div>
+                  <div className="flex items-center gap-1.5">
+                    <h4 className="font-black text-sm text-white tracking-wide">
+                      OPay Bank
+                    </h4>
+                    <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-400/50 text-emerald-300 font-bold text-[9px] uppercase">
+                      Official
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-emerald-300/80 font-medium">
+                    OPay Microfinance Bank / PayCom
+                  </p>
                 </div>
               </div>
-              <div className="flex items-center justify-between">
-                <span className="text-slate-400">Account Name:</span>
-                <strong className="text-white">{PAYMENT_INFO.accountName}</strong>
-              </div>
+              <span className="text-[10px] font-mono text-emerald-400 px-2 py-0.5 rounded-lg bg-slate-950 border border-emerald-500/40 font-bold">
+                Instant Credit
+              </span>
             </div>
 
-            {/* Note & WhatsApp Receipt Action */}
-            <div className="text-xs text-slate-400 leading-relaxed space-y-2 pt-1">
-              <p>
-                📝 <strong className="text-white">Note:</strong> After payment, send your payment screenshot to Solomon on WhatsApp. Admin will immediately verify and send your license key!
-              </p>
-
-              <div className="pt-2 flex flex-col sm:flex-row gap-2">
+            <div className="p-4 rounded-2xl bg-slate-950/90 border border-emerald-500/40 text-center space-y-1.5">
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">
+                OPAY ACCOUNT NUMBER
+              </span>
+              <div className="flex items-center justify-center gap-3">
+                <span className="font-mono text-2xl sm:text-3xl font-black text-emerald-400 tracking-widest select-all">
+                  {PAYMENT_INFO.accountNumber}
+                </span>
                 <button
                   type="button"
                   onClick={handleCopyAccount}
-                  className="flex-1 flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-semibold text-xs border border-slate-700 transition-all"
+                  className="p-2 rounded-xl bg-emerald-500 text-slate-950 hover:bg-emerald-400 transition-all font-bold flex items-center gap-1"
+                  title="Copy Account Number"
                 >
-                  {copiedAccount ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
-                  <span>{copiedAccount ? 'Copied Account!' : 'Copy OPay Account'}</span>
+                  {copiedAccount ? <Check className="w-4 h-4 stroke-[3]" /> : <Copy className="w-4 h-4" />}
+                  <span className="text-xs">{copiedAccount ? 'Copied' : 'Copy'}</span>
                 </button>
-                <a
-                  href={PAYMENT_INFO.whatsappLink}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex-1 flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-500 hover:to-teal-400 text-slate-950 font-bold text-xs shadow-md transition-all"
-                >
-                  <ExternalLink className="w-4 h-4" />
-                  <span>Send Receipt on WhatsApp</span>
-                </a>
               </div>
             </div>
+
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <div className="p-2.5 rounded-xl bg-slate-950/70 border border-slate-800">
+                <span className="text-[10px] text-slate-400 uppercase tracking-wider block">Account Name</span>
+                <strong className="text-white font-bold block truncate mt-0.5">
+                  {PAYMENT_INFO.accountName}
+                </strong>
+              </div>
+              <div className="p-2.5 rounded-xl bg-slate-950/70 border border-slate-800">
+                <span className="text-[10px] text-slate-400 uppercase tracking-wider block">Bank Name</span>
+                <strong className="text-emerald-300 font-bold block truncate mt-0.5">
+                  OPay (PayCom)
+                </strong>
+              </div>
+            </div>
+
+            <a
+              href={PAYMENT_INFO.whatsappLink}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-400 hover:from-emerald-400 hover:to-teal-300 text-slate-950 font-black text-xs transition-all shadow-lg active:scale-[0.98]"
+            >
+              <ExternalLink className="w-4 h-4" />
+              <span>Send Payment Proof to Solomon on WhatsApp</span>
+            </a>
           </div>
         </div>
       </div>

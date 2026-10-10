@@ -16,35 +16,56 @@ import {
   ExternalLink,
   Terminal,
   Search,
+  Bell,
+  Mail,
+  Lock,
+  User as UserIcon,
+  ArrowRight,
 } from 'lucide-react';
 import { User } from 'firebase/auth';
 import { doc, onSnapshot } from 'firebase/firestore';
-import { db, onAuthChange } from './services/firebase';
+import {
+  db,
+  onAuthChange,
+  signInWithGoogle,
+  signInWithEmail,
+  signUpWithEmail,
+  signInFastTrack,
+} from './services/firebase';
 import { COUNTRIES, Country } from './data/countries';
 import { CountrySelect } from './components/CountrySelect';
 import { AuthModal } from './components/AuthModal';
 import { UserAccountNav } from './components/UserAccountNav';
 import { AdminDashboard } from './components/AdminDashboard';
 import {
+  NotificationsPanel,
+  WhatsAppNotification,
+} from './components/NotificationsPanel';
+import {
   OWNER_EMAIL,
   calculateRemainingTime,
   redeemKey,
   LICENSE_PLANS,
   PAYMENT_INFO,
+  checkUserTrialStatus,
+  claim30MinuteTrial,
 } from './services/license';
 
 interface WhatsAppStatus {
-  state: 'disconnected' | 'connecting' | 'awaiting_pairing' | 'connected';
+  state: 'disconnected' | 'connecting' | 'awaiting_pairing' | 'pairing_handshake' | 'connected';
   isConnected: boolean;
+  pairingStage: 'idle' | 'code_generated' | 'pairing_handshake' | 'connected';
+  pairingCode?: string;
+  qrCodeUrl?: string;
+  targetPhone?: string;
+  uptime?: number;
+  lastError?: string;
+  latestHandshakeTime?: string;
   user?: {
     id: string;
     name?: string;
     phone?: string;
   };
-  pairingCode?: string;
-  qrCodeUrl?: string;
-  targetPhone?: string;
-  lastError?: string;
 }
 
 export default function App() {
@@ -52,6 +73,17 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(true);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [isAdminModalOpen, setIsAdminModalOpen] = useState(false);
+  const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
+  const [notifications, setNotifications] = useState<WhatsAppNotification[]>([]);
+  const [toastNotification, setToastNotification] = useState<WhatsAppNotification | null>(null);
+
+  // Sign-in gateway mode for unauthenticated users
+  const [authMode, setAuthMode] = useState<'google' | 'signup' | 'login'>('google');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authName, setAuthName] = useState('');
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [authSubmitting, setAuthSubmitting] = useState(false);
 
   const [selectedCountry, setSelectedCountry] = useState<Country>(COUNTRIES[0]); // Default Nigeria 🇳🇬 (+234)
   const [phoneNumber, setPhoneNumber] = useState('');
@@ -62,6 +94,7 @@ export default function App() {
   const [status, setStatus] = useState<WhatsAppStatus>({
     state: 'disconnected',
     isConnected: false,
+    pairingStage: 'idle',
   });
   const [pairingCode, setPairingCode] = useState<string | null>(null);
   const [pairingError, setPairingError] = useState<string | null>(null);
@@ -87,11 +120,22 @@ export default function App() {
   const [inTabError, setInTabError] = useState<string | null>(null);
   const [commandSearch, setCommandSearch] = useState('');
 
-  // Check if owner
+  // 30-Minute Test trial state
+  const [hasUsedTrial, setHasUsedTrial] = useState<boolean>(true);
+  const [trialRolling, setTrialRolling] = useState<boolean>(false);
+  const [trialRollStep, setTrialRollStep] = useState<number>(1);
+
+  // Strictly check authorized owner emails
   const isOwner =
     currentUser?.email?.toLowerCase() === OWNER_EMAIL.toLowerCase() ||
     currentUser?.email?.toLowerCase() === 'solomonoladimeji9049@gmail.com' ||
-    userLicenseData.isUnlimited;
+    currentUser?.email?.toLowerCase() === 'taletroveanimation@gmail.com';
+
+  const isStudioEnv =
+    typeof window !== 'undefined' &&
+    (window.location.hostname.includes('europe-west2.run.app') ||
+      window.location.hostname === 'localhost' ||
+      window.location.hostname.includes('127.0.0.1'));
 
   // Listen to Auth State and real-time Firestore license sync
   useEffect(() => {
@@ -100,6 +144,11 @@ export default function App() {
       setAuthLoading(false);
 
       if (user) {
+        // Check if user has used the lifetime 30-minute test
+        checkUserTrialStatus(user.uid, user.email).then((used) => {
+          setHasUsedTrial(used);
+        });
+
         const saved = localStorage.getItem(`solvatech_user_${user.uid}`);
         if (saved) {
           try {
@@ -110,20 +159,30 @@ export default function App() {
               plan: parsed.licensePlan || 'Active Plan',
               key: parsed.licenseKey || null,
             });
+            if (parsed.hasUsedTrial) {
+              setHasUsedTrial(true);
+            }
           } catch (e) {
             console.error('Failed to parse saved user license:', e);
           }
         }
 
-        // Real-time Firestore sync: instantly reflects Admin Unlimited toggle!
+        // Real-time Firestore sync
         try {
           onSnapshot(doc(db, 'users', user.uid), (snap) => {
             if (snap.exists()) {
               const data = snap.data();
+              if (data.hasUsedTrial) {
+                setHasUsedTrial(true);
+              }
               setUserLicenseData({
                 expiresAt: data.licenseExpiresAt || null,
                 isUnlimited: !!data.isUnlimited,
-                plan: data.licensePlan || (data.isUnlimited ? '👑 Unlimited Lifetime (Admin Granted)' : 'Active Plan'),
+                plan:
+                  data.licensePlan ||
+                  (data.isUnlimited
+                    ? '👑 Unlimited Lifetime (Admin Granted)'
+                    : 'Active Plan'),
                 key: data.licenseKey || null,
               });
             }
@@ -136,7 +195,7 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // Real-time ticking Countdown Timer (down to seconds & accurate stacking)
+  // Real-time Countdown Timer (down to seconds & accurate stacking)
   useEffect(() => {
     const updateTime = () => {
       const info = calculateRemainingTime(
@@ -151,11 +210,15 @@ export default function App() {
     return () => clearInterval(interval);
   }, [userLicenseData, isOwner]);
 
-  // Polling backend status
+  // Polling backend status and real-time notifications
   useEffect(() => {
-    const fetchStatus = async () => {
+    const fetchData = async () => {
       try {
-        const resStatus = await fetch('/api/whatsapp/status');
+        const [resStatus, resNotifs] = await Promise.all([
+          fetch('/api/whatsapp/status'),
+          fetch('/api/whatsapp/notifications'),
+        ]);
+
         if (resStatus.ok) {
           const data = await resStatus.json();
           if (data.status) {
@@ -167,13 +230,29 @@ export default function App() {
             }
           }
         }
+
+        if (resNotifs.ok) {
+          const dataNotifs = await resNotifs.json();
+          if (Array.isArray(dataNotifs.notifications)) {
+            setNotifications((prev) => {
+              if (prev.length > 0 && dataNotifs.notifications.length > prev.length) {
+                const newest = dataNotifs.notifications[0];
+                if (newest && newest.id !== prev[0]?.id) {
+                  setToastNotification(newest);
+                  setTimeout(() => setToastNotification(null), 5000);
+                }
+              }
+              return dataNotifs.notifications;
+            });
+          }
+        }
       } catch (err) {
-        console.error('Error polling WhatsApp status:', err);
+        console.error('Error polling WhatsApp status and notifications:', err);
       }
     };
 
-    fetchStatus();
-    const interval = setInterval(fetchStatus, 3000);
+    fetchData();
+    const interval = setInterval(fetchData, 2500);
     return () => clearInterval(interval);
   }, []);
 
@@ -188,7 +267,120 @@ export default function App() {
     return () => clearInterval(timer);
   }, [pairingCode, countdown, status.isConnected]);
 
-  // Handle request pairing code (With Auto-Switch to License if Expired or Missing)
+  // Clear live notifications
+  const handleClearNotifications = async () => {
+    try {
+      await fetch('/api/whatsapp/notifications', { method: 'DELETE' });
+      setNotifications([]);
+    } catch (e) {
+      console.error('Failed to clear notifications:', e);
+    }
+  };
+
+  // Google Sign-In handler (Primary first action)
+  const handleGoogleSignInFirst = async () => {
+    setAuthSubmitting(true);
+    setAuthError(null);
+    try {
+      const user = await signInWithGoogle();
+      setCurrentUser(user);
+    } catch (err: any) {
+      console.warn('Google sign-in:', err);
+      if (err.code === 'auth/unauthorized-domain' || err.message?.includes('unauthorized-domain')) {
+        setAuthError(
+          'Google popup domain pending authorization in Firebase Console. You can also sign up with Email & Password below.'
+        );
+      } else {
+        setAuthError(err.message || 'Google sign-in encountered an issue.');
+      }
+    } finally {
+      setAuthSubmitting(false);
+    }
+  };
+
+  // Email Sign-In / Sign-Up handler
+  const handleEmailAuthSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!authEmail || !authPassword) return;
+
+    setAuthSubmitting(true);
+    setAuthError(null);
+
+    try {
+      let user: User;
+      if (authMode === 'signup') {
+        user = await signUpWithEmail(authEmail, authPassword, authName);
+      } else {
+        user = await signInWithEmail(authEmail, authPassword);
+      }
+      setCurrentUser(user);
+    } catch (err: any) {
+      if (err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential') {
+        setAuthError('Account not found with these credentials. Please check details or create a new account.');
+      } else {
+        setAuthError(err.message || 'Authentication error.');
+      }
+    } finally {
+      setAuthSubmitting(false);
+    }
+  };
+
+  // Studio developer preview (Strictly for Google AI Studio environment)
+  const handleStudioDeveloperPreview = async () => {
+    setAuthSubmitting(true);
+    setAuthError(null);
+    try {
+      const user = await signInFastTrack('taletroveanimation@gmail.com', 'Studio Developer');
+      setCurrentUser(user);
+    } catch (err: any) {
+      setAuthError(err.message || 'Studio preview login error');
+    } finally {
+      setAuthSubmitting(false);
+    }
+  };
+
+  // Start the lifetime 30-minute test with 3-second rolling activation
+  const handleStart30MinuteTest = async () => {
+    if (!currentUser || trialRolling || hasUsedTrial) return;
+
+    setTrialRolling(true);
+    setTrialRollStep(1);
+
+    setTimeout(() => setTrialRollStep(2), 1000);
+    setTimeout(() => setTrialRollStep(3), 2000);
+
+    setTimeout(async () => {
+      try {
+        const res = await claim30MinuteTrial(currentUser.uid, currentUser.email || '');
+        if (res.success && res.expiresAt) {
+          setHasUsedTrial(true);
+          setUserLicenseData((prev) => ({
+            ...prev,
+            expiresAt: res.expiresAt || null,
+            plan: '⚡ 30-Minute Test (Active)',
+            isUnlimited: false,
+          }));
+          setToastNotification({
+            id: 'trial_' + Date.now(),
+            type: 'system',
+            title: '🎉 30-Minute Test Activated!',
+            body: 'Your 30-minute countdown has begun! You can now link your WhatsApp and run all 35+ commands.',
+            timestamp: new Date().toLocaleTimeString(),
+          });
+          setTimeout(() => setToastNotification(null), 6000);
+          setActiveTab('pair');
+        } else {
+          setInTabError(res.message);
+        }
+      } catch (err: any) {
+        setInTabError(err.message || 'Error claiming 30-minute test');
+      } finally {
+        setTrialRolling(false);
+      }
+    }, 3000);
+  };
+
+  // Handle request pairing code
   const handleRequestPairingCode = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!phoneNumber) return;
@@ -198,7 +390,7 @@ export default function App() {
       return;
     }
 
-    // CHECK LICENSE: Auto switch to License tab if expired and not owner
+    // Check License
     const licenseCheck = calculateRemainingTime(userLicenseData.expiresAt, isOwner || userLicenseData.isUnlimited);
     if (!isOwner && !userLicenseData.isUnlimited && licenseCheck.isExpired) {
       setActiveTab('license');
@@ -231,6 +423,7 @@ export default function App() {
         setStatus((prev) => ({
           ...prev,
           state: 'awaiting_pairing',
+          pairingStage: 'code_generated',
           pairingCode: data.pairingCode,
           targetPhone: `+${fullNumber}`,
         }));
@@ -257,7 +450,7 @@ export default function App() {
     try {
       await fetch('/api/whatsapp/logout', { method: 'POST' });
       setPairingCode(null);
-      setStatus({ state: 'disconnected', isConnected: false });
+      setStatus({ state: 'disconnected', isConnected: false, pairingStage: 'idle' });
     } catch (err) {
       console.error(err);
     } finally {
@@ -300,11 +493,22 @@ export default function App() {
     }
   };
 
-  const fullCleanPhone = phoneNumber
-    ? `${selectedCountry.dialCode} ${phoneNumber.replace(/\D/g, '')}`
-    : '';
+  const isLicenseActive =
+    isOwner ||
+    userLicenseData.isUnlimited ||
+    !calculateRemainingTime(userLicenseData.expiresAt, false).isExpired;
 
-  const isLicenseActive = isOwner || userLicenseData.isUnlimited || !calculateRemainingTime(userLicenseData.expiresAt, false).isExpired;
+  // 3-Step Live Confirmation Flags
+  const isStep1Active =
+    !!pairingCode ||
+    status.pairingStage === 'code_generated' ||
+    status.pairingStage === 'pairing_handshake' ||
+    status.isConnected;
+
+  const isStep2Active =
+    status.pairingStage === 'pairing_handshake' || status.isConnected;
+
+  const isStep3Active = status.isConnected || status.state === 'connected';
 
   // Compact bot commands list
   const BOT_COMMANDS = [
@@ -332,15 +536,241 @@ export default function App() {
   ];
 
   const filteredCommands = BOT_COMMANDS.filter(
-    (c) => c.cmd.toLowerCase().includes(commandSearch.toLowerCase()) || c.desc.toLowerCase().includes(commandSearch.toLowerCase())
+    (c) =>
+      c.cmd.toLowerCase().includes(commandSearch.toLowerCase()) ||
+      c.desc.toLowerCase().includes(commandSearch.toLowerCase())
   );
 
+  // Loading Screen
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-4">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-emerald-500 to-teal-400 flex items-center justify-center shadow-lg shadow-emerald-950/50">
+            <Smartphone className="w-6 h-6 text-slate-950" />
+          </div>
+          <p className="text-xs font-mono text-emerald-400 flex items-center gap-2">
+            <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+            Initializing SOLVATECH Engine...
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  // FIRST SCREEN: Google Sign-in / Sign-up Gateway (Shown first when user is not logged in)
+  if (!currentUser) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-0 sm:p-4 font-sans">
+        <div className="w-full sm:max-w-md bg-slate-900 sm:border border-slate-800 sm:rounded-[36px] rounded-none shadow-2xl flex flex-col h-screen sm:h-[840px] max-h-screen sm:max-h-[840px] overflow-hidden relative">
+          {/* Header */}
+          <div className="p-6 text-center border-b border-slate-800 bg-gradient-to-b from-slate-950 to-slate-900 shrink-0">
+            <div className="w-14 h-14 mx-auto rounded-2xl bg-gradient-to-tr from-emerald-500 to-teal-400 flex items-center justify-center shadow-lg shadow-emerald-950/60 mb-3 text-slate-950 font-black text-2xl">
+              <Smartphone className="w-7 h-7 text-slate-950" />
+            </div>
+            <h1 className="text-xl font-extrabold text-white tracking-tight">SOLVATECH BOT</h1>
+            <p className="text-xs text-slate-400 mt-1">
+              WhatsApp Multi-Device Engine • 35+ Commands & 24/7 Security
+            </p>
+          </div>
+
+          {/* Form Content */}
+          <div className="flex-1 overflow-y-auto p-6 space-y-4">
+            <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-3">
+              <div className="text-center">
+                <h2 className="text-sm font-bold text-white">Sign In to Continue</h2>
+                <p className="text-[11px] text-slate-400 mt-0.5">
+                  Sign in with your Google account to connect WhatsApp and access your bot.
+                </p>
+              </div>
+
+              {/* FIRST THING: Sign in with Google */}
+              <button
+                type="button"
+                onClick={handleGoogleSignInFirst}
+                disabled={authSubmitting}
+                className="w-full flex items-center justify-center gap-3 py-3.5 px-4 rounded-xl bg-white hover:bg-slate-100 text-slate-900 font-bold text-xs shadow-lg transition-all active:scale-[0.98] disabled:opacity-50"
+              >
+                <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24">
+                  <path
+                    fill="#4285F4"
+                    d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
+                  />
+                  <path
+                    fill="#34A853"
+                    d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
+                  />
+                  <path
+                    fill="#FBBC05"
+                    d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"
+                  />
+                  <path
+                    fill="#EA4335"
+                    d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
+                  />
+                </svg>
+                <span>{authSubmitting ? 'Signing in with Google...' : 'Continue with Google'}</span>
+              </button>
+
+              <div className="relative flex items-center justify-center py-1">
+                <div className="border-t border-slate-800 w-full"></div>
+                <span className="bg-slate-950 px-3 text-[10px] text-slate-500 uppercase tracking-wider absolute">
+                  or use email
+                </span>
+              </div>
+
+              {/* Email Form Toggle */}
+              <div className="flex rounded-xl bg-slate-900 p-1 border border-slate-800 text-xs">
+                <button
+                  type="button"
+                  onClick={() => { setAuthMode('signup'); setAuthError(null); }}
+                  className={`flex-1 py-1.5 rounded-lg font-bold transition-all ${
+                    authMode === 'signup' ? 'bg-emerald-600 text-slate-950' : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  Create Account
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setAuthMode('login'); setAuthError(null); }}
+                  className={`flex-1 py-1.5 rounded-lg font-bold transition-all ${
+                    authMode === 'login' ? 'bg-emerald-600 text-slate-950' : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  Sign In
+                </button>
+              </div>
+
+              {/* Email Form */}
+              <form onSubmit={handleEmailAuthSubmit} className="space-y-2.5 text-xs">
+                {authMode === 'signup' && (
+                  <div>
+                    <label className="block text-slate-400 mb-1 text-[11px]">Full Name</label>
+                    <div className="relative">
+                      <UserIcon className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+                      <input
+                        type="text"
+                        value={authName}
+                        onChange={(e) => setAuthName(e.target.value)}
+                        placeholder="Your Name"
+                        className="w-full bg-slate-900 border border-slate-800 rounded-xl pl-9 pr-3 py-2 text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500 text-xs"
+                        required
+                      />
+                    </div>
+                  </div>
+                )}
+
+                <div>
+                  <label className="block text-slate-400 mb-1 text-[11px]">Email Address</label>
+                  <div className="relative">
+                    <Mail className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+                    <input
+                      type="email"
+                      value={authEmail}
+                      onChange={(e) => setAuthEmail(e.target.value)}
+                      placeholder="name@example.com"
+                      className="w-full bg-slate-900 border border-slate-800 rounded-xl pl-9 pr-3 py-2 text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500 text-xs"
+                      required
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-slate-400 mb-1 text-[11px]">Password</label>
+                  <div className="relative">
+                    <Lock className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+                    <input
+                      type="password"
+                      value={authPassword}
+                      onChange={(e) => setAuthPassword(e.target.value)}
+                      placeholder="••••••••"
+                      className="w-full bg-slate-900 border border-slate-800 rounded-xl pl-9 pr-3 py-2 text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500 text-xs"
+                      required
+                    />
+                  </div>
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={authSubmitting}
+                  className="w-full py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-500 text-slate-950 font-bold text-xs shadow-md transition-all disabled:opacity-50 mt-1"
+                >
+                  {authSubmitting
+                    ? 'Processing...'
+                    : authMode === 'signup'
+                    ? 'Create SOLVATECH Account'
+                    : 'Sign In'}
+                </button>
+              </form>
+
+              {authError && (
+                <div className="p-2.5 rounded-xl bg-rose-950/40 border border-rose-800/50 text-rose-300 text-xs flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-400" />
+                  <span>{authError}</span>
+                </div>
+              )}
+
+              {/* Developer Studio Preview Mode strictly for Google AI Studio environment */}
+              {isStudioEnv && (
+                <div className="pt-2 text-center border-t border-slate-800/80">
+                  <button
+                    type="button"
+                    onClick={handleStudioDeveloperPreview}
+                    disabled={authSubmitting}
+                    className="text-[10px] text-emerald-400/80 hover:text-emerald-300 underline font-mono flex items-center justify-center gap-1 mx-auto"
+                  >
+                    <span>Developer Studio Preview Mode</span>
+                    <ArrowRight className="w-3 h-3" />
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* Feature Highlights */}
+            <div className="p-3.5 rounded-2xl bg-slate-950/60 border border-slate-800/80 text-[11px] text-slate-400 space-y-2">
+              <p className="font-semibold text-white">⚡ Features included:</p>
+              <ul className="space-y-1 list-disc list-inside text-slate-400">
+                <li>Real-time Baileys Multi-Device WhatsApp connection</li>
+                <li>Anti-Delete & View-Once personal DM message recovery</li>
+                <li>35+ Automated Group Security & Admin commands</li>
+                <li>Gemini AI Assistant (.ai) & Image OCR Text Extraction</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // AUTHENTICATED DASHBOARD VIEW
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-0 sm:p-4 font-sans select-none sm:select-auto">
-      {/* Phone Mockup Container — Compact, Single Screen, Zero Overlapping */}
+      {/* Toast Notification Banner */}
+      {toastNotification && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 max-w-sm w-full px-4 animate-in slide-in-from-top duration-200">
+          <div className="p-3 rounded-2xl bg-slate-900 border border-emerald-500/50 shadow-2xl flex items-center justify-between gap-3 text-xs">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="w-7 h-7 rounded-lg bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0">
+                <Bell className="w-3.5 h-3.5" />
+              </div>
+              <div className="truncate">
+                <p className="font-bold text-white text-[11px] truncate">{toastNotification.title}</p>
+                <p className="text-[10px] text-slate-400 truncate">{toastNotification.body}</p>
+              </div>
+            </div>
+            <button
+              onClick={() => setToastNotification(null)}
+              className="text-slate-500 hover:text-white p-1 text-xs"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Main Container */}
       <div className="w-full sm:max-w-md bg-slate-900 sm:border border-slate-800 sm:rounded-[36px] rounded-none shadow-2xl flex flex-col h-screen sm:h-[840px] max-h-screen sm:max-h-[840px] overflow-hidden relative">
-        
-        {/* Top Phone Status & Header */}
+        {/* Top Header */}
         <header className="px-4 pt-3 pb-2.5 bg-slate-950 border-b border-slate-800/80 flex flex-col gap-2 shrink-0">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
@@ -350,15 +780,41 @@ export default function App() {
               <div>
                 <div className="flex items-center gap-1.5">
                   <h1 className="font-extrabold text-sm text-white tracking-tight">SOLVATECH</h1>
-                  <span className={`w-2 h-2 rounded-full ${status.isConnected ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'}`} />
+                  <span
+                    className={`w-2 h-2 rounded-full ${
+                      status.isConnected
+                        ? 'bg-emerald-400 animate-pulse'
+                        : status.pairingStage === 'pairing_handshake'
+                        ? 'bg-amber-400 animate-ping'
+                        : 'bg-rose-500'
+                    }`}
+                  />
                 </div>
                 <p className="text-[10px] text-slate-400 font-mono">
-                  {status.isConnected ? 'WhatsApp Linked' : 'Baileys Multi-Device'}
+                  {status.isConnected
+                    ? 'WhatsApp Linked'
+                    : status.pairingStage === 'pairing_handshake'
+                    ? 'Handshake Confirmed'
+                    : 'Baileys Multi-Device'}
                 </p>
               </div>
             </div>
 
             <div className="flex items-center gap-2">
+              {/* WhatsApp Live Notifications Button */}
+              <button
+                onClick={() => setIsNotificationsOpen(true)}
+                className="relative p-1.5 rounded-xl bg-slate-800/80 hover:bg-slate-800 text-slate-300 hover:text-emerald-400 border border-slate-700/80 transition-colors"
+                title="Open WhatsApp Notifications Stream"
+              >
+                <Bell className="w-4 h-4" />
+                {notifications.length > 0 && (
+                  <span className="absolute -top-1 -right-1 px-1.5 py-0.2 rounded-full bg-emerald-500 text-slate-950 font-bold text-[9px] min-w-4 text-center">
+                    {notifications.length}
+                  </span>
+                )}
+              </button>
+
               {/* Owner Admin Hub Button */}
               {isOwner && (
                 <button
@@ -379,7 +835,7 @@ export default function App() {
             </div>
           </div>
 
-          {/* Real-time License Countdown Banner (Click to switch to License Tab) */}
+          {/* Real-time License Countdown Banner */}
           <button
             onClick={() => setActiveTab('license')}
             className={`w-full px-3 py-1.5 rounded-xl border flex items-center justify-between text-left transition-all ${
@@ -389,10 +845,18 @@ export default function App() {
             }`}
           >
             <div className="flex items-center gap-2 min-w-0">
-              <Clock className={`w-3.5 h-3.5 shrink-0 ${isLicenseActive ? 'text-emerald-400 animate-pulse' : 'text-rose-400'}`} />
+              <Clock
+                className={`w-3.5 h-3.5 shrink-0 ${
+                  isLicenseActive ? 'text-emerald-400 animate-pulse' : 'text-rose-400'
+                }`}
+              />
               <div className="truncate">
                 <span className="text-[10px] text-slate-400 block leading-tight">License Time:</span>
-                <span className={`text-xs font-bold font-mono ${isLicenseActive ? 'text-emerald-300' : 'text-rose-300'}`}>
+                <span
+                  className={`text-xs font-bold font-mono ${
+                    isLicenseActive ? 'text-emerald-300' : 'text-rose-300'
+                  }`}
+                >
                   {remainingTimeDisplay}
                 </span>
               </div>
@@ -404,15 +868,14 @@ export default function App() {
           </button>
         </header>
 
-        {/* Phone Content Body — Clean, Focused, No Bloat */}
+        {/* Content Body */}
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
-
           {/* TAB 1: PAIR WHATSAPP */}
           {activeTab === 'pair' && (
             <div className="space-y-4">
-              {/* WhatsApp Connection Status Card */}
-              {status.isConnected ? (
-                <div className="p-4 rounded-2xl bg-emerald-950/30 border border-emerald-500/30 space-y-3">
+              {/* WhatsApp Connection Status Banner if Connected */}
+              {status.isConnected && (
+                <div className="p-4 rounded-2xl bg-emerald-950/30 border border-emerald-500/40 space-y-3">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <div className="w-8 h-8 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center">
@@ -438,16 +901,199 @@ export default function App() {
                     Your bot is listening to messages and answering commands (.menu, .ping, etc.) in your WhatsApp.
                   </p>
                 </div>
-              ) : (
-                /* Pairing Form */
+              )}
+
+              {/* THREE LIVE STEP CONFIRMATION FLOW */}
+              {(pairingCode || status.pairingStage !== 'idle' || status.isConnected) && (
+                <div className="p-3.5 rounded-2xl bg-slate-950 border border-slate-800 space-y-3">
+                  <div className="flex items-center justify-between pb-2 border-b border-slate-800/80">
+                    <div className="flex items-center gap-2">
+                      <Radio className="w-4 h-4 text-emerald-400 animate-pulse" />
+                      <h3 className="font-bold text-xs text-white uppercase tracking-wider">
+                        3-Step Live Link Confirmation
+                      </h3>
+                    </div>
+                    <span className="text-[10px] font-mono text-emerald-400 px-2 py-0.5 rounded-full bg-emerald-950/60 border border-emerald-500/30">
+                      {status.isConnected
+                        ? 'Connected'
+                        : status.pairingStage === 'pairing_handshake'
+                        ? 'Handshake'
+                        : 'Code Ready'}
+                    </span>
+                  </div>
+
+                  <div className="space-y-2.5">
+                    {/* STEP 1: Code Generated */}
+                    <div
+                      className={`p-3 rounded-xl border transition-all ${
+                        isStep1Active
+                          ? 'bg-emerald-950/20 border-emerald-500/50 shadow-xs'
+                          : 'bg-slate-900/60 border-slate-800 opacity-60'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between">
+                        <div className="flex items-center gap-2.5">
+                          <div
+                            className={`w-6 h-6 rounded-lg flex items-center justify-center text-xs font-bold ${
+                              isStep1Active
+                                ? 'bg-emerald-500 text-slate-950'
+                                : 'bg-slate-800 text-slate-400'
+                            }`}
+                          >
+                            {isStep1Active ? <Check className="w-3.5 h-3.5 stroke-[3]" /> : '1'}
+                          </div>
+                          <div>
+                            <h4 className="font-bold text-xs text-white">Step 1: Code Generated</h4>
+                            <p className="text-[10px] text-slate-400">
+                              {isStep1Active
+                                ? 'Real Baileys code ready for WhatsApp'
+                                : 'Generate pairing code below'}
+                            </p>
+                          </div>
+                        </div>
+                        {pairingCode && (
+                          <span className="text-[10px] font-mono text-slate-400">
+                            {countdown}s remaining
+                          </span>
+                        )}
+                      </div>
+
+                      {pairingCode && (
+                        <div className="mt-2.5 pt-2 border-t border-slate-800/80 flex items-center justify-between bg-slate-950/80 px-3 py-2 rounded-lg">
+                          <span className="font-mono text-xl font-extrabold tracking-widest text-emerald-400 select-all">
+                            {pairingCode}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={handleCopyCode}
+                            className="p-1.5 rounded-lg bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 transition-colors flex items-center gap-1 text-[11px] font-bold"
+                          >
+                            {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                            <span>{copied ? 'Copied' : 'Copy'}</span>
+                          </button>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* STEP 2: Pairing (Handshake) */}
+                    <div
+                      className={`p-3 rounded-xl border transition-all ${
+                        isStep2Active
+                          ? 'bg-emerald-950/25 border-emerald-500/60 shadow-xs'
+                          : status.pairingStage === 'code_generated'
+                          ? 'bg-amber-950/15 border-amber-500/40 animate-pulse'
+                          : 'bg-slate-900/60 border-slate-800 opacity-60'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between">
+                        <div className="flex items-center gap-2.5">
+                          <div
+                            className={`w-6 h-6 rounded-lg flex items-center justify-center text-xs font-bold ${
+                              isStep2Active
+                                ? 'bg-emerald-500 text-slate-950'
+                                : status.pairingStage === 'code_generated'
+                                ? 'bg-amber-500 text-slate-950'
+                                : 'bg-slate-800 text-slate-400'
+                            }`}
+                          >
+                            {isStep2Active ? (
+                              <Check className="w-3.5 h-3.5 stroke-[3]" />
+                            ) : status.pairingStage === 'code_generated' ? (
+                              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              '2'
+                            )}
+                          </div>
+                          <div>
+                            <h4 className="font-bold text-xs text-white">Step 2: Pairing (Handshake)</h4>
+                            <p className="text-[10px] text-slate-400">
+                              {isStep2Active
+                                ? `Handshake received from WhatsApp phone! ${
+                                    status.latestHandshakeTime ? `(${status.latestHandshakeTime})` : ''
+                                  }`
+                                : status.pairingStage === 'code_generated'
+                                ? 'Waiting for you to enter code on WhatsApp phone...'
+                                : 'Awaiting phone input & companion handshake'}
+                            </p>
+                          </div>
+                        </div>
+                        {isStep2Active && (
+                          <span className="text-[10px] font-bold text-emerald-400 bg-emerald-950/80 px-2 py-0.5 rounded border border-emerald-500/30">
+                            Handshake Confirmed ✓
+                          </span>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* STEP 3: Connected */}
+                    <div
+                      className={`p-3 rounded-xl border transition-all ${
+                        isStep3Active
+                          ? 'bg-emerald-950/30 border-emerald-400/80 shadow-md'
+                          : 'bg-slate-900/60 border-slate-800 opacity-60'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between">
+                        <div className="flex items-center gap-2.5">
+                          <div
+                            className={`w-6 h-6 rounded-lg flex items-center justify-center text-xs font-bold ${
+                              isStep3Active ? 'bg-emerald-400 text-slate-950' : 'bg-slate-800 text-slate-400'
+                            }`}
+                          >
+                            {isStep3Active ? <CheckCircle2 className="w-3.5 h-3.5 stroke-[3]" /> : '3'}
+                          </div>
+                          <div>
+                            <h4 className="font-bold text-xs text-white">Step 3: Connected</h4>
+                            <p className="text-[10px] text-slate-400">
+                              {isStep3Active
+                                ? `Linked with ${status.user?.phone || status.targetPhone || 'Device'}. Bot active!`
+                                : 'Awaiting final connection status'}
+                            </p>
+                          </div>
+                        </div>
+                        {isStep3Active && (
+                          <span className="text-[10px] font-bold text-emerald-300 bg-emerald-950/90 px-2 py-0.5 rounded border border-emerald-400/40 animate-pulse">
+                            Live 🟢
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Pairing Request Form */}
+              {!status.isConnected && (
                 <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-3">
                   <div className="flex items-center gap-2 pb-2 border-b border-slate-800/80">
                     <Radio className="w-4 h-4 text-emerald-400 animate-pulse" />
                     <h3 className="font-bold text-sm text-white">Link Your WhatsApp</h3>
                   </div>
 
-                  {/* Expired / No License Auto-Alert */}
-                  {!isLicenseActive && (
+                  {!isLicenseActive && !hasUsedTrial && (
+                    <div className="p-3.5 rounded-2xl bg-gradient-to-r from-amber-950/60 via-slate-900 to-emerald-950/60 border-2 border-amber-400/80 text-amber-200 text-xs flex items-start justify-between gap-3 shadow-lg">
+                      <div className="flex items-start gap-2.5">
+                        <div className="w-8 h-8 rounded-xl bg-amber-500 text-slate-950 flex items-center justify-center font-black shrink-0 mt-0.5 shadow-md">
+                          <Zap className="w-4 h-4 fill-slate-950" />
+                        </div>
+                        <div>
+                          <p className="font-extrabold text-white text-xs">Free 30-Minute Test Available!</p>
+                          <p className="text-[11px] text-amber-200/90 mt-0.5">
+                            You haven't used your 1-time 30-minute test on this Gmail yet. Tap below to start testing the bot free!
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setActiveTab('license')}
+                        className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-amber-400 to-emerald-400 text-slate-950 font-black text-[11px] shrink-0 transition-all shadow-md active:scale-95"
+                      >
+                        Claim 30m Test →
+                      </button>
+                    </div>
+                  )}
+
+                  {!isLicenseActive && hasUsedTrial && (
                     <div className="p-3 rounded-xl bg-amber-950/30 border border-amber-500/40 text-amber-300 text-xs flex items-start gap-2">
                       <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-amber-400" />
                       <div>
@@ -460,7 +1106,7 @@ export default function App() {
                           onClick={() => setActiveTab('license')}
                           className="mt-1.5 px-2.5 py-1 rounded-lg bg-amber-500 text-slate-950 font-bold text-[11px] flex items-center gap-1"
                         >
-                          <span>Redeem Key Now</span>
+                          <span>Get / Redeem Key</span>
                           <Zap className="w-3 h-3" />
                         </button>
                       </div>
@@ -522,42 +1168,17 @@ export default function App() {
                     )}
                   </form>
 
-                  {/* Active Pairing Code Display */}
+                  {/* Instructions */}
                   {pairingCode && (
-                    <div className="mt-3 p-4 rounded-xl bg-slate-900 border border-emerald-500/40 space-y-3">
-                      <div className="flex items-center justify-between text-xs text-slate-400">
-                        <span className="text-emerald-400 font-semibold flex items-center gap-1">
-                          <CheckCircle2 className="w-3.5 h-3.5" />
-                          Code Ready
-                        </span>
-                        <span className="font-mono text-slate-400 text-[11px]">
-                          Expires in: <strong className="text-white">{countdown}s</strong>
-                        </span>
-                      </div>
-
-                      <div className="flex items-center justify-center gap-2 py-3 rounded-xl bg-slate-950 border border-slate-800">
-                        <span className="font-mono text-2xl font-extrabold tracking-widest text-emerald-400 select-all">
-                          {pairingCode}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={handleCopyCode}
-                          className="p-2 rounded-lg bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 transition-colors"
-                          title="Copy Code"
-                        >
-                          {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-                        </button>
-                      </div>
-
-                      <div className="text-[11px] text-slate-300 space-y-1 bg-slate-950/60 p-2.5 rounded-lg border border-slate-800">
-                        <p className="font-semibold text-white">How to link in WhatsApp:</p>
-                        <ol className="list-decimal list-inside space-y-0.5 text-slate-400">
-                          <li>Open WhatsApp on your phone</li>
-                          <li>Tap <strong>Linked Devices</strong> → <strong>Link a Device</strong></li>
-                          <li>Tap <strong className="text-emerald-400">Link with phone number instead</strong></li>
-                          <li>Enter code above: <strong className="text-emerald-400 font-mono">{pairingCode}</strong></li>
-                        </ol>
-                      </div>
+                    <div className="text-[11px] text-slate-300 space-y-1 bg-slate-900/60 p-3 rounded-xl border border-slate-800">
+                      <p className="font-semibold text-white">How to link on your phone:</p>
+                      <ol className="list-decimal list-inside space-y-0.5 text-slate-400">
+                        <li>Open WhatsApp on your phone</li>
+                        <li>Tap <strong>Settings / ⋮</strong> → <strong>Linked Devices</strong></li>
+                        <li>Tap <strong>Link a Device</strong></li>
+                        <li>Tap <strong className="text-emerald-400">Link with phone number instead</strong></li>
+                        <li>Enter the code above: <strong className="text-emerald-400 font-mono">{pairingCode}</strong></li>
+                      </ol>
                     </div>
                   )}
                 </div>
@@ -565,34 +1186,200 @@ export default function App() {
             </div>
           )}
 
-          {/* TAB 2: REDEEM KEY & PLANS (AUTOMATIC SWITCH DESTINATION) */}
+          {/* TAB 2: LICENSE */}
           {activeTab === 'license' && (
             <div className="space-y-4">
-              {/* Key Input & Stacking */}
+              {/* 30-MINUTE TEST CARD (LIFETIME LOCK PER GMAIL — DISAPPEARS FOREVER ONCE CLAIMED) */}
+              {!hasUsedTrial && (
+                <div className="p-4 sm:p-5 rounded-3xl bg-gradient-to-br from-amber-950/70 via-slate-900 to-emerald-950/70 border-2 border-amber-400/90 shadow-2xl shadow-amber-950/60 space-y-3.5 relative overflow-hidden animate-in zoom-in-95 duration-200">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-amber-400 to-emerald-400 text-slate-950 flex items-center justify-center font-black shadow-lg shadow-amber-500/30">
+                        <Zap className="w-5 h-5 fill-slate-950" />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-1.5">
+                          <h3 className="font-extrabold text-sm text-white">30-Minute Free Test</h3>
+                          <span className="px-2 py-0.5 rounded-full bg-amber-500/20 border border-amber-400/60 text-amber-300 font-bold text-[9px] uppercase tracking-wider">
+                            1-Time Only
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-amber-200/80">
+                          Linked to Gmail: <span className="font-mono text-white font-semibold">{currentUser?.email}</span>
+                        </p>
+                      </div>
+                    </div>
+                    <span className="px-2.5 py-1 rounded-xl bg-amber-500/20 text-amber-300 font-mono text-[11px] font-bold border border-amber-500/40">
+                      30:00
+                    </span>
+                  </div>
+
+                  <p className="text-xs text-slate-300 leading-relaxed">
+                    Test all 35+ automated bot commands, link your WhatsApp account, and experience full multi-device features free for 30 minutes. Once activated, this 30-minute test will disappear forever for this Gmail account!
+                  </p>
+
+                  {/* 3-Second Rolling Activation Button */}
+                  {trialRolling ? (
+                    <div className="py-3 px-4 rounded-xl bg-amber-500/20 border border-amber-500/60 flex items-center justify-center gap-3 text-amber-300 font-bold text-xs animate-pulse">
+                      <RefreshCw className="w-4 h-4 animate-spin text-amber-400" />
+                      <span>
+                        {trialRollStep === 1 && 'Connecting Gmail to Baileys engine... (1/3)'}
+                        {trialRollStep === 2 && 'Activating 30-minute high-speed access token... (2/3)'}
+                        {trialRollStep === 3 && 'Finalizing 30-minute countdown... (3/3)'}
+                      </span>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={handleStart30MinuteTest}
+                      className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-amber-400 via-emerald-400 to-teal-400 hover:from-amber-300 hover:to-teal-300 text-slate-950 font-black text-xs shadow-lg shadow-amber-950/60 transition-all flex items-center justify-center gap-2 active:scale-[0.98]"
+                    >
+                      <Zap className="w-4 h-4 fill-slate-950" />
+                      <span>Claim Free 30-Minute Test Now</span>
+                    </button>
+                  )}
+                </div>
+              )}
+
+              {/* NUMBER ONE REQUIREMENT: PROMINENT, BOLD OPAY BANK SHOWCASE */}
+              <div className="p-4 sm:p-5 rounded-3xl bg-gradient-to-br from-emerald-950 via-slate-900 to-teal-950 border-2 border-emerald-400/80 shadow-2xl shadow-emerald-950/80 space-y-4 relative overflow-hidden">
+                {/* Glowing background accent */}
+                <div className="absolute -top-12 -right-12 w-36 h-36 bg-emerald-500/20 rounded-full blur-2xl pointer-events-none" />
+
+                {/* Big Official OPay Bank Header */}
+                <div className="flex items-center justify-between border-b border-emerald-500/30 pb-3">
+                  <div className="flex items-center gap-3">
+                    <div className="w-11 h-11 rounded-2xl bg-gradient-to-tr from-emerald-400 to-cyan-400 flex items-center justify-center shadow-lg shadow-emerald-500/30 font-black text-slate-950 text-xl tracking-tight">
+                      OP
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-1.5">
+                        <h3 className="font-black text-base text-white tracking-wide">
+                          OPay Bank
+                        </h3>
+                        <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-400/50 text-emerald-300 font-bold text-[10px] tracking-wider uppercase">
+                          Official
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-emerald-300/80 font-medium">
+                        OPay Microfinance Bank / PayCom
+                      </p>
+                    </div>
+                  </div>
+                  <span className="text-[10px] font-mono text-emerald-400 px-2.5 py-1 rounded-xl bg-slate-950 border border-emerald-500/40 font-bold">
+                    Instant Credit
+                  </span>
+                </div>
+
+                {/* Extra Large High-Contrast Account Number Display */}
+                <div className="p-4 rounded-2xl bg-slate-950/90 border border-emerald-500/40 space-y-2 text-center shadow-inner">
+                  <span className="text-[11px] font-bold text-slate-400 uppercase tracking-widest block">
+                    OPAY ACCOUNT NUMBER
+                  </span>
+                  <div className="flex items-center justify-center gap-3">
+                    <span className="font-mono text-3xl sm:text-4xl font-black text-emerald-400 tracking-widest select-all drop-shadow-sm">
+                      {PAYMENT_INFO.accountNumber}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard.writeText(PAYMENT_INFO.accountNumber);
+                        setCopied(true);
+                        setTimeout(() => setCopied(false), 2500);
+                      }}
+                      className="p-2.5 rounded-xl bg-emerald-500 text-slate-950 hover:bg-emerald-400 transition-all shadow-md font-bold flex items-center gap-1 active:scale-95"
+                      title="Copy OPay Number"
+                    >
+                      {copied ? <Check className="w-4 h-4 stroke-[3]" /> : <Copy className="w-4 h-4" />}
+                      <span className="text-xs font-bold hidden sm:inline">{copied ? 'Copied' : 'Copy'}</span>
+                    </button>
+                  </div>
+                  {copied && (
+                    <p className="text-[11px] font-bold text-emerald-400 animate-in fade-in duration-150">
+                      ✓ OPay Account 9049979183 copied to clipboard!
+                    </p>
+                  )}
+                </div>
+
+                {/* Account Details Grid */}
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  <div className="p-2.5 rounded-xl bg-slate-950/70 border border-slate-800">
+                    <span className="text-[10px] text-slate-400 uppercase tracking-wider block">Account Name</span>
+                    <strong className="text-white text-xs font-bold mt-0.5 block truncate">
+                      {PAYMENT_INFO.accountName}
+                    </strong>
+                  </div>
+                  <div className="p-2.5 rounded-xl bg-slate-950/70 border border-slate-800">
+                    <span className="text-[10px] text-slate-400 uppercase tracking-wider block">Bank Name</span>
+                    <strong className="text-emerald-300 text-xs font-bold mt-0.5 block truncate">
+                      OPay (PayCom)
+                    </strong>
+                  </div>
+                </div>
+
+                {/* Send Proof on WhatsApp Button */}
+                <a
+                  href={PAYMENT_INFO.whatsappLink}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-400 hover:from-emerald-400 hover:to-teal-300 text-slate-950 font-black text-xs transition-all shadow-lg shadow-emerald-950/60 active:scale-[0.98]"
+                >
+                  <ExternalLink className="w-4 h-4" />
+                  <span>Send Payment Proof to Solomon on WhatsApp</span>
+                </a>
+
+                <p className="text-[10px] text-center text-slate-400 leading-tight">
+                  Transfer from any Nigerian bank app to this OPay account & tap above to get your instant key!
+                </p>
+              </div>
+
+              {/* License Plans List */}
+              <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-3">
+                <div className="flex items-center justify-between pb-2 border-b border-slate-800/80">
+                  <h4 className="font-bold text-xs uppercase tracking-wider text-emerald-400">
+                    ⚔️ LICENSE PLANS
+                  </h4>
+                  <span className="text-[10px] text-slate-400 font-mono">OPay Bank Verified</span>
+                </div>
+
+                <div className="grid grid-cols-2 gap-1.5 text-[11px]">
+                  {LICENSE_PLANS.map((plan) => (
+                    <div
+                      key={plan.id}
+                      className="p-2 rounded-lg bg-slate-900 border border-slate-800/80 flex items-center justify-between"
+                    >
+                      <span className="text-slate-300">• {plan.name}</span>
+                      <strong className="text-emerald-400 font-mono">{plan.priceFormatted}</strong>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Redeem License Key Card */}
               <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-3">
                 <div className="flex items-center justify-between pb-2 border-b border-slate-800/80">
                   <div className="flex items-center gap-2">
                     <Key className="w-4 h-4 text-emerald-400" />
                     <h3 className="font-bold text-sm text-white">Redeem License Key</h3>
                   </div>
-                  <span className="text-[10px] text-emerald-400 font-bold bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
-                    Stacking Active
-                  </span>
+                  <span className="text-[10px] text-emerald-400 font-mono">Time Stacking</span>
                 </div>
 
                 <p className="text-[11px] text-slate-400">
-                  Redeeming keys <strong>adds time accurately</strong> onto your existing balance.
+                  Have a license key? Enter it below. Adding a key automatically stacks duration on top of your existing remaining test/plan time!
                 </p>
 
-                <form onSubmit={handleRedeemInTab} className="space-y-2.5">
-                  <input
-                    type="text"
-                    placeholder="e.g. SOLVA-7D-A1B2-C3D4"
-                    value={inTabKeyInput}
-                    onChange={(e) => setInTabKeyInput(e.target.value.toUpperCase())}
-                    className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 font-mono tracking-wider"
-                    required
-                  />
+                <form onSubmit={handleRedeemInTab} className="space-y-3">
+                  <div>
+                    <input
+                      type="text"
+                      placeholder="e.g. SOLVA-1D-XXXX-YYYY"
+                      value={inTabKeyInput}
+                      onChange={(e) => setInTabKeyInput(e.target.value.toUpperCase())}
+                      className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500 font-mono uppercase tracking-wider"
+                      required
+                    />
+                  </div>
 
                   <button
                     type="submit"
@@ -629,74 +1416,11 @@ export default function App() {
                     </div>
                   )}
                 </form>
-
-                <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-slate-400">
-                  <span>No key? Choose a plan below</span>
-                  <span className="text-emerald-400 font-medium">OPay: 9049979183</span>
-                </div>
-              </div>
-
-              {/* Official Plans & OPay Payment Details */}
-              <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-3">
-                <div className="flex items-center justify-between pb-2 border-b border-slate-800/80">
-                  <h4 className="font-bold text-xs uppercase tracking-wider text-emerald-400">
-                    ⚔️ LICENSE PLANS
-                  </h4>
-                  <span className="text-[10px] text-slate-500 font-mono">OPay Bank</span>
-                </div>
-
-                <div className="grid grid-cols-2 gap-1.5 text-[11px]">
-                  {LICENSE_PLANS.map((plan) => (
-                    <div
-                      key={plan.id}
-                      className="p-2 rounded-lg bg-slate-900 border border-slate-800/80 flex items-center justify-between"
-                    >
-                      <span className="text-slate-300">• {plan.name}</span>
-                      <strong className="text-emerald-400 font-mono">{plan.priceFormatted}</strong>
-                    </div>
-                  ))}
-                </div>
-
-                {/* OPay Account Box */}
-                <div className="p-3 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5 text-xs">
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-400 text-[11px]">OPay Account:</span>
-                    <div className="flex items-center gap-1.5">
-                      <strong className="text-emerald-400 font-mono select-all text-sm">
-                        {PAYMENT_INFO.accountNumber}
-                      </strong>
-                      <button
-                        onClick={() => {
-                          navigator.clipboard.writeText(PAYMENT_INFO.accountNumber);
-                          alert('Copied OPay Account: ' + PAYMENT_INFO.accountNumber);
-                        }}
-                        className="p-1 rounded text-slate-400 hover:text-white"
-                        title="Copy Number"
-                      >
-                        <Copy className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-400 text-[11px]">Name:</span>
-                    <strong className="text-white text-[11px]">{PAYMENT_INFO.accountName}</strong>
-                  </div>
-                </div>
-
-                <a
-                  href={PAYMENT_INFO.whatsappLink}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="w-full flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold text-xs transition-colors shadow-sm"
-                >
-                  <ExternalLink className="w-3.5 h-3.5" />
-                  <span>Send Payment Proof to Solomon</span>
-                </a>
               </div>
             </div>
           )}
 
-          {/* TAB 3: COMMAND DIRECTORY */}
+          {/* TAB 3: COMMANDS */}
           {activeTab === 'commands' && (
             <div className="space-y-3">
               <div className="p-3 rounded-2xl bg-slate-950 border border-slate-800 space-y-2">
@@ -705,7 +1429,6 @@ export default function App() {
                   <h3 className="font-bold text-sm text-white">Bot Commands</h3>
                 </div>
 
-                {/* Search Commands */}
                 <div className="relative">
                   <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
                   <input
@@ -718,7 +1441,6 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Commands List */}
               <div className="space-y-1.5 max-h-[460px] overflow-y-auto pr-1">
                 {filteredCommands.map((item) => (
                   <div
@@ -729,9 +1451,7 @@ export default function App() {
                       <span className="font-mono text-emerald-400 font-bold text-xs">
                         {item.cmd}
                       </span>
-                      <p className="text-[11px] text-slate-400 mt-0.5">
-                        {item.desc}
-                      </p>
+                      <p className="text-[11px] text-slate-400 mt-0.5">{item.desc}</p>
                     </div>
                   </div>
                 ))}
@@ -740,14 +1460,12 @@ export default function App() {
           )}
         </div>
 
-        {/* Bottom Phone App Navigation Bar */}
+        {/* Bottom Nav */}
         <nav className="px-3 py-2 bg-slate-950 border-t border-slate-800/80 flex items-center justify-around shrink-0">
           <button
             onClick={() => setActiveTab('pair')}
             className={`flex flex-col items-center gap-1 py-1 px-4 rounded-xl transition-all ${
-              activeTab === 'pair'
-                ? 'text-emerald-400 font-bold'
-                : 'text-slate-400 hover:text-slate-200'
+              activeTab === 'pair' ? 'text-emerald-400 font-bold' : 'text-slate-400 hover:text-slate-200'
             }`}
           >
             <KeyRound className="w-4 h-4" />
@@ -757,9 +1475,7 @@ export default function App() {
           <button
             onClick={() => setActiveTab('license')}
             className={`flex flex-col items-center gap-1 py-1 px-4 rounded-xl transition-all ${
-              activeTab === 'license'
-                ? 'text-emerald-400 font-bold'
-                : 'text-slate-400 hover:text-slate-200'
+              activeTab === 'license' ? 'text-emerald-400 font-bold' : 'text-slate-400 hover:text-slate-200'
             }`}
           >
             <Key className="w-4 h-4" />
@@ -769,9 +1485,7 @@ export default function App() {
           <button
             onClick={() => setActiveTab('commands')}
             className={`flex flex-col items-center gap-1 py-1 px-4 rounded-xl transition-all ${
-              activeTab === 'commands'
-                ? 'text-emerald-400 font-bold'
-                : 'text-slate-400 hover:text-slate-200'
+              activeTab === 'commands' ? 'text-emerald-400 font-bold' : 'text-slate-400 hover:text-slate-200'
             }`}
           >
             <Terminal className="w-4 h-4" />
@@ -790,7 +1504,15 @@ export default function App() {
         </nav>
       </div>
 
-      {/* Auth Modal for Google Sign-In */}
+      {/* Notifications Panel */}
+      <NotificationsPanel
+        isOpen={isNotificationsOpen}
+        notifications={notifications}
+        onClose={() => setIsNotificationsOpen(false)}
+        onClear={handleClearNotifications}
+      />
+
+      {/* Auth Modal */}
       <AuthModal
         isOpen={isAuthModalOpen}
         onSuccess={(user) => {
@@ -800,7 +1522,7 @@ export default function App() {
         onClose={() => setIsAuthModalOpen(false)}
       />
 
-      {/* Solomon / Owner Admin Dashboard */}
+      {/* Admin Dashboard */}
       {isAdminModalOpen && (
         <AdminDashboard
           currentUserEmail={currentUser?.email}
