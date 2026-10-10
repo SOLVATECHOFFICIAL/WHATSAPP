@@ -164,11 +164,36 @@ Protection: *100% Private (Owner-Only Access)*`,
     if (cmd === 'expire') {
       return {
         reply: `📜 *SOLVATECH LICENSE DETAILS*
-License Key: *SOLVA-PRO-ENTERPRISE-2026*
-Status: *ACTIVE & UNLIMITED*
-Duration: *Permanent Developer Tier (365+ Days)*
+License Key: *${ctx.isOwner ? 'SOLVA-OWNER-UNLIMITED-MASTER' : 'SOLVA-PRO-USER-KEY'}*
+Status: *ACTIVE* 🟢
+Duration: *${ctx.isOwner ? '👑 Unlimited Lifetime (Master)' : 'Standard User License'}*
 Firebase Project: *solvatechbot.firebaseapp.com*
-Security Clearance: *Tier 1 Full Controller*`,
+To renew or upgrade, type *.plans* or *.buy*`,
+      };
+    }
+
+    if (cmd === 'plans' || cmd === 'buy' || cmd === 'price' || cmd === 'license') {
+      return {
+        reply: `⚔️ *SOLVATECH BOT — LICENSE PLANS* ⚔️
+
+🔑 *Choose your license duration:*
+• 1 Day — *₦200*
+• 3 Days — *₦500*
+• 7 Days — *₦1,000*
+• 14 Days / 2 Weeks — *₦2,000*
+• 30 Days — *₦4,000*
+• 2 Months — *₦8,000*
+• 3 Months — *₦12,000*
+• 6 Months — *₦24,000*
+• 12 Months — *₦48,000*
+
+💳 *PAYMENT DETAILS*
+*OPay*: *9049979183*
+*Name*: *SOLOMON OLADIMEJI*
+
+📝 *Note*: After payment, send your payment screenshot here in this chat. An admin will verify your payment and send your license key here on WhatsApp.
+
+To get key manually use *9049979183* to get key.`,
       };
     }
 

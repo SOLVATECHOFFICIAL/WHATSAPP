@@ -51,7 +51,8 @@ export const UserAccountNav: React.FC<UserAccountNavProps> = ({ user, onOpenAuth
     );
   }
 
-  const licenseKey = `SOLVA-${user.uid.slice(0, 6).toUpperCase()}-2026`;
+  const isOwner = user.email === 'awoyinfasolomon1@gmail.com' || user.email?.includes('awoyinfasolomon') || user.uid === 'owner_master';
+  const licenseKey = isOwner ? 'SOLVA-OWNER-UNLIMITED-MASTER' : `SOLVA-${user.uid.slice(0, 6).toUpperCase()}-2026`;
 
   return (
     <div className="relative" ref={dropdownRef}>

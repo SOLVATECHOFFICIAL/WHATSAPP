@@ -5,7 +5,6 @@ import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { whatsappManager } from './src/server/whatsapp.ts';
 import { commandHandler, SOLVATECH_MENU } from './src/server/commands.ts';
-import { GoogleGenAI } from '@google/genai';
 
 dotenv.config();
 
@@ -14,7 +13,7 @@ const __dirname = path.dirname(__filename);
 
 async function startServer() {
   const app = express();
-  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+  const PORT = 3000;
   const isProd = process.env.NODE_ENV === 'production';
 
   app.use(express.json());
@@ -115,46 +114,6 @@ async function startServer() {
       res.json({ success: true, result });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
-    }
-  });
-
-  // Image Generation with Aspect Ratio & Image Size Affordance
-  app.post('/api/ai/generate-image', async (req, res) => {
-    try {
-      const { prompt, aspectRatio = '1:1', imageSize = '1K' } = req.body;
-      if (!prompt) {
-        return res.status(400).json({ success: false, error: 'Image prompt is required' });
-      }
-
-      const ai = new GoogleGenAI();
-      const response = await ai.models.generateImages({
-        model: 'gemini-3-pro-image-preview',
-        prompt,
-        config: {
-          numberOfImages: 1,
-          outputMimeType: 'image/jpeg',
-          aspectRatio: aspectRatio as any,
-          imageSize: imageSize as any,
-        },
-      });
-
-      const base64ImageBytes = response.generatedImages?.[0]?.image?.imageBytes;
-      if (!base64ImageBytes) {
-        throw new Error('No image returned from Gemini image model');
-      }
-
-      res.json({
-        success: true,
-        imageUrl: `data:image/jpeg;base64,${base64ImageBytes}`,
-        aspectRatio,
-        imageSize,
-      });
-    } catch (err: any) {
-      console.error('Image generation error:', err);
-      res.status(500).json({
-        success: false,
-        error: err.message || 'Image generation failed',
-      });
     }
   });
 

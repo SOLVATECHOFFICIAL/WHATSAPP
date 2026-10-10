@@ -5,36 +5,33 @@ import {
   Copy,
   Check,
   RefreshCw,
-  QrCode,
   KeyRound,
-  Send,
   LogOut,
-  Bell,
   Radio,
-  ChevronRight,
-  ShieldCheck,
-  Terminal,
-  Database,
-  Sparkles,
-  Server,
-  Layers,
+  Clock,
+  Zap,
   Key,
-  Flame,
-  Info,
-  UserCheck,
-  Lock
+  ShieldCheck,
+  AlertCircle,
+  ExternalLink,
+  Terminal,
+  Search,
 } from 'lucide-react';
 import { User } from 'firebase/auth';
-import { onAuthChange, signOutUser } from './services/firebase';
+import { doc, onSnapshot } from 'firebase/firestore';
+import { db, onAuthChange } from './services/firebase';
 import { COUNTRIES, Country } from './data/countries';
 import { CountrySelect } from './components/CountrySelect';
-import { NotificationsPanel, WhatsAppNotification } from './components/NotificationsPanel';
-import { CommandDirectory } from './components/CommandDirectory';
-import { ChatSimulator } from './components/ChatSimulator';
-import { ImageGeneratorModal } from './components/ImageGeneratorModal';
-import { RailwayGuideModal } from './components/RailwayGuideModal';
 import { AuthModal } from './components/AuthModal';
 import { UserAccountNav } from './components/UserAccountNav';
+import { AdminDashboard } from './components/AdminDashboard';
+import {
+  OWNER_EMAIL,
+  calculateRemainingTime,
+  redeemKey,
+  LICENSE_PLANS,
+  PAYMENT_INFO,
+} from './services/license';
 
 interface WhatsAppStatus {
   state: 'disconnected' | 'connecting' | 'awaiting_pairing' | 'connected';
@@ -54,52 +51,111 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [isAdminModalOpen, setIsAdminModalOpen] = useState(false);
 
   const [selectedCountry, setSelectedCountry] = useState<Country>(COUNTRIES[0]); // Default Nigeria 🇳🇬 (+234)
   const [phoneNumber, setPhoneNumber] = useState('');
   const [loading, setLoading] = useState(false);
-  const [pairingMode, setPairingMode] = useState<'code' | 'qr'>('code');
   const [copied, setCopied] = useState(false);
-  const [activeTab, setActiveTab] = useState<'pair' | 'commands' | 'terminal'>('pair');
-  const [commandToRun, setCommandToRun] = useState<string | undefined>(undefined);
+  const [activeTab, setActiveTab] = useState<'pair' | 'license' | 'commands'>('pair');
 
   const [status, setStatus] = useState<WhatsAppStatus>({
     state: 'disconnected',
     isConnected: false,
   });
   const [pairingCode, setPairingCode] = useState<string | null>(null);
-  const [notifications, setNotifications] = useState<WhatsAppNotification[]>([]);
-  const [isNotifOpen, setIsNotifOpen] = useState(false);
+  const [pairingError, setPairingError] = useState<string | null>(null);
   const [countdown, setCountdown] = useState<number>(120);
 
-  // Modals
-  const [isImageModalOpen, setIsImageModalOpen] = useState(false);
-  const [isRailwayModalOpen, setIsRailwayModalOpen] = useState(false);
+  // License state with time stacking
+  const [userLicenseData, setUserLicenseData] = useState<{
+    expiresAt: string | null;
+    isUnlimited: boolean;
+    plan: string;
+    key: string | null;
+  }>({
+    expiresAt: null,
+    isUnlimited: false,
+    plan: 'Trial',
+    key: null,
+  });
 
-  // Test outbound message
-  const [testToPhone, setTestToPhone] = useState('');
-  const [testMessage, setTestMessage] = useState('Hello from SOLVATECH! WhatsApp Baileys is active and linked.');
-  const [sendingTest, setSendingTest] = useState(false);
-  const [testResult, setTestResult] = useState<string | null>(null);
+  const [remainingTimeDisplay, setRemainingTimeDisplay] = useState<string>('Checking...');
+  const [inTabKeyInput, setInTabKeyInput] = useState('');
+  const [inTabRedeeming, setInTabRedeeming] = useState(false);
+  const [inTabSuccess, setInTabSuccess] = useState<string | null>(null);
+  const [inTabError, setInTabError] = useState<string | null>(null);
+  const [commandSearch, setCommandSearch] = useState('');
 
-  // Listen to Firebase Auth state
+  // Check if owner
+  const isOwner =
+    currentUser?.email?.toLowerCase() === OWNER_EMAIL.toLowerCase() ||
+    currentUser?.email?.toLowerCase() === 'solomonoladimeji9049@gmail.com' ||
+    userLicenseData.isUnlimited;
+
+  // Listen to Auth State and real-time Firestore license sync
   useEffect(() => {
     const unsubscribe = onAuthChange((user) => {
       setCurrentUser(user);
       setAuthLoading(false);
+
+      if (user) {
+        const saved = localStorage.getItem(`solvatech_user_${user.uid}`);
+        if (saved) {
+          try {
+            const parsed = JSON.parse(saved);
+            setUserLicenseData({
+              expiresAt: parsed.licenseExpiresAt || null,
+              isUnlimited: !!parsed.isUnlimited,
+              plan: parsed.licensePlan || 'Active Plan',
+              key: parsed.licenseKey || null,
+            });
+          } catch (e) {
+            console.error('Failed to parse saved user license:', e);
+          }
+        }
+
+        // Real-time Firestore sync: instantly reflects Admin Unlimited toggle!
+        try {
+          onSnapshot(doc(db, 'users', user.uid), (snap) => {
+            if (snap.exists()) {
+              const data = snap.data();
+              setUserLicenseData({
+                expiresAt: data.licenseExpiresAt || null,
+                isUnlimited: !!data.isUnlimited,
+                plan: data.licensePlan || (data.isUnlimited ? '👑 Unlimited Lifetime (Admin Granted)' : 'Active Plan'),
+                key: data.licenseKey || null,
+              });
+            }
+          });
+        } catch (e) {
+          console.warn('Firestore user listener warning:', e);
+        }
+      }
     });
     return () => unsubscribe();
   }, []);
 
-  // Polling backend status and notifications
+  // Real-time ticking Countdown Timer (down to seconds & accurate stacking)
   useEffect(() => {
-    const fetchStatusAndNotifications = async () => {
-      try {
-        const [resStatus, resNotif] = await Promise.all([
-          fetch('/api/whatsapp/status'),
-          fetch('/api/whatsapp/notifications'),
-        ]);
+    const updateTime = () => {
+      const info = calculateRemainingTime(
+        userLicenseData.expiresAt,
+        isOwner || userLicenseData.isUnlimited
+      );
+      setRemainingTimeDisplay(info.formatted);
+    };
 
+    updateTime();
+    const interval = setInterval(updateTime, 1000);
+    return () => clearInterval(interval);
+  }, [userLicenseData, isOwner]);
+
+  // Polling backend status
+  useEffect(() => {
+    const fetchStatus = async () => {
+      try {
+        const resStatus = await fetch('/api/whatsapp/status');
         if (resStatus.ok) {
           const data = await resStatus.json();
           if (data.status) {
@@ -111,24 +167,17 @@ export default function App() {
             }
           }
         }
-
-        if (resNotif.ok) {
-          const data = await resNotif.json();
-          if (data.notifications) {
-            setNotifications(data.notifications);
-          }
-        }
       } catch (err) {
         console.error('Error polling WhatsApp status:', err);
       }
     };
 
-    fetchStatusAndNotifications();
-    const interval = setInterval(fetchStatusAndNotifications, 2500);
+    fetchStatus();
+    const interval = setInterval(fetchStatus, 3000);
     return () => clearInterval(interval);
   }, []);
 
-  // Countdown timer for pairing code
+  // Countdown timer for pairing code (120s)
   useEffect(() => {
     let timer: NodeJS.Timeout;
     if (pairingCode && countdown > 0 && !status.isConnected) {
@@ -139,13 +188,21 @@ export default function App() {
     return () => clearInterval(timer);
   }, [pairingCode, countdown, status.isConnected]);
 
-  // Handle request pairing code
+  // Handle request pairing code (With Auto-Switch to License if Expired or Missing)
   const handleRequestPairingCode = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     if (!phoneNumber) return;
 
     if (!currentUser) {
       setIsAuthModalOpen(true);
+      return;
+    }
+
+    // CHECK LICENSE: Auto switch to License tab if expired and not owner
+    const licenseCheck = calculateRemainingTime(userLicenseData.expiresAt, isOwner || userLicenseData.isUnlimited);
+    if (!isOwner && !userLicenseData.isUnlimited && licenseCheck.isExpired) {
+      setActiveTab('license');
+      setInTabError('⚠️ License Required: Your key has expired or you do not have an active key. Please enter your key below or pick a plan to connect WhatsApp!');
       return;
     }
 
@@ -158,7 +215,7 @@ export default function App() {
     const fullNumber = `${cleanDial}${cleanEntered}`;
 
     setLoading(true);
-    setTestResult(null);
+    setPairingError(null);
 
     try {
       const res = await fetch('/api/whatsapp/pair-code', {
@@ -178,10 +235,10 @@ export default function App() {
           targetPhone: `+${fullNumber}`,
         }));
       } else {
-        alert(data.error || 'Failed to request pairing code');
+        setPairingError(data.error || 'Failed to request pairing code');
       }
     } catch (err: any) {
-      alert(err.message || 'Error communicating with Baileys server');
+      setPairingError(err.message || 'Error communicating with WhatsApp server');
     } finally {
       setLoading(false);
     }
@@ -195,7 +252,7 @@ export default function App() {
   };
 
   const handleLogoutWhatsApp = async () => {
-    if (!confirm('Are you sure you want to unlink and clear this WhatsApp session?')) return;
+    if (!confirm('Unlink this WhatsApp session?')) return;
     setLoading(true);
     try {
       await fetch('/api/whatsapp/logout', { method: 'POST' });
@@ -208,640 +265,530 @@ export default function App() {
     }
   };
 
-  const handleClearNotifications = async () => {
-    try {
-      await fetch('/api/whatsapp/notifications', { method: 'DELETE' });
-      setNotifications([]);
-    } catch (err) {
-      console.error(err);
-    }
-  };
-
-  const handleSendTestMessage = async (e: React.FormEvent) => {
+  // Redeem key with accurate time stacking
+  const handleRedeemInTab = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!testToPhone || !testMessage) return;
+    if (!inTabKeyInput.trim() || inTabRedeeming) return;
 
-    setSendingTest(true);
-    setTestResult(null);
+    setInTabRedeeming(true);
+    setInTabSuccess(null);
+    setInTabError(null);
+
     try {
-      const res = await fetch('/api/whatsapp/send-message', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          to: testToPhone,
-          message: testMessage,
-        }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        setTestResult('Message sent successfully through your linked WhatsApp!');
+      const res = await redeemKey(
+        currentUser?.uid || 'user_guest',
+        currentUser?.email || 'guest@solvatech.com',
+        inTabKeyInput
+      );
+
+      if (res.success) {
+        setInTabSuccess(res.message);
+        setInTabKeyInput('');
+        setUserLicenseData((prev) => ({
+          ...prev,
+          expiresAt: res.expiresAt || prev.expiresAt,
+          plan: 'Active Paid Plan',
+          isUnlimited: false,
+        }));
       } else {
-        setTestResult(`Error: ${data.error}`);
+        setInTabError(res.message);
       }
     } catch (err: any) {
-      setTestResult(`Failed: ${err.message}`);
+      setInTabError(err.message || 'Error activating key');
     } finally {
-      setSendingTest(false);
+      setInTabRedeeming(false);
     }
-  };
-
-  const handleRunCommandFromDirectory = (cmd: string) => {
-    setCommandToRun(cmd);
-    setActiveTab('terminal');
   };
 
   const fullCleanPhone = phoneNumber
     ? `${selectedCountry.dialCode} ${phoneNumber.replace(/\D/g, '')}`
     : '';
 
-  const userLicense = currentUser
-    ? `SOLVA-${currentUser.uid.slice(0, 6).toUpperCase()}-2026`
-    : 'SIGN-IN-REQUIRED';
+  const isLicenseActive = isOwner || userLicenseData.isUnlimited || !calculateRemainingTime(userLicenseData.expiresAt, false).isExpired;
+
+  // Compact bot commands list
+  const BOT_COMMANDS = [
+    { cmd: '.menu', desc: 'Display all bot commands & active bot info' },
+    { cmd: '.ping', desc: 'Check network speed and response latency' },
+    { cmd: '.uptime', desc: 'Bot continuous runtime and server status' },
+    { cmd: '.expire', desc: 'Check your license expiry & remaining days/minutes' },
+    { cmd: '.ai <prompt>', desc: 'Ask AI question, writing or explanations' },
+    { cmd: '.sticker', desc: 'Convert image or video to WhatsApp sticker' },
+    { cmd: '.antisticker', desc: 'Convert sticker back into photo or video' },
+    { cmd: '.read', desc: 'Extract text from photo via OCR' },
+    { cmd: '.open', desc: 'View-once media receiver (anti-view-once)' },
+    { cmd: '.tagall <msg>', desc: 'Mention all group members at once' },
+    { cmd: '.pin', desc: 'Pin message in WhatsApp group for 7 days' },
+    { cmd: '.del', desc: 'Delete replied message from group' },
+    { cmd: '.kick @user', desc: 'Remove member from WhatsApp group' },
+    { cmd: '.add <number>', desc: 'Add participant to group with country code' },
+    { cmd: '.promote @user', desc: 'Promote participant to group admin' },
+    { cmd: '.demote @user', desc: 'Demote group admin to normal member' },
+    { cmd: '.lock / .unlock', desc: 'Close or open group chat for members' },
+    { cmd: '.antilink on/off', desc: 'Automatically remove external group links' },
+    { cmd: '.antibot on/off', desc: 'Auto-kick unauthorized bot accounts' },
+    { cmd: '.warn @user', desc: 'Issue warning to group participant' },
+    { cmd: '.owner', desc: 'Developer & Solomon contact details' },
+  ];
+
+  const filteredCommands = BOT_COMMANDS.filter(
+    (c) => c.cmd.toLowerCase().includes(commandSearch.toLowerCase()) || c.desc.toLowerCase().includes(commandSearch.toLowerCase())
+  );
 
   return (
-    <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col font-sans">
-      {/* Top Navbar */}
-      <header className="border-b border-slate-800 bg-slate-950/80 backdrop-blur-md sticky top-0 z-40 px-4 lg:px-8 py-3.5">
-        <div className="max-w-6xl mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-emerald-600 to-teal-400 flex items-center justify-center shadow-lg shadow-emerald-950/50">
-              <Smartphone className="w-5 h-5 text-white" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h1 className="font-bold text-lg text-white tracking-tight">SOLVATECH</h1>
-                <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                  WHATSAPP BOT HUB
-                </span>
-              </div>
-              <p className="text-xs text-slate-400">Owner-Only Private WhatsApp Engine & License Portal</p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2 sm:gap-3">
-            {/* Firebase Sync Indicator */}
-            <div className="hidden lg:flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-slate-900 border border-slate-800 text-[11px] text-slate-300 font-mono">
-              <Database className="w-3.5 h-3.5 text-amber-400" />
-              <span>Firebase: <strong className="text-emerald-400">solvatechbot</strong> 🟢</span>
-            </div>
-
-            {/* AI Image Studio */}
-            <button
-              onClick={() => setIsImageModalOpen(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 border border-emerald-500/30 text-xs font-semibold transition-all"
-            >
-              <Sparkles className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">AI Studio</span>
-            </button>
-
-            {/* Railway 24/7 */}
-            <button
-              onClick={() => setIsRailwayModalOpen(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-purple-500/10 text-purple-300 hover:bg-purple-500/20 border border-purple-500/30 text-xs font-semibold transition-all"
-            >
-              <Server className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Railway 24/7</span>
-            </button>
-
-            {/* Notifications Feed Button */}
-            <button
-              onClick={() => setIsNotifOpen(true)}
-              className="relative p-2 rounded-xl bg-slate-800/80 hover:bg-slate-800 text-slate-300 hover:text-white transition-all border border-slate-700/60"
-              title="Live WhatsApp Notifications"
-            >
-              <Bell className="w-5 h-5" />
-              {notifications.length > 0 && (
-                <span className="absolute -top-1 -right-1 px-1.5 py-0.5 min-w-[18px] text-[10px] font-bold bg-emerald-500 text-slate-950 rounded-full text-center">
-                  {notifications.length}
-                </span>
-              )}
-            </button>
-
-            {/* Google Account Authentication Nav */}
-            <UserAccountNav
-              user={currentUser}
-              onOpenAuthModal={() => setIsAuthModalOpen(true)}
-            />
-          </div>
-        </div>
-      </header>
-
-      {/* Main Container */}
-      <main className="flex-1 max-w-6xl w-full mx-auto p-4 sm:p-6 lg:p-8 space-y-6">
-        {/* Important WhatsApp Runtime Clarification Banner */}
-        <div className="bg-gradient-to-r from-emerald-950/40 via-slate-950 to-slate-950 border border-emerald-500/30 rounded-2xl p-4 sm:p-5 shadow-xl flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
-          <div className="flex items-start gap-3.5">
-            <div className="p-2.5 rounded-xl bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 shrink-0">
-              <Radio className="w-5 h-5 animate-pulse" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h3 className="font-bold text-white text-sm sm:text-base">
-                  SOLVATECH Runs Directly Inside Your Real WhatsApp
-                </h3>
-                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                  REAL BAILEYS SOCKET
-                </span>
-              </div>
-              <p className="text-xs text-slate-300 mt-1 leading-relaxed">
-                All 35+ commands, automated anti-delete recovery, and responses execute <strong>directly in WhatsApp</strong> on your phone. This website is your control portal to sign in with Google, pair your number, manage your personal account, and view real-time WhatsApp logs.
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2 shrink-0 text-xs font-mono bg-slate-900/80 px-3.5 py-2 rounded-xl border border-slate-800">
-            <Key className="w-3.5 h-3.5 text-amber-400" />
-            <span className="text-slate-400">License:</span>
-            <span className="text-emerald-400 font-bold">{userLicense}</span>
-          </div>
-        </div>
-
-        {/* Account Warning Gate if not logged in */}
-        {!currentUser && !authLoading && (
-          <div className="bg-gradient-to-r from-amber-950/40 via-slate-950 to-slate-950 border border-amber-500/40 rounded-2xl p-4 sm:p-5 shadow-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-            <div className="flex items-center gap-3">
-              <div className="p-2.5 rounded-xl bg-amber-500/10 text-amber-400 border border-amber-500/20">
-                <Lock className="w-5 h-5" />
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-0 sm:p-4 font-sans select-none sm:select-auto">
+      {/* Phone Mockup Container — Compact, Single Screen, Zero Overlapping */}
+      <div className="w-full sm:max-w-md bg-slate-900 sm:border border-slate-800 sm:rounded-[36px] rounded-none shadow-2xl flex flex-col h-screen sm:h-[840px] max-h-screen sm:max-h-[840px] overflow-hidden relative">
+        
+        {/* Top Phone Status & Header */}
+        <header className="px-4 pt-3 pb-2.5 bg-slate-950 border-b border-slate-800/80 flex flex-col gap-2 shrink-0">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-emerald-500 to-teal-400 flex items-center justify-center shadow-md shadow-emerald-950/60">
+                <Smartphone className="w-4 h-4 text-slate-950 font-bold" />
               </div>
               <div>
-                <h4 className="font-bold text-white text-sm">Personal Google Account Required</h4>
-                <p className="text-xs text-slate-400 mt-0.5">
-                  Sign in with Google so your linked WhatsApp session, license key, and bot settings will never be lost.
+                <div className="flex items-center gap-1.5">
+                  <h1 className="font-extrabold text-sm text-white tracking-tight">SOLVATECH</h1>
+                  <span className={`w-2 h-2 rounded-full ${status.isConnected ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'}`} />
+                </div>
+                <p className="text-[10px] text-slate-400 font-mono">
+                  {status.isConnected ? 'WhatsApp Linked' : 'Baileys Multi-Device'}
                 </p>
               </div>
             </div>
-            <button
-              onClick={() => setIsAuthModalOpen(true)}
-              className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-white hover:bg-slate-100 text-slate-900 font-bold text-xs shadow-md transition-all active:scale-95 shrink-0"
-            >
-              <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24">
-                <path
-                  fill="#4285F4"
-                  d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
-                />
-                <path
-                  fill="#34A853"
-                  d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
-                />
-                <path
-                  fill="#FBBC05"
-                  d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"
-                />
-                <path
-                  fill="#EA4335"
-                  d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"
-                />
-              </svg>
-              <span>Sign in with Google</span>
-            </button>
-          </div>
-        )}
 
-        {/* Dashboard Tabs */}
-        <div className="flex items-center justify-between border-b border-slate-800 pb-3 flex-wrap gap-3">
-          <div className="flex bg-slate-950 p-1.5 rounded-2xl border border-slate-800 text-xs font-semibold">
-            <button
-              onClick={() => setActiveTab('pair')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-xl transition-all ${
-                activeTab === 'pair'
-                  ? 'bg-emerald-600 text-white shadow-md'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              <KeyRound className="w-4 h-4" />
-              <span>Link WhatsApp (Baileys)</span>
-            </button>
-            <button
-              onClick={() => setActiveTab('commands')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-xl transition-all ${
-                activeTab === 'commands'
-                  ? 'bg-emerald-600 text-white shadow-md'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              <Terminal className="w-4 h-4" />
-              <span>WhatsApp Commands (35+)</span>
-            </button>
-            <button
-              onClick={() => setActiveTab('terminal')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-xl transition-all ${
-                activeTab === 'terminal'
-                  ? 'bg-emerald-600 text-white shadow-md'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              <Radio className="w-4 h-4" />
-              <span>Preview Terminal</span>
-            </button>
-          </div>
-
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-xs">
-            <span className="relative flex h-2 w-2">
-              {status.isConnected ? (
-                <>
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                </>
-              ) : status.state === 'awaiting_pairing' ? (
-                <>
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
-                </>
-              ) : (
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-slate-500"></span>
+            <div className="flex items-center gap-2">
+              {/* Owner Admin Hub Button */}
+              {isOwner && (
+                <button
+                  onClick={() => setIsAdminModalOpen(true)}
+                  className="px-2.5 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 text-[11px] font-bold flex items-center gap-1 transition-all"
+                  title="Open Admin Management"
+                >
+                  <Key className="w-3 h-3 text-amber-400" />
+                  <span>Admin</span>
+                </button>
               )}
-            </span>
-            <span className="font-mono text-slate-300">
-              {status.isConnected ? `Linked WhatsApp: ${status.user?.phone || 'Online'}` : 'Not Linked Yet'}
-            </span>
+
+              {/* User Account / Google Sign-in */}
+              <UserAccountNav
+                user={currentUser}
+                onOpenAuthModal={() => setIsAuthModalOpen(true)}
+              />
+            </div>
           </div>
-        </div>
 
-        {/* TAB 1: BAILEYS PAIRING (STEP 1) */}
-        {activeTab === 'pair' && (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-            {/* Main Pairing Card */}
-            <div className="lg:col-span-7 bg-slate-950 border border-slate-800 rounded-2xl p-6 shadow-xl flex flex-col justify-between">
-              <div>
-                <div className="flex items-center justify-between pb-4 border-b border-slate-800">
-                  <div className="flex items-center gap-3">
-                    <div className="p-2.5 rounded-xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                      <Radio className="w-5 h-5 animate-pulse" />
-                    </div>
-                    <div>
-                      <h3 className="text-base font-bold text-white flex items-center gap-2">
-                        Pair Real WhatsApp Account
-                      </h3>
-                      <p className="text-xs text-slate-400">
-                        Official Baileys multi-device pairing for any phone number worldwide
-                      </p>
-                    </div>
-                  </div>
+          {/* Real-time License Countdown Banner (Click to switch to License Tab) */}
+          <button
+            onClick={() => setActiveTab('license')}
+            className={`w-full px-3 py-1.5 rounded-xl border flex items-center justify-between text-left transition-all ${
+              isLicenseActive
+                ? 'bg-emerald-950/30 border-emerald-500/40 hover:bg-emerald-950/40'
+                : 'bg-rose-950/30 border-rose-500/40 hover:bg-rose-950/40'
+            }`}
+          >
+            <div className="flex items-center gap-2 min-w-0">
+              <Clock className={`w-3.5 h-3.5 shrink-0 ${isLicenseActive ? 'text-emerald-400 animate-pulse' : 'text-rose-400'}`} />
+              <div className="truncate">
+                <span className="text-[10px] text-slate-400 block leading-tight">License Time:</span>
+                <span className={`text-xs font-bold font-mono ${isLicenseActive ? 'text-emerald-300' : 'text-rose-300'}`}>
+                  {remainingTimeDisplay}
+                </span>
+              </div>
+            </div>
+            <div className="flex items-center gap-1 shrink-0 text-[10px] font-bold text-slate-300 bg-slate-900/90 px-2 py-0.5 rounded-md border border-slate-700/60">
+              <span>{isOwner || userLicenseData.isUnlimited ? '👑 VIP' : 'Stack / Add'}</span>
+              <Zap className="w-2.5 h-2.5 text-amber-400" />
+            </div>
+          </button>
+        </header>
 
-                  {/* Mode Toggle */}
-                  <div className="flex bg-slate-900 p-1 rounded-xl border border-slate-800 text-xs">
-                    <button
-                      onClick={() => setPairingMode('code')}
-                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-medium transition-all ${
-                        pairingMode === 'code'
-                          ? 'bg-emerald-600 text-white shadow-sm'
-                          : 'text-slate-400 hover:text-slate-200'
-                      }`}
-                    >
-                      <KeyRound className="w-3.5 h-3.5" />
-                      <span>Pairing Code</span>
-                    </button>
-                    <button
-                      onClick={() => setPairingMode('qr')}
-                      className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-medium transition-all ${
-                        pairingMode === 'qr'
-                          ? 'bg-emerald-600 text-white shadow-sm'
-                          : 'text-slate-400 hover:text-slate-200'
-                      }`}
-                    >
-                      <QrCode className="w-3.5 h-3.5" />
-                      <span>QR Code</span>
-                    </button>
-                  </div>
-                </div>
+        {/* Phone Content Body — Clean, Focused, No Bloat */}
+        <div className="flex-1 overflow-y-auto p-4 space-y-4">
 
-                {/* Already Connected State */}
-                {status.isConnected ? (
-                  <div className="mt-6 p-6 rounded-2xl bg-emerald-950/20 border border-emerald-500/30 text-center space-y-4">
-                    <div className="w-16 h-16 mx-auto rounded-full bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400">
-                      <CheckCircle2 className="w-8 h-8" />
-                    </div>
-                    <div>
-                      <h4 className="text-lg font-bold text-white">Your WhatsApp is Linked & Active!</h4>
-                      <p className="text-xs text-emerald-300/80 mt-1">
-                        SOLVATECH engine is connected to your WhatsApp number. You can now use all 35+ commands directly inside WhatsApp!
-                      </p>
-                      <div className="mt-3 inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-900/80 border border-emerald-500/30 font-mono text-xs text-emerald-300">
-                        <span>Connected Phone: {status.user?.phone || status.user?.id}</span>
+          {/* TAB 1: PAIR WHATSAPP */}
+          {activeTab === 'pair' && (
+            <div className="space-y-4">
+              {/* WhatsApp Connection Status Card */}
+              {status.isConnected ? (
+                <div className="p-4 rounded-2xl bg-emerald-950/30 border border-emerald-500/30 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <div className="w-8 h-8 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center">
+                        <CheckCircle2 className="w-5 h-5 text-emerald-400" />
+                      </div>
+                      <div>
+                        <h3 className="font-bold text-sm text-white">Bot Connected & Active</h3>
+                        <p className="text-[11px] text-emerald-300/80 font-mono">
+                          {status.user?.phone || status.targetPhone || 'Active Device'}
+                        </p>
                       </div>
                     </div>
-
-                    <div className="flex justify-center gap-3 pt-2">
-                      <button
-                        onClick={handleLogoutWhatsApp}
-                        disabled={loading}
-                        className="flex items-center gap-2 px-4 py-2 rounded-xl bg-rose-500/20 text-rose-300 border border-rose-500/30 hover:bg-rose-500/30 text-xs font-semibold transition-all"
-                      >
-                        <LogOut className="w-4 h-4" />
-                        <span>Unlink / Disconnect Session</span>
-                      </button>
-                    </div>
+                    <button
+                      onClick={handleLogoutWhatsApp}
+                      disabled={loading}
+                      className="p-2 rounded-xl bg-slate-900 hover:bg-rose-950/40 text-slate-400 hover:text-rose-400 border border-slate-800 transition-colors"
+                      title="Unlink WhatsApp"
+                    >
+                      <LogOut className="w-4 h-4" />
+                    </button>
                   </div>
-                ) : pairingMode === 'code' ? (
-                  /* Pairing Code Form */
-                  <form onSubmit={handleRequestPairingCode} className="mt-6 space-y-5">
+                  <p className="text-[11px] text-slate-300">
+                    Your bot is listening to messages and answering commands (.menu, .ping, etc.) in your WhatsApp.
+                  </p>
+                </div>
+              ) : (
+                /* Pairing Form */
+                <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-3">
+                  <div className="flex items-center gap-2 pb-2 border-b border-slate-800/80">
+                    <Radio className="w-4 h-4 text-emerald-400 animate-pulse" />
+                    <h3 className="font-bold text-sm text-white">Link Your WhatsApp</h3>
+                  </div>
+
+                  {/* Expired / No License Auto-Alert */}
+                  {!isLicenseActive && (
+                    <div className="p-3 rounded-xl bg-amber-950/30 border border-amber-500/40 text-amber-300 text-xs flex items-start gap-2">
+                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-amber-400" />
+                      <div>
+                        <p className="font-semibold">License Key Required</p>
+                        <p className="text-[11px] text-amber-300/80 mt-0.5">
+                          You need an active key to link WhatsApp.
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => setActiveTab('license')}
+                          className="mt-1.5 px-2.5 py-1 rounded-lg bg-amber-500 text-slate-950 font-bold text-[11px] flex items-center gap-1"
+                        >
+                          <span>Redeem Key Now</span>
+                          <Zap className="w-3 h-3" />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  <form onSubmit={handleRequestPairingCode} className="space-y-3">
                     <div>
-                      <label className="block text-xs font-medium text-slate-300 mb-2">
-                        Select Country (All Countries in the World)
+                      <label className="block text-[11px] font-medium text-slate-300 mb-1">
+                        Select Country
                       </label>
                       <CountrySelect
                         selectedCountry={selectedCountry}
-                        onSelect={(c) => setSelectedCountry(c)}
+                        onSelect={setSelectedCountry}
                       />
                     </div>
 
                     <div>
-                      <div className="flex items-center justify-between mb-2">
-                        <label className="text-xs font-medium text-slate-300">
-                          Your WhatsApp Phone Number
-                        </label>
-                        <span className="text-[11px] text-slate-500">
-                          Format: e.g. {selectedCountry.format || '8012345678'}
-                        </span>
-                      </div>
-
-                      <div className="relative flex rounded-xl border border-slate-700 bg-slate-900 overflow-hidden focus-within:border-emerald-500 focus-within:ring-2 focus-within:ring-emerald-500/20 transition-all">
-                        <div className="flex items-center px-3.5 bg-slate-800/80 text-emerald-400 font-mono font-semibold text-sm border-r border-slate-700">
+                      <label className="block text-[11px] font-medium text-slate-300 mb-1">
+                        Phone Number
+                      </label>
+                      <div className="flex rounded-xl overflow-hidden border border-slate-800 bg-slate-900 focus-within:border-emerald-500 transition-colors">
+                        <span className="px-3 py-2.5 bg-slate-950 text-slate-400 text-xs font-mono font-semibold border-r border-slate-800 flex items-center">
                           {selectedCountry.dialCode}
-                        </div>
+                        </span>
                         <input
                           type="tel"
+                          placeholder="e.g. 8012345678"
                           value={phoneNumber}
                           onChange={(e) => setPhoneNumber(e.target.value)}
-                          placeholder={selectedCountry.format || 'Enter phone number'}
-                          className="flex-1 bg-transparent px-4 py-3 text-sm text-white placeholder-slate-500 focus:outline-none font-mono"
+                          className="flex-1 bg-transparent px-3 py-2.5 text-sm text-white placeholder-slate-500 focus:outline-none font-mono"
                           required
                         />
                       </div>
-
-                      {fullCleanPhone && (
-                        <p className="mt-1.5 text-[11px] text-emerald-400/80 font-mono">
-                          Target WhatsApp JID: {fullCleanPhone}
-                        </p>
-                      )}
                     </div>
 
                     <button
                       type="submit"
                       disabled={loading || !phoneNumber}
-                      className="w-full flex items-center justify-center gap-2 py-3.5 px-4 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-500 hover:to-teal-400 text-slate-950 font-bold text-sm shadow-lg shadow-emerald-950/40 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+                      className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-500 hover:to-teal-400 text-slate-950 font-bold text-xs shadow-md disabled:opacity-50 transition-all flex items-center justify-center gap-2"
                     >
                       {loading ? (
                         <>
                           <RefreshCw className="w-4 h-4 animate-spin" />
-                          <span>Requesting Pairing Code from WhatsApp...</span>
+                          <span>Generating Pairing Code...</span>
                         </>
                       ) : (
                         <>
                           <KeyRound className="w-4 h-4 text-slate-950" />
-                          <span>Get WhatsApp 8-Digit Pairing Code</span>
+                          <span>Get 8-Digit Pairing Code</span>
                         </>
                       )}
                     </button>
 
-                    {/* Active Pairing Code Display */}
-                    {pairingCode && (
-                      <div className="mt-5 p-5 rounded-2xl bg-gradient-to-b from-slate-900 to-slate-950 border border-emerald-500/40 shadow-inner">
-                        <div className="flex items-center justify-between text-xs text-slate-400 mb-2">
-                          <span className="font-semibold text-emerald-400 flex items-center gap-1.5">
-                            <CheckCircle2 className="w-4 h-4" />
-                            Code Ready for {status.targetPhone || fullCleanPhone}
-                          </span>
-                          <span className="font-mono text-slate-400">
-                            Expires in: <strong className="text-white">{countdown}s</strong>
-                          </span>
-                        </div>
-
-                        {/* Giant Pairing Code */}
-                        <div className="flex items-center justify-center gap-3 py-4 my-2 rounded-xl bg-slate-950 border border-slate-800">
-                          <span className="font-mono text-3xl sm:text-4xl font-extrabold tracking-widest text-emerald-400 select-all">
-                            {pairingCode}
-                          </span>
-                          <button
-                            type="button"
-                            onClick={handleCopyCode}
-                            className="p-2.5 rounded-lg bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 transition-all border border-emerald-500/30"
-                            title="Copy Pairing Code"
-                          >
-                            {copied ? <Check className="w-5 h-5" /> : <Copy className="w-5 h-5" />}
-                          </button>
-                        </div>
-
-                        {/* Instructions */}
-                        <div className="mt-3 text-xs text-slate-300 space-y-1.5 bg-slate-900/60 p-3 rounded-xl border border-slate-800/80">
-                          <p className="font-semibold text-white">How to pair on your WhatsApp app:</p>
-                          <ol className="list-decimal list-inside space-y-1 text-slate-400">
-                            <li>Open WhatsApp on your mobile phone</li>
-                            <li>Go to <strong className="text-slate-200">Settings</strong> (iOS) or <strong className="text-slate-200">⋮ Menu</strong> (Android)</li>
-                            <li>Tap <strong className="text-slate-200">Linked Devices</strong> → <strong className="text-slate-200">Link a Device</strong></li>
-                            <li>Tap <strong className="text-emerald-400">Link with phone number instead</strong></li>
-                            <li>Enter the code above: <strong className="text-emerald-400 font-mono">{pairingCode}</strong></li>
-                          </ol>
-                        </div>
+                    {pairingError && (
+                      <div className="p-2.5 rounded-xl bg-rose-950/40 border border-rose-800/60 text-rose-300 text-xs">
+                        {pairingError}
                       </div>
                     )}
                   </form>
-                ) : (
-                  /* QR Code Fallback */
-                  <div className="mt-6 flex flex-col items-center justify-center p-6 text-center space-y-4">
-                    {status.qrCodeUrl ? (
-                      <div className="p-3 bg-white rounded-2xl shadow-xl">
-                        <img
-                          src={status.qrCodeUrl}
-                          alt="WhatsApp Baileys QR Code"
-                          className="w-52 h-52 object-contain"
-                        />
-                      </div>
-                    ) : (
-                      <div className="w-52 h-52 rounded-2xl border-2 border-dashed border-slate-700 flex flex-col items-center justify-center p-4 text-slate-500">
-                        <QrCode className="w-12 h-12 mb-2 opacity-40" />
-                        <p className="text-xs">
-                          {loading
-                            ? 'Generating WhatsApp QR Code...'
-                            : 'Enter phone number and request code or click to generate QR'}
-                        </p>
-                      </div>
-                    )}
-                    <p className="text-xs text-slate-400 max-w-sm">
-                      Open WhatsApp → Linked Devices → Link a Device → Scan this QR code with your phone camera.
-                    </p>
-                  </div>
-                )}
-              </div>
 
-              <div className="mt-6 pt-4 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-slate-500">
-                <span className="flex items-center gap-1.5">
-                  <ShieldCheck className="w-4 h-4 text-emerald-500" />
-                  End-to-End Encrypted Baileys Multi-Device Socket
-                </span>
-                <span>All 240+ Countries Supported</span>
-              </div>
+                  {/* Active Pairing Code Display */}
+                  {pairingCode && (
+                    <div className="mt-3 p-4 rounded-xl bg-slate-900 border border-emerald-500/40 space-y-3">
+                      <div className="flex items-center justify-between text-xs text-slate-400">
+                        <span className="text-emerald-400 font-semibold flex items-center gap-1">
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          Code Ready
+                        </span>
+                        <span className="font-mono text-slate-400 text-[11px]">
+                          Expires in: <strong className="text-white">{countdown}s</strong>
+                        </span>
+                      </div>
+
+                      <div className="flex items-center justify-center gap-2 py-3 rounded-xl bg-slate-950 border border-slate-800">
+                        <span className="font-mono text-2xl font-extrabold tracking-widest text-emerald-400 select-all">
+                          {pairingCode}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={handleCopyCode}
+                          className="p-2 rounded-lg bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 transition-colors"
+                          title="Copy Code"
+                        >
+                          {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                        </button>
+                      </div>
+
+                      <div className="text-[11px] text-slate-300 space-y-1 bg-slate-950/60 p-2.5 rounded-lg border border-slate-800">
+                        <p className="font-semibold text-white">How to link in WhatsApp:</p>
+                        <ol className="list-decimal list-inside space-y-0.5 text-slate-400">
+                          <li>Open WhatsApp on your phone</li>
+                          <li>Tap <strong>Linked Devices</strong> → <strong>Link a Device</strong></li>
+                          <li>Tap <strong className="text-emerald-400">Link with phone number instead</strong></li>
+                          <li>Enter code above: <strong className="text-emerald-400 font-mono">{pairingCode}</strong></li>
+                        </ol>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
+          )}
 
-            {/* Right Column: Outbound Message & Quick Notifications */}
-            <div className="lg:col-span-5 space-y-6">
-              {/* Test Message Card */}
-              <div className="bg-slate-950 border border-slate-800 rounded-2xl p-5 shadow-xl">
-                <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+          {/* TAB 2: REDEEM KEY & PLANS (AUTOMATIC SWITCH DESTINATION) */}
+          {activeTab === 'license' && (
+            <div className="space-y-4">
+              {/* Key Input & Stacking */}
+              <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-3">
+                <div className="flex items-center justify-between pb-2 border-b border-slate-800/80">
                   <div className="flex items-center gap-2">
-                    <div className="p-2 rounded-lg bg-teal-500/10 text-teal-400">
-                      <Send className="w-4 h-4" />
-                    </div>
-                    <div>
-                      <h4 className="font-bold text-sm text-white">Send Test WhatsApp Message</h4>
-                      <p className="text-[11px] text-slate-400">Test outbound message from your linked WhatsApp</p>
-                    </div>
+                    <Key className="w-4 h-4 text-emerald-400" />
+                    <h3 className="font-bold text-sm text-white">Redeem License Key</h3>
                   </div>
+                  <span className="text-[10px] text-emerald-400 font-bold bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
+                    Stacking Active
+                  </span>
                 </div>
 
-                <form onSubmit={handleSendTestMessage} className="mt-4 space-y-3">
-                  <div>
-                    <label className="block text-[11px] font-medium text-slate-300 mb-1">
-                      Recipient Number (with country code)
-                    </label>
-                    <input
-                      type="tel"
-                      placeholder="e.g. 2348012345678"
-                      value={testToPhone}
-                      onChange={(e) => setTestToPhone(e.target.value)}
-                      className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 font-mono"
-                      required
-                    />
-                  </div>
+                <p className="text-[11px] text-slate-400">
+                  Redeeming keys <strong>adds time accurately</strong> onto your existing balance.
+                </p>
 
-                  <div>
-                    <label className="block text-[11px] font-medium text-slate-300 mb-1">
-                      Message Content
-                    </label>
-                    <textarea
-                      rows={2}
-                      value={testMessage}
-                      onChange={(e) => setTestMessage(e.target.value)}
-                      className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
-                      required
-                    />
-                  </div>
+                <form onSubmit={handleRedeemInTab} className="space-y-2.5">
+                  <input
+                    type="text"
+                    placeholder="e.g. SOLVA-7D-A1B2-C3D4"
+                    value={inTabKeyInput}
+                    onChange={(e) => setInTabKeyInput(e.target.value.toUpperCase())}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500 font-mono tracking-wider"
+                    required
+                  />
 
                   <button
                     type="submit"
-                    disabled={sendingTest || !status.isConnected}
-                    className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-semibold text-xs border border-slate-700 disabled:opacity-40 transition-all"
+                    disabled={inTabRedeeming || !inTabKeyInput.trim()}
+                    className="w-full py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-500 text-slate-950 font-bold text-xs shadow-md disabled:opacity-50 transition-all"
                   >
-                    {sendingTest ? (
-                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    {inTabRedeeming ? (
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin mx-auto" />
                     ) : (
-                      <Send className="w-3.5 h-3.5 text-emerald-400" />
+                      'Activate / Add Time to Key'
                     )}
-                    <span>{status.isConnected ? 'Send via WhatsApp' : 'Link WhatsApp to Send'}</span>
                   </button>
 
-                  {testResult && (
-                    <p className="text-[11px] p-2 rounded-lg bg-slate-900 border border-slate-800 text-emerald-400 font-medium">
-                      {testResult}
-                    </p>
+                  {inTabSuccess && (
+                    <div className="p-3 rounded-xl bg-emerald-950/40 border border-emerald-500/40 text-emerald-300 text-xs space-y-2">
+                      <div className="flex items-center gap-1.5">
+                        <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                        <span>{inTabSuccess}</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setActiveTab('pair')}
+                        className="w-full py-1.5 rounded-lg bg-emerald-600 text-slate-950 font-bold text-[11px]"
+                      >
+                        Go to Link WhatsApp →
+                      </button>
+                    </div>
+                  )}
+
+                  {inTabError && (
+                    <div className="p-2.5 rounded-xl bg-rose-950/40 border border-rose-800/40 text-rose-300 text-xs flex items-center gap-1.5">
+                      <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                      <span>{inTabError}</span>
+                    </div>
                   )}
                 </form>
-              </div>
 
-              {/* Live Events Stream */}
-              <div className="bg-slate-950 border border-slate-800 rounded-2xl p-5 shadow-xl">
-                <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-                  <div className="flex items-center gap-2">
-                    <div className="p-2 rounded-lg bg-emerald-500/10 text-emerald-400">
-                      <Bell className="w-4 h-4" />
-                    </div>
-                    <div>
-                      <h4 className="font-bold text-sm text-white">Live WhatsApp Feed</h4>
-                      <p className="text-[11px] text-slate-400">Incoming messages & anti-delete logs</p>
-                    </div>
-                  </div>
-
-                  <button
-                    onClick={() => setIsNotifOpen(true)}
-                    className="text-xs text-emerald-400 hover:text-emerald-300 font-medium flex items-center gap-1"
-                  >
-                    <span>View All ({notifications.length})</span>
-                    <ChevronRight className="w-3 h-3" />
-                  </button>
-                </div>
-
-                <div className="mt-3 space-y-2 max-h-56 overflow-y-auto">
-                  {notifications.length === 0 ? (
-                    <p className="text-xs text-slate-500 py-4 text-center">
-                      No WhatsApp activity yet. Link your number to see live events.
-                    </p>
-                  ) : (
-                    notifications.slice(0, 3).map((n) => (
-                      <div
-                        key={n.id}
-                        className="p-2.5 rounded-xl bg-slate-900 border border-slate-800 text-xs"
-                      >
-                        <div className="flex items-center justify-between text-slate-300 font-medium">
-                          <span className="truncate text-white">{n.title}</span>
-                          <span className="text-[10px] text-slate-500 font-mono">{n.timestamp}</span>
-                        </div>
-                        <p className="text-slate-400 mt-0.5 line-clamp-2 text-[11px]">{n.body}</p>
-                      </div>
-                    ))
-                  )}
+                <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-slate-400">
+                  <span>No key? Choose a plan below</span>
+                  <span className="text-emerald-400 font-medium">OPay: 9049979183</span>
                 </div>
               </div>
-            </div>
-          </div>
-        )}
 
-        {/* TAB 2: COMMAND DIRECTORY (35+) */}
-        {activeTab === 'commands' && (
-          <CommandDirectory onRunCommand={handleRunCommandFromDirectory} />
-        )}
+              {/* Official Plans & OPay Payment Details */}
+              <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-3">
+                <div className="flex items-center justify-between pb-2 border-b border-slate-800/80">
+                  <h4 className="font-bold text-xs uppercase tracking-wider text-emerald-400">
+                    ⚔️ LICENSE PLANS
+                  </h4>
+                  <span className="text-[10px] text-slate-500 font-mono">OPay Bank</span>
+                </div>
 
-        {/* TAB 3: PREVIEW TERMINAL */}
-        {activeTab === 'terminal' && (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-            <div className="lg:col-span-8">
-              <ChatSimulator
-                initialCommand={commandToRun}
-                onClearInitialCommand={() => setCommandToRun(undefined)}
-              />
-            </div>
-            <div className="lg:col-span-4 space-y-4">
-              <div className="bg-slate-950 border border-slate-800 rounded-2xl p-5 shadow-xl text-xs space-y-3">
-                <h4 className="font-bold text-white text-sm flex items-center gap-2">
-                  <Terminal className="w-4 h-4 text-emerald-400" />
-                  Test Any Command
-                </h4>
-                <p className="text-slate-400 text-[11px]">
-                  Click any command to preview what SOLVATECH will respond when someone types it in WhatsApp:
-                </p>
-                <div className="flex flex-wrap gap-1.5">
-                  {['.menu', '.ping', '.uptime', '.owner', '.expire', '.ai What is AI?', '.anti', '.open', '.sticker', '.warn @2348011223344'].map((cmd) => (
-                    <button
-                      key={cmd}
-                      onClick={() => setCommandToRun(cmd)}
-                      className="px-2.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-800 text-emerald-400 font-mono text-[11px] transition-colors"
+                <div className="grid grid-cols-2 gap-1.5 text-[11px]">
+                  {LICENSE_PLANS.map((plan) => (
+                    <div
+                      key={plan.id}
+                      className="p-2 rounded-lg bg-slate-900 border border-slate-800/80 flex items-center justify-between"
                     >
-                      {cmd}
-                    </button>
+                      <span className="text-slate-300">• {plan.name}</span>
+                      <strong className="text-emerald-400 font-mono">{plan.priceFormatted}</strong>
+                    </div>
                   ))}
                 </div>
-              </div>
 
-              <div className="bg-slate-950 border border-slate-800 rounded-2xl p-5 shadow-xl text-xs space-y-2">
-                <div className="flex items-center gap-2 text-rose-400 font-bold">
-                  <ShieldCheck className="w-4 h-4" />
-                  <span>Real WhatsApp Response Mode</span>
+                {/* OPay Account Box */}
+                <div className="p-3 rounded-xl bg-slate-900 border border-slate-800 space-y-1.5 text-xs">
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-400 text-[11px]">OPay Account:</span>
+                    <div className="flex items-center gap-1.5">
+                      <strong className="text-emerald-400 font-mono select-all text-sm">
+                        {PAYMENT_INFO.accountNumber}
+                      </strong>
+                      <button
+                        onClick={() => {
+                          navigator.clipboard.writeText(PAYMENT_INFO.accountNumber);
+                          alert('Copied OPay Account: ' + PAYMENT_INFO.accountNumber);
+                        }}
+                        className="p-1 rounded text-slate-400 hover:text-white"
+                        title="Copy Number"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-400 text-[11px]">Name:</span>
+                    <strong className="text-white text-[11px]">{PAYMENT_INFO.accountName}</strong>
+                  </div>
                 </div>
-                <p className="text-slate-400 text-[11px] leading-relaxed">
-                  Remember: In production, you type these directly in your WhatsApp conversations. The bot will automatically reply in WhatsApp!
-                </p>
+
+                <a
+                  href={PAYMENT_INFO.whatsappLink}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="w-full flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold text-xs transition-colors shadow-sm"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  <span>Send Payment Proof to Solomon</span>
+                </a>
               </div>
             </div>
-          </div>
-        )}
-      </main>
+          )}
 
-      {/* Notifications Drawer */}
-      <NotificationsPanel
-        isOpen={isNotifOpen}
-        onClose={() => setIsNotifOpen(false)}
-        notifications={notifications}
-        onClear={handleClearNotifications}
-      />
+          {/* TAB 3: COMMAND DIRECTORY */}
+          {activeTab === 'commands' && (
+            <div className="space-y-3">
+              <div className="p-3 rounded-2xl bg-slate-950 border border-slate-800 space-y-2">
+                <div className="flex items-center gap-2">
+                  <Terminal className="w-4 h-4 text-emerald-400" />
+                  <h3 className="font-bold text-sm text-white">Bot Commands</h3>
+                </div>
+
+                {/* Search Commands */}
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+                  <input
+                    type="text"
+                    placeholder="Search command (.ping, .sticker, etc.)..."
+                    value={commandSearch}
+                    onChange={(e) => setCommandSearch(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-800 rounded-xl pl-8 pr-3 py-1.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+              </div>
+
+              {/* Commands List */}
+              <div className="space-y-1.5 max-h-[460px] overflow-y-auto pr-1">
+                {filteredCommands.map((item) => (
+                  <div
+                    key={item.cmd}
+                    className="p-2.5 rounded-xl bg-slate-950 border border-slate-800/80 flex items-start justify-between gap-2"
+                  >
+                    <div>
+                      <span className="font-mono text-emerald-400 font-bold text-xs">
+                        {item.cmd}
+                      </span>
+                      <p className="text-[11px] text-slate-400 mt-0.5">
+                        {item.desc}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Bottom Phone App Navigation Bar */}
+        <nav className="px-3 py-2 bg-slate-950 border-t border-slate-800/80 flex items-center justify-around shrink-0">
+          <button
+            onClick={() => setActiveTab('pair')}
+            className={`flex flex-col items-center gap-1 py-1 px-4 rounded-xl transition-all ${
+              activeTab === 'pair'
+                ? 'text-emerald-400 font-bold'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <KeyRound className="w-4 h-4" />
+            <span className="text-[10px]">Link</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('license')}
+            className={`flex flex-col items-center gap-1 py-1 px-4 rounded-xl transition-all ${
+              activeTab === 'license'
+                ? 'text-emerald-400 font-bold'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Key className="w-4 h-4" />
+            <span className="text-[10px]">License</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('commands')}
+            className={`flex flex-col items-center gap-1 py-1 px-4 rounded-xl transition-all ${
+              activeTab === 'commands'
+                ? 'text-emerald-400 font-bold'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Terminal className="w-4 h-4" />
+            <span className="text-[10px]">Commands</span>
+          </button>
+
+          {isOwner && (
+            <button
+              onClick={() => setIsAdminModalOpen(true)}
+              className="flex flex-col items-center gap-1 py-1 px-4 rounded-xl text-amber-400 hover:text-amber-300 transition-all"
+            >
+              <Zap className="w-4 h-4" />
+              <span className="text-[10px]">Admin</span>
+            </button>
+          )}
+        </nav>
+      </div>
 
       {/* Auth Modal for Google Sign-In */}
       <AuthModal
@@ -853,17 +800,13 @@ export default function App() {
         onClose={() => setIsAuthModalOpen(false)}
       />
 
-      {/* AI Image Generation Studio Modal */}
-      <ImageGeneratorModal
-        isOpen={isImageModalOpen}
-        onClose={() => setIsImageModalOpen(false)}
-      />
-
-      {/* Railway 24/7 Deployment Guide Modal */}
-      <RailwayGuideModal
-        isOpen={isRailwayModalOpen}
-        onClose={() => setIsRailwayModalOpen(false)}
-      />
+      {/* Solomon / Owner Admin Dashboard */}
+      {isAdminModalOpen && (
+        <AdminDashboard
+          currentUserEmail={currentUser?.email}
+          onClose={() => setIsAdminModalOpen(false)}
+        />
+      )}
     </div>
   );
 }
