@@ -15,7 +15,6 @@ import {
 import {
   LICENSE_PLANS,
   PAYMENT_INFO,
-  SPECIAL_5D_KEYS,
   redeemKey
 } from '../services/license';
 
@@ -140,24 +139,12 @@ export const PricingModal: React.FC<PricingModalProps> = ({
               </div>
             )}
 
-            {/* 5-Day Special Keys Quick Fill */}
-            <div className="pt-2 border-t border-slate-800/80 space-y-1.5">
-              <span className="text-[10px] font-bold text-slate-400 flex items-center gap-1">
-                <Sparkles className="w-3 h-3 text-amber-400" />
-                5-Day VIP & Legacy Keys (Click to Fill):
-              </span>
-              <div className="flex flex-wrap gap-1">
-                {SPECIAL_5D_KEYS.map((k) => (
-                  <button
-                    key={k.key}
-                    type="button"
-                    onClick={() => setKeyInput(k.key)}
-                    className="px-2 py-0.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-emerald-400 font-mono text-[10px] border border-slate-800 hover:border-emerald-500/30 transition-colors"
-                  >
-                    {k.key}
-                  </button>
-                ))}
-              </div>
+            {/* Single-Use License Security Notice */}
+            <div className="pt-2 border-t border-slate-800/80">
+              <p className="text-[10px] text-slate-400 flex items-center gap-1.5">
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                <span>Each license key is single-use and unique. Keys are issued directly upon payment confirmation.</span>
+              </p>
             </div>
           </div>
 

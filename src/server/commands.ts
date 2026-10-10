@@ -237,11 +237,9 @@ Empower your WhatsApp groups with next-generation automated security, Anti-Delet
       }
     }
 
-    if (cmd === 'link') {
+    if (cmd === 'link' || cmd === 'channel' || cmd === 'community' || cmd === 'updates') {
       return {
-        reply: ctx.isGroup
-          ? `🔗 *Group Link:* https://chat.whatsapp.com/invite/SOLVATECH-ACTIVE`
-          : `⚠️ This command can only be used in a WhatsApp group.`,
+        reply: `📢 *OFFICIAL SOLVATECH CHANNELS (MANDATORY)*\n\n🔊 *Updates Channel:*\nhttps://whatsapp.com/channel/0029Vb86yuY7j6gCHqMqcU37\n\n👥 *Official Community Group:*\nhttps://chat.whatsapp.com/HKBAnW6XJmB9fBqSPJUN1F?s=cl&p=a&mlu=4&ilr=4\n\n_Stay connected for bot updates, announcements, and key drops._`,
       };
     }
 

