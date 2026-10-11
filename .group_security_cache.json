@@ -6,24 +6,42 @@
     "antispam": true,
     "autowelcome": true,
     "autogoodbye": true,
-    "warnLimit": 3
+    "warnLimit": 5
   },
   "120363412883427866@g.us": {
     "antilink": true,
-    "antibot": false,
-    "antistatus": false,
-    "antispam": false,
+    "antibot": true,
+    "antistatus": true,
+    "antispam": true,
     "autowelcome": true,
     "autogoodbye": true,
-    "warnLimit": 2
+    "warnLimit": 5
   },
   "default": {
     "antilink": false,
     "antibot": false,
     "antistatus": false,
     "antispam": true,
-    "autowelcome": false,
-    "autogoodbye": false,
+    "autowelcome": true,
+    "autogoodbye": true,
     "warnLimit": 5
+  },
+  "120363428234293255@g.us": {
+    "antilink": true,
+    "antibot": true,
+    "antistatus": true,
+    "antispam": true,
+    "autowelcome": true,
+    "autogoodbye": true,
+    "warnLimit": 5
+  },
+  "120363430711229336@g.us": {
+    "antilink": false,
+    "antibot": true,
+    "antistatus": true,
+    "antispam": true,
+    "autowelcome": true,
+    "autogoodbye": true,
+    "warnLimit": 3
   }
 }

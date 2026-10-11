@@ -475,27 +475,82 @@ export async function resetUserTrialStatus(
   userUid: string,
   userEmail?: string | null
 ): Promise<{ success: boolean; message: string }> {
+  // 1. Clear local storage locks
   localStorage.removeItem(`solvatech_trial_${userUid}`);
   if (userEmail) {
     localStorage.removeItem(`solvatech_trial_${userEmail.toLowerCase()}`);
   }
 
+  // 2. Call backend persistent server store
+  try {
+    await fetch('/api/trial/reset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ uid: userUid, email: userEmail || undefined }),
+    });
+  } catch (err) {
+    console.warn('Backend trial reset network notice:', err);
+  }
+
+  // 3. Update Firestore
   try {
     const userRef = doc(db, 'users', userUid);
-    await setDoc(userRef, { hasUsedTrial: false, trialResetAt: new Date().toISOString() }, { merge: true });
+    await setDoc(
+      userRef,
+      {
+        hasUsedTrial: false,
+        trialResetAt: new Date().toISOString(),
+        licensePlan: 'Free Trial Reset (Ready to Claim)',
+        licenseExpiresAt: null,
+        licenseStatus: 'expired',
+      },
+      { merge: true }
+    );
 
     if (userEmail) {
       const cleanEmailKey = userEmail.toLowerCase().replace(/[^a-z0-9]/g, '_');
       const trialRef = doc(db, 'claimed_trials', cleanEmailKey);
-      await setDoc(trialRef, { resetByAdmin: true, resetAt: new Date().toISOString() }, { merge: true });
+      // Hard delete from claimed_trials so it no longer blocks the account!
+      await deleteDoc(trialRef);
     }
   } catch (e) {
     console.warn('Error resetting trial in Firestore:', e);
   }
 
+  // 4. Update cached user in localStorage
+  try {
+    const cachedUser = JSON.parse(localStorage.getItem(`solvatech_user_${userUid}`) || '{}');
+    localStorage.setItem(
+      `solvatech_user_${userUid}`,
+      JSON.stringify({
+        ...cachedUser,
+        hasUsedTrial: false,
+        licensePlan: 'Free Trial Reset (Ready to Claim)',
+        licenseExpiresAt: null,
+        licenseStatus: 'expired',
+      })
+    );
+  } catch {}
+
+  // 5. Also update solvatech_admin_all_users cache so dashboard reflects change immediately
+  try {
+    const adminList = JSON.parse(localStorage.getItem('solvatech_admin_all_users') || '[]');
+    if (Array.isArray(adminList)) {
+      const idx = adminList.findIndex((u: any) => u.uid === userUid || (userEmail && u.email?.toLowerCase() === userEmail.toLowerCase()));
+      if (idx >= 0) {
+        adminList[idx] = {
+          ...adminList[idx],
+          hasUsedTrial: false,
+          licensePlan: 'Free Trial Reset (Ready to Claim)',
+        };
+        localStorage.setItem('solvatech_admin_all_users', JSON.stringify(adminList));
+      }
+    }
+  } catch {}
+
   return {
     success: true,
-    message: `30-minute test reset for ${userEmail || userUid}! They can claim it again.`,
+    message: `30-minute test reset for ${userEmail || userUid}! They can tap and claim it again.`,
   };
 }
 
@@ -984,51 +1039,102 @@ export function calculateRemainingTime(expiresAt?: string | null, isUnlimited?: 
   };
 }
 
-// 30-MINUTE TEST SYSTEM — LIFETIME LOCK PER GMAIL ACCOUNT
+// 30-MINUTE TEST SYSTEM — SERVER-AUTHORITATIVE & LIFETIME LOCK PER ACCOUNT
 export async function checkUserTrialStatus(
   userUid: string,
   userEmail?: string | null
 ): Promise<boolean> {
-  if (!userUid) return false;
+  if (!userUid && !userEmail) return false;
 
-  // 1. Check local storage
-  const localUid = localStorage.getItem(`solvatech_trial_${userUid}`);
-  if (localUid === 'true') return true;
-
-  if (userEmail) {
-    const localEmail = localStorage.getItem(`solvatech_trial_${userEmail.toLowerCase()}`);
-    if (localEmail === 'true') return true;
+  // 1. Check persistent server trial store FIRST
+  try {
+    const q = new URLSearchParams();
+    if (userUid) q.set('uid', userUid);
+    if (userEmail) q.set('email', userEmail);
+    const res = await fetch(`/api/trial/status?${q.toString()}`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.success) {
+        if (data.hasUsedTrial === false || data.isReset === true) {
+          // Admin has reset the trial or user is new: unlock immediately!
+          localStorage.removeItem(`solvatech_trial_${userUid}`);
+          if (userEmail) {
+            localStorage.removeItem(`solvatech_trial_${userEmail.toLowerCase()}`);
+          }
+          return false;
+        } else if (data.hasUsedTrial === true) {
+          localStorage.setItem(`solvatech_trial_${userUid}`, 'true');
+          if (userEmail) {
+            localStorage.setItem(`solvatech_trial_${userEmail.toLowerCase()}`, 'true');
+          }
+          return true;
+        }
+      }
+    }
+  } catch (apiErr) {
+    console.debug('Server trial status check note:', apiErr);
   }
 
-  // 2. Check Firestore user document
+  // 2. Check Firestore (if server API was unavailable)
   try {
-    const userRef = doc(db, 'users', userUid);
-    const snap = await getDoc(userRef);
-    if (snap.exists() && snap.data()?.hasUsedTrial) {
-      localStorage.setItem(`solvatech_trial_${userUid}`, 'true');
-      if (userEmail) {
-        localStorage.setItem(`solvatech_trial_${userEmail.toLowerCase()}`, 'true');
+    if (userUid) {
+      const userRef = doc(db, 'users', userUid);
+      const snap = await getDoc(userRef);
+      if (snap.exists()) {
+        const data = snap.data();
+        if (data?.hasUsedTrial === false) {
+          localStorage.removeItem(`solvatech_trial_${userUid}`);
+          if (userEmail) {
+            localStorage.removeItem(`solvatech_trial_${userEmail.toLowerCase()}`);
+          }
+          return false;
+        }
+        if (data?.hasUsedTrial === true) {
+          localStorage.setItem(`solvatech_trial_${userUid}`, 'true');
+          if (userEmail) {
+            localStorage.setItem(`solvatech_trial_${userEmail.toLowerCase()}`, 'true');
+          }
+          return true;
+        }
       }
-      return true;
     }
   } catch (e) {
     console.warn('Trial status check warning:', e);
   }
 
-  // 3. Check claimed_trials collection indexed by email
+  // 3. Check claimed_trials collection indexed by sanitized email
   if (userEmail) {
     const cleanEmailKey = userEmail.toLowerCase().replace(/[^a-z0-9]/g, '_');
     try {
       const trialRef = doc(db, 'claimed_trials', cleanEmailKey);
       const snap = await getDoc(trialRef);
       if (snap.exists()) {
+        const d = snap.data();
+        if (d?.resetByAdmin) {
+          localStorage.removeItem(`solvatech_trial_${userUid}`);
+          localStorage.removeItem(`solvatech_trial_${userEmail.toLowerCase()}`);
+          return false;
+        }
         localStorage.setItem(`solvatech_trial_${userUid}`, 'true');
         localStorage.setItem(`solvatech_trial_${userEmail.toLowerCase()}`, 'true');
         return true;
+      } else {
+        localStorage.removeItem(`solvatech_trial_${userUid}`);
+        localStorage.removeItem(`solvatech_trial_${userEmail.toLowerCase()}`);
+        return false;
       }
     } catch (e) {
       console.warn('Claimed trial check warning:', e);
     }
+  }
+
+  // 4. Fallback to local storage only if offline/network unavailable
+  const localUid = localStorage.getItem(`solvatech_trial_${userUid}`);
+  if (localUid === 'true') return true;
+
+  if (userEmail) {
+    const localEmail = localStorage.getItem(`solvatech_trial_${userEmail.toLowerCase()}`);
+    if (localEmail === 'true') return true;
   }
 
   return false;
@@ -1045,6 +1151,7 @@ export async function claim30MinuteTrial(
     };
   }
 
+  // Check with server first
   const alreadyClaimed = await checkUserTrialStatus(userUid, userEmail);
   if (alreadyClaimed) {
     return {
@@ -1053,38 +1160,32 @@ export async function claim30MinuteTrial(
     };
   }
 
-  // Fetch current remaining time to stack 30 minutes on top
-  let currentExpiryTime = 0;
+  let serverExpiresAt: string | null = null;
+  // 1. Claim on backend persistent trial store
   try {
-    const userRef = doc(db, 'users', userUid);
-    const userSnap = await getDoc(userRef);
-    if (userSnap.exists()) {
-      const userData = userSnap.data();
-      if (userData.licenseExpiresAt) {
-        const parsed = new Date(userData.licenseExpiresAt).getTime();
-        if (parsed > Date.now()) {
-          currentExpiryTime = parsed;
-        }
-      }
+    const res = await fetch('/api/trial/claim', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ uid: userUid, email: userEmail }),
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      return {
+        success: false,
+        message: data.message || 'Trial already claimed or unavailable.',
+      };
     }
-  } catch {
-    const localUser = JSON.parse(localStorage.getItem(`solvatech_user_${userUid}`) || '{}');
-    if (localUser.licenseExpiresAt) {
-      const parsed = new Date(localUser.licenseExpiresAt).getTime();
-      if (parsed > Date.now()) {
-        currentExpiryTime = parsed;
-      }
-    }
+    serverExpiresAt = data.expiresAt;
+  } catch (apiErr) {
+    console.debug('Backend trial claim network note:', apiErr);
   }
 
   const now = Date.now();
-  const currentRemainingMs = currentExpiryTime > now ? currentExpiryTime - now : 0;
   const TRIAL_DURATION_MS = 30 * 60 * 1000; // 30 Minutes
-  const newExpiryMs = now + currentRemainingMs + TRIAL_DURATION_MS;
-  const newExpiresAt = new Date(newExpiryMs).toISOString();
+  const newExpiresAt = serverExpiresAt || new Date(now + TRIAL_DURATION_MS).toISOString();
   const cleanEmailKey = userEmail.toLowerCase().replace(/[^a-z0-9]/g, '_');
 
-  // Persist to Firestore: users collection and claimed_trials collection
+  // 2. Persist to Firestore: users collection and claimed_trials collection
   try {
     const userRef = doc(db, 'users', userUid);
     await setDoc(
@@ -1108,10 +1209,10 @@ export async function claim30MinuteTrial(
       expiresAt: newExpiresAt,
     });
   } catch (err) {
-    console.error('Error saving 30-minute trial to Firestore:', err);
+    console.warn('Error saving 30-minute trial to Firestore:', err);
   }
 
-  // Lock locally forever
+  // 3. Lock locally
   localStorage.setItem(`solvatech_trial_${userUid}`, 'true');
   localStorage.setItem(`solvatech_trial_${userEmail.toLowerCase()}`, 'true');
 

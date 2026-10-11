@@ -130,11 +130,10 @@ export const GroupAdminPanel: React.FC<GroupAdminPanelProps> = ({
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
-  const [filterMode, setFilterMode] = useState<'all' | 'admin_only'>('admin_only');
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [pendingToggles, setPendingToggles] = useState<Record<string, boolean>>({});
 
-  // Fetch real groups from server
+  // Fetch real groups from server (Admin groups only)
   const fetchGroups = async (isManualSync = false) => {
     // If not connected, do not attempt to fetch or show groups
     if (!isConnected) {
@@ -150,7 +149,7 @@ export const GroupAdminPanel: React.FC<GroupAdminPanelProps> = ({
     }
 
     try {
-      const endpoint = isManualSync ? '/api/groups/sync' : '/api/groups';
+      const endpoint = isManualSync ? '/api/groups/sync' : '/api/groups?adminOnly=true';
       const method = isManualSync ? 'POST' : 'GET';
       const res = await fetch(endpoint, { method }).catch(() => null);
 
@@ -162,19 +161,21 @@ export const GroupAdminPanel: React.FC<GroupAdminPanelProps> = ({
         }>(res);
 
         if (data && Array.isArray(data.groups)) {
-          // If server says not connected, enforce empty list
+          // STRICT REQUIREMENT: Keep only groups where the account is an Admin
+          // Remove all non-admin groups so members cannot modify protection
+          const adminOnlyGroups = data.groups.filter((g) => g.isAdmin);
           if (data.connected === false) {
             setGroups([]);
           } else {
-            setGroups(data.groups);
+            setGroups(adminOnlyGroups);
           }
 
           if (isManualSync) {
             onShowToast?.({
               id: 'group_sync_' + Date.now(),
               type: 'system',
-              title: 'Groups Synchronized 🔄',
-              body: `Synced ${data.groups.length} live WhatsApp groups with Firebase and live session.`,
+              title: 'Admin Groups Synchronized 🔄',
+              body: `Synced ${adminOnlyGroups.length} verified WhatsApp admin groups with Firebase Firestore.`,
               timestamp: new Date().toLocaleTimeString(),
             });
           }
@@ -375,12 +376,12 @@ export const GroupAdminPanel: React.FC<GroupAdminPanelProps> = ({
     setTimeout(() => setCopiedId(null), 2500);
   };
 
-  // Filter groups
+  // Filter groups — strictly admin-only groups
   const filteredGroups = useMemo(() => {
     return groups.filter((g) => {
-      if (filterMode === 'admin_only' && !g.isAdmin) {
-        return false;
-      }
+      // STRICT REQUIREMENT: Only groups where your connected account is an Admin
+      // Remove all non-admin groups so members cannot modify protection
+      if (!g.isAdmin) return false;
       if (!searchQuery) return true;
       const q = searchQuery.toLowerCase();
       return (
@@ -389,9 +390,7 @@ export const GroupAdminPanel: React.FC<GroupAdminPanelProps> = ({
         (g.desc && g.desc.toLowerCase().includes(q))
       );
     });
-  }, [groups, filterMode, searchQuery]);
-
-  const adminGroupCount = groups.filter((g) => g.isAdmin).length;
+  }, [groups, searchQuery]);
 
   // STRICT USER REQUIREMENT:
   // "Once your button not linked to the account, the group that will show, don't let it show any group.
@@ -548,30 +547,10 @@ export const GroupAdminPanel: React.FC<GroupAdminPanelProps> = ({
         </div>
 
         <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
-          <button
-            type="button"
-            onClick={() => setFilterMode('admin_only')}
-            className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
-              filterMode === 'admin_only'
-                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm'
-                : 'bg-slate-950 text-slate-400 hover:text-white border border-slate-800'
-            }`}
-          >
-            <Crown className="w-3.5 h-3.5" />
-            <span>Admin Groups ({adminGroupCount})</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setFilterMode('all')}
-            className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-all cursor-pointer flex items-center gap-1.5 ${
-              filterMode === 'all'
-                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 shadow-sm'
-                : 'bg-slate-950 text-slate-400 hover:text-white border border-slate-800'
-            }`}
-          >
-            <Users className="w-3.5 h-3.5" />
-            <span>All Groups ({groups.length})</span>
-          </button>
+          <div className="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-sm flex items-center gap-1.5">
+            <Crown className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
+            <span>Admin Protected Groups ({filteredGroups.length})</span>
+          </div>
         </div>
       </div>
 
@@ -579,18 +558,16 @@ export const GroupAdminPanel: React.FC<GroupAdminPanelProps> = ({
       {loading && groups.length === 0 ? (
         <div className="p-12 text-center rounded-2xl bg-slate-900/50 border border-slate-800 text-slate-400 flex flex-col items-center justify-center gap-3">
           <RefreshCw className="w-7 h-7 text-emerald-400 animate-spin" />
-          <p className="text-sm font-medium">Fetching live WhatsApp groups, pictures, and Firebase settings...</p>
+          <p className="text-sm font-medium">Fetching live WhatsApp groups where you are an admin...</p>
         </div>
       ) : filteredGroups.length === 0 ? (
         <div className="p-12 text-center rounded-2xl bg-slate-900/50 border border-slate-800 text-slate-400 space-y-3">
-          <Crown className="w-10 h-10 text-slate-600 mx-auto" />
+          <Crown className="w-10 h-10 text-amber-500/70 mx-auto" />
           <h3 className="text-base font-bold text-white">
-            {filterMode === 'admin_only' ? 'No Admin Groups Found' : 'No Groups Found'}
+            No Admin Groups Detected
           </h3>
           <p className="text-xs max-w-md mx-auto text-slate-400">
-            {filterMode === 'admin_only'
-              ? 'No groups where your linked WhatsApp account is an administrator were detected. Make this account an admin in a group or tap "Sync & Detect Groups".'
-              : 'Your linked WhatsApp account is not participating in any groups yet. Join or create a group in WhatsApp.'}
+            To prevent regular members from changing group protections, only groups where your connected WhatsApp account is an <strong>Administrator</strong> are loaded. Make this account an admin in a group and tap &ldquo;Sync &amp; Detect Groups&rdquo;.
           </p>
           <button
             type="button"

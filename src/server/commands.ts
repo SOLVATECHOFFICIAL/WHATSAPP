@@ -1009,21 +1009,21 @@ Message successfully pinned for 7 days by Group Admin!
       };
     }
 
-    if (cmd === 'autowelcome') {
+    if (cmd === 'autowelcome' || cmd === 'welcome') {
       const gid = ctx.groupJid || 'default';
       const val = ctx.args[0]?.toLowerCase() === 'off' ? false : true;
       this.setSecuritySetting(gid, 'autowelcome', val);
       return {
-        reply: `👋 *[AUTO-WELCOME SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED*' : '❌ *DISABLED*'}\nPolicy: Automatically greets anyone who enters the group (whether approved by admin, added by members, or added via link).\nRule: Strictly sent only by connected admin bots (choosing exactly 1 admin bot if multiple are connected).\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
+        reply: `👋 *[AUTO-WELCOME SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED*' : '❌ *DISABLED*'}\nPolicy: Automatically greets anyone who enters the group (added by admin, added by members, join request approved, or link).\n⚡ *Smart Features:*\n• Contextual AI-style greetings tailored to group subject & description (e.g. Serious learners for Academy, Builders for Tech, Business for Commerce).\n• If multiple people are added rapidly (2 or 3+), all are tagged together in one message!\n• Sent exclusively by connected Group Admin Bot.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*Sample Preview:*\n_Hello @user, Welcome to SOLVATECH ACADEMY._\n\n_This group is for serious learners only. Kindly go through the group description and pinned messages to get started._\n\n_- Admin_\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
       };
     }
 
-    if (cmd === 'autogoodbye') {
+    if (cmd === 'autogoodbye' || cmd === 'goodbye') {
       const gid = ctx.groupJid || 'default';
       const val = ctx.args[0]?.toLowerCase() === 'off' ? false : true;
       this.setSecuritySetting(gid, 'autogoodbye', val);
       return {
-        reply: `👋 *[AUTO-GOODBYE SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED*' : '❌ *DISABLED*'}\nPolicy: Automatically acknowledges departing or removed participants.\nRule: Strictly sent only by connected admin bots (choosing exactly 1 admin bot if multiple are connected).\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
+        reply: `👋 *[AUTO-GOODBYE SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED*' : '❌ *DISABLED*'}\nPolicy: Automatically acknowledges departing or removed participants.\n⚡ *Smart Features:*\n• Contextual farewell message tailored to group info/theme.\n• If multiple members leave rapidly (2 or 3+), all are tagged together simultaneously!\n• Sent exclusively by connected Group Admin Bot.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*Sample Preview:*\n_👋 @user left SOLVATECH ACADEMY_\n\n_We hope you learned something valuable. You're always welcome back whenever you're ready to continue learning._\n\n_Keep building! 💻_\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
       };
     }
 

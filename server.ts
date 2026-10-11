@@ -1,6 +1,7 @@
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { whatsappManager } from './src/server/whatsapp.ts';
@@ -13,7 +14,7 @@ const __dirname = path.dirname(__filename);
 
 async function startServer() {
   const app = express();
-  const PORT = Number(process.env.PORT) || 3000;
+  const PORT = 3000;
   const isProd = process.env.NODE_ENV === 'production';
 
   app.use(express.json());
@@ -126,8 +127,9 @@ async function startServer() {
           groups: [],
         });
       }
-      const adminOnly = req.query.adminOnly === 'true' || req.query.adminOnly === '1';
-      const groups = await whatsappManager.getGroupsWithSettings(adminOnly);
+      // STRICT USER REQUIREMENT: Only fetch groups where the account is an admin
+      // Remove all non-admin groups so regular members cannot view or modify protection
+      const groups = await whatsappManager.getGroupsWithSettings(true);
       res.json({ success: true, connected: true, groups });
     } catch (err: any) {
       console.error('Error syncing groups:', err);
@@ -148,13 +150,22 @@ async function startServer() {
     }
   });
 
-  app.post('/api/groups/settings', (req, res) => {
+  app.post('/api/groups/settings', async (req, res) => {
     try {
       const { groupId, key, value } = req.body;
       if (!groupId || !key || typeof value !== 'boolean') {
         return res.status(400).json({
           success: false,
           error: 'groupId, key (e.g. autowelcome, autogoodbye), and boolean value are required',
+        });
+      }
+
+      // Security Check: Only group admins can change group protection
+      const isGroupAdmin = await whatsappManager.isBotAdminInGroupById(groupId);
+      if (!isGroupAdmin) {
+        return res.status(403).json({
+          success: false,
+          error: 'Forbidden: You are not an admin of this group. Only group admins can configure protection settings.',
         });
       }
 
@@ -167,7 +178,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/groups/toggle-all', (req, res) => {
+  app.post('/api/groups/toggle-all', async (req, res) => {
     try {
       const { groupId, enableAll } = req.body;
       if (!groupId || typeof enableAll !== 'boolean') {
@@ -176,6 +187,16 @@ async function startServer() {
           error: 'groupId and boolean enableAll required',
         });
       }
+
+      // Security Check: Only group admins can change group protection
+      const isGroupAdmin = await whatsappManager.isBotAdminInGroupById(groupId);
+      if (!isGroupAdmin) {
+        return res.status(403).json({
+          success: false,
+          error: 'Forbidden: You are not an admin of this group. Only group admins can configure protection settings.',
+        });
+      }
+
       const updated = commandHandler.toggleAllForGroup(groupId, enableAll);
       res.json({ success: true, groupId, settings: updated });
     } catch (err: any) {
@@ -184,7 +205,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/groups/warn-limit', (req, res) => {
+  app.post('/api/groups/warn-limit', async (req, res) => {
     try {
       const { groupId, limit } = req.body;
       if (!groupId || typeof limit !== 'number') {
@@ -193,6 +214,16 @@ async function startServer() {
           error: 'groupId and numeric limit required',
         });
       }
+
+      // Security Check: Only group admins can change group protection
+      const isGroupAdmin = await whatsappManager.isBotAdminInGroupById(groupId);
+      if (!isGroupAdmin) {
+        return res.status(403).json({
+          success: false,
+          error: 'Forbidden: You are not an admin of this group. Only group admins can configure protection settings.',
+        });
+      }
+
       commandHandler.setWarnLimit(groupId, limit);
       res.json({ success: true, groupId, settings: commandHandler.getSecuritySettings(groupId) });
     } catch (err: any) {
@@ -204,8 +235,8 @@ async function startServer() {
   app.post('/api/groups/sync', async (_req, res) => {
     try {
       await commandHandler.loadAllSecuritySettingsFromFirebase();
-      const groups = await whatsappManager.getGroupsWithSettings();
-      res.json({ success: true, groups, message: 'Synchronized with WhatsApp and Firebase' });
+      const groups = await whatsappManager.getGroupsWithSettings(true);
+      res.json({ success: true, groups, message: 'Synchronized with WhatsApp and Firebase (Admin Groups Only)' });
     } catch (err: any) {
       console.error('Error syncing groups:', err);
       res.status(500).json({ success: false, error: err.message });
@@ -237,6 +268,178 @@ async function startServer() {
     } catch (err: any) {
       console.error('Error setting anti-delete:', err);
       res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // 30-Minute Free Test Management Store (server-authoritative & persistent across restarts/devices)
+  const trialStorePath = path.resolve(process.cwd(), '.trial_store.json');
+  const getTrialStore = (): Record<string, { uid?: string; email?: string; hasUsedTrial: boolean; isReset: boolean; expiresAt: string | null; claimedAt?: string; resetAt?: string }> => {
+    try {
+      if (fs.existsSync(trialStorePath)) {
+        const raw = fs.readFileSync(trialStorePath, 'utf-8');
+        return JSON.parse(raw) || {};
+      }
+    } catch {}
+    return {};
+  };
+
+  const saveTrialStore = (data: Record<string, any>) => {
+    try {
+      fs.writeFileSync(trialStorePath, JSON.stringify(data, null, 2), 'utf-8');
+    } catch {}
+  };
+
+  // 1. Check Trial Status
+  app.get('/api/trial/status', (req, res) => {
+    try {
+      const uid = (req.query.uid as string) || '';
+      const email = ((req.query.email as string) || '').toLowerCase().trim();
+      const store = getTrialStore();
+
+      let userRecord = (uid && store[uid]) || (email && store[email]);
+      if (!userRecord && email) {
+        // Check case-insensitively
+        const matchKey = Object.keys(store).find(
+          (k) => k.toLowerCase() === email || store[k]?.email?.toLowerCase() === email
+        );
+        if (matchKey) userRecord = store[matchKey];
+      }
+
+      if (!userRecord) {
+        return res.json({
+          success: true,
+          hasUsedTrial: false,
+          isReset: false,
+          isActive: false,
+          expiresAt: null,
+          remainingMs: 0,
+        });
+      }
+
+      const now = Date.now();
+      const expMs = userRecord.expiresAt ? new Date(userRecord.expiresAt).getTime() : 0;
+      const isActive = expMs > now;
+      const remainingMs = isActive ? expMs - now : 0;
+
+      return res.json({
+        success: true,
+        hasUsedTrial: userRecord.hasUsedTrial && !userRecord.isReset,
+        isReset: Boolean(userRecord.isReset),
+        isActive,
+        expiresAt: userRecord.expiresAt,
+        remainingMs,
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // 2. Claim 30-Minute Trial
+  app.post('/api/trial/claim', (req, res) => {
+    try {
+      const { uid, email } = req.body;
+      if (!uid && !email) {
+        return res.status(400).json({ success: false, message: 'User ID or Email is required.' });
+      }
+
+      const cleanEmail = (email || '').toLowerCase().trim();
+      const cleanUid = uid || cleanEmail;
+      const store = getTrialStore();
+
+      const existing = store[cleanUid] || (cleanEmail && store[cleanEmail]);
+      if (existing && existing.hasUsedTrial && !existing.isReset) {
+        return res.status(400).json({
+          success: false,
+          message: 'The 30-minute test has already been used on this Google account. It can only be claimed once in a lifetime.',
+        });
+      }
+
+      const now = Date.now();
+      const newExpiryMs = now + 30 * 60 * 1000;
+      const newExpiresAt = new Date(newExpiryMs).toISOString();
+
+      const record = {
+        uid: cleanUid,
+        email: cleanEmail,
+        hasUsedTrial: true,
+        isReset: false,
+        claimedAt: new Date(now).toISOString(),
+        expiresAt: newExpiresAt,
+      };
+
+      store[cleanUid] = record;
+      if (cleanEmail) store[cleanEmail] = record;
+      saveTrialStore(store);
+
+      return res.json({
+        success: true,
+        message: '🎉 30-minute test activated! Your countdown has begun.',
+        expiresAt: newExpiresAt,
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
+  // 3. Reset 30-Minute Trial (Admin action)
+  app.post('/api/trial/reset', (req, res) => {
+    try {
+      const { uid, email } = req.body;
+      if (!uid && !email) {
+        return res.status(400).json({ success: false, message: 'User ID or Email is required.' });
+      }
+
+      const cleanEmail = (email || '').toLowerCase().trim();
+      const cleanUid = uid || cleanEmail;
+      const store = getTrialStore();
+
+      const record = {
+        uid: cleanUid,
+        email: cleanEmail,
+        hasUsedTrial: false,
+        isReset: true,
+        expiresAt: null,
+        resetAt: new Date().toISOString(),
+      };
+
+      if (cleanUid) store[cleanUid] = record;
+      if (cleanEmail) store[cleanEmail] = record;
+
+      // Also reset any keys in store matching this email or uid
+      for (const k of Object.keys(store)) {
+        if (
+          (cleanEmail && (store[k].email?.toLowerCase() === cleanEmail || k.toLowerCase() === cleanEmail)) ||
+          (cleanUid && (store[k].uid === cleanUid || k === cleanUid))
+        ) {
+          store[k] = { ...record };
+        }
+      }
+
+      saveTrialStore(store);
+
+      return res.json({
+        success: true,
+        message: `30-minute test reset for ${cleanEmail || cleanUid}! They can tap and claim it again.`,
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  });
+
+  // 4. Reset all trials (Admin action)
+  app.post('/api/trial/reset-all', (_req, res) => {
+    try {
+      const store = getTrialStore();
+      for (const k of Object.keys(store)) {
+        store[k].hasUsedTrial = false;
+        store[k].isReset = true;
+        store[k].expiresAt = null;
+        store[k].resetAt = new Date().toISOString();
+      }
+      saveTrialStore(store);
+      return res.json({ success: true, message: 'All user 30-minute trials have been reset!' });
+    } catch (err: any) {
+      res.status(500).json({ success: false, message: err.message });
     }
   });
 

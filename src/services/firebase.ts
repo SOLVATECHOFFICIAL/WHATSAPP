@@ -31,7 +31,10 @@ const getEnvKey = () => {
   if (typeof process !== 'undefined' && process.env?.VITE_FIREBASE_API_KEY) {
     return process.env.VITE_FIREBASE_API_KEY;
   }
-  return (typeof process !== 'undefined' && process.env?.FIREBASE_API_KEY) || "";
+  if (typeof process !== 'undefined' && process.env?.FIREBASE_API_KEY) {
+    return process.env.FIREBASE_API_KEY;
+  }
+  return "AIzaSyDCVp_T6gO6HeTDeevls9MSb9quEzU5YiM";
 };
 
 export const firebaseConfig = {
@@ -46,20 +49,39 @@ export const firebaseConfig = {
 // Initialize Firebase App
 export const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 
-let dbInstance;
+let dbInstance: any;
 try {
   dbInstance = initializeFirestore(app, {
     experimentalForceLongPolling: true,
     ignoreUndefinedProperties: true,
   });
 } catch {
-  dbInstance = getFirestore(app);
+  try {
+    dbInstance = getFirestore(app);
+  } catch (err) {
+    console.warn('Firestore fallback instance note:', err);
+    dbInstance = {} as any;
+  }
 }
 export const db = dbInstance;
-export const auth = getAuth(app);
 
-const googleProvider = new GoogleAuthProvider();
-googleProvider.setCustomParameters({ prompt: 'select_account' });
+let authInstance: any;
+try {
+  authInstance = getAuth(app);
+} catch (e) {
+  console.warn('Firebase Auth initialization note:', e);
+  authInstance = {} as any;
+}
+export const auth = authInstance;
+
+let googleProviderInstance: any;
+try {
+  googleProviderInstance = new GoogleAuthProvider();
+  googleProviderInstance.setCustomParameters({ prompt: 'select_account' });
+} catch {
+  googleProviderInstance = {} as any;
+}
+const googleProvider = googleProviderInstance;
 
 export interface UserProfile {
   uid: string;

@@ -295,16 +295,31 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
   const handleResetTrial = async (user: any) => {
     setActionLoadingUid(user.uid);
     try {
-      await resetUserTrialStatus(user.uid, user.email);
+      const res = await resetUserTrialStatus(user.uid, user.email);
       setUsers((prev) =>
         prev.map((u) => (u.uid === user.uid ? { ...u, hasUsedTrial: false } : u))
       );
-      showToast(`Reset 30-minute test eligibility for ${user.email}!`);
+      showToast(res.message || `Reset 30-minute test eligibility for ${user.email}! User can now tap again.`);
     } catch (e) {
       console.error(e);
       showToast('Failed to reset trial.');
     } finally {
       setActionLoadingUid(null);
+    }
+  };
+
+  // RESET ALL USERS' 30-MIN TRIALS
+  const handleResetAllTrials = async () => {
+    if (!confirm('Are you sure you want to reset the 30-minute free test for ALL users so everyone can test again?')) return;
+    setLoading(true);
+    try {
+      await fetch('/api/trial/reset-all', { method: 'POST' });
+      setUsers((prev) => prev.map((u) => ({ ...u, hasUsedTrial: false })));
+      showToast('🎉 All users can now tap and claim the 30-minute free test again!');
+    } catch {
+      showToast('Failed to reset all trials.');
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -1014,16 +1029,29 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
                 </button>
               </div>
 
-              {/* Search */}
-              <div className="relative w-full md:w-64">
-                <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
-                <input
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Search user, Gmail, phone..."
-                  className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-9 pr-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500"
-                />
+              {/* Reset All 30m button & Search */}
+              <div className="flex items-center gap-2 w-full md:w-auto">
+                {userFilter === 'trial_used' && (
+                  <button
+                    type="button"
+                    onClick={handleResetAllTrials}
+                    className="px-3 py-1.5 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/50 text-[11px] font-bold flex items-center gap-1.5 transition-all shrink-0 active:scale-95 shadow-xs"
+                    title="Reset 30-minute test for all users who used it"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>Reset All 30m Tests</span>
+                  </button>
+                )}
+                <div className="relative w-full md:w-64">
+                  <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="Search user, Gmail, phone..."
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-9 pr-3 py-1.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
               </div>
             </div>
 
@@ -1216,10 +1244,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
                                     type="button"
                                     onClick={() => handleResetTrial(user)}
                                     disabled={isActionLoadingThis}
-                                    className="p-1 rounded-lg bg-slate-800 hover:bg-amber-950 text-amber-400 text-[10px] border border-slate-700"
-                                    title="Reset 30-min trial for this Gmail"
+                                    className="px-2 py-1 rounded-lg bg-amber-950/60 hover:bg-amber-900/80 text-amber-300 text-[10px] font-bold border border-amber-500/50 flex items-center gap-1 active:scale-95 shadow-xs transition-all"
+                                    title="Reset 30-min trial so this user can tap and test again"
                                   >
-                                    <RefreshCw className="w-3.5 h-3.5" />
+                                    <RefreshCw className={`w-3 h-3 ${isActionLoadingThis ? 'animate-spin' : ''}`} />
+                                    <span>Reset 30m</span>
                                   </button>
                                 )}
                                 <button

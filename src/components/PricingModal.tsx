@@ -15,7 +15,9 @@ import {
 import {
   LICENSE_PLANS,
   PAYMENT_INFO,
-  redeemKey
+  redeemKey,
+  checkUserTrialStatus,
+  claim30MinuteTrial,
 } from '../services/license';
 
 interface PricingModalProps {
@@ -38,6 +40,42 @@ export const PricingModal: React.FC<PricingModalProps> = ({
   const [redeeming, setRedeeming] = useState(false);
   const [redeemSuccess, setRedeemSuccess] = useState<string | null>(null);
   const [redeemError, setRedeemError] = useState<string | null>(null);
+
+  const [hasClaimedTrial, setHasClaimedTrial] = useState(false);
+  const [claimingTrial, setClaimingTrial] = useState(false);
+  const [trialMessage, setTrialMessage] = useState<string | null>(null);
+
+  React.useEffect(() => {
+    if (userUid) {
+      checkUserTrialStatus(userUid, userEmail).then(setHasClaimedTrial);
+    }
+  }, [userUid, userEmail, isOpen]);
+
+  const handleClaimTrial = async () => {
+    if (!userUid || !userEmail) {
+      setTrialMessage('Please sign in to claim your 30-minute test.');
+      return;
+    }
+    setClaimingTrial(true);
+    setTrialMessage(null);
+    try {
+      const res = await claim30MinuteTrial(userUid, userEmail);
+      if (res.success) {
+        setHasClaimedTrial(true);
+        setTrialMessage(res.message);
+        if (onLicenseActivated) {
+          onLicenseActivated('⚡ 30-Minute Free Test (Active)', res.expiresAt);
+        }
+      } else {
+        setTrialMessage(res.message);
+        setHasClaimedTrial(true);
+      }
+    } catch (err: any) {
+      setTrialMessage(err.message || 'Error activating 30-minute test');
+    } finally {
+      setClaimingTrial(false);
+    }
+  };
 
   if (!isOpen) return null;
 
@@ -101,6 +139,55 @@ export const PricingModal: React.FC<PricingModalProps> = ({
 
         {/* Modal Body */}
         <div className="flex-1 overflow-y-auto p-5 sm:p-6 space-y-6">
+          {/* 30-Minute Free Test Card */}
+          <div className="p-4 rounded-2xl bg-gradient-to-r from-amber-950/50 via-slate-900 to-emerald-950/40 border border-amber-500/40 space-y-3">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-amber-500/20 text-amber-400 font-bold">
+                  <Sparkles className="w-4 h-4 text-amber-400" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h4 className="font-bold text-white text-xs sm:text-sm">🎁 30-Minute Free Test</h4>
+                    <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[9px] font-bold uppercase tracking-wider">
+                      Once in a Lifetime
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-300 mt-0.5">
+                    Test all bot commands, Anti-Delete, and group defense free for 30 minutes!
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {trialMessage && (
+              <div className="p-2 rounded-xl bg-slate-950 border border-amber-500/40 text-amber-300 text-xs flex items-center gap-2">
+                <CheckCircle2 className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                <span>{trialMessage}</span>
+              </div>
+            )}
+
+            <div className="flex items-center justify-between gap-2 pt-1 border-t border-slate-800">
+              <span className="text-[10px] text-slate-400">
+                {hasClaimedTrial ? 'Status: Already Claimed' : 'Free access: No payment needed'}
+              </span>
+              {hasClaimedTrial ? (
+                <span className="px-3 py-1 rounded-xl bg-slate-800 text-slate-400 text-xs font-semibold">
+                  ✓ Trial Used
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleClaimTrial}
+                  disabled={claimingTrial}
+                  className="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-amber-500 to-emerald-400 hover:from-amber-400 hover:to-emerald-300 text-slate-950 font-bold text-xs shadow-md transition-all active:scale-95 disabled:opacity-50"
+                >
+                  {claimingTrial ? 'Activating...' : 'Activate 30-Min Test Free'}
+                </button>
+              )}
+            </div>
+          </div>
+
           {/* Key Activation Form Card */}
           <div className="p-4 rounded-2xl bg-gradient-to-r from-emerald-950/30 to-slate-950 border border-emerald-500/30 space-y-3">
             <div className="flex items-center gap-2">

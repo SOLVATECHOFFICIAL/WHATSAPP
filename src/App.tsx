@@ -24,6 +24,8 @@ import {
   Trash2,
   Crown,
   Shield,
+  Sparkles,
+  Gift,
 } from 'lucide-react';
 import type { User } from 'firebase/auth';
 import { doc, onSnapshot } from 'firebase/firestore';
@@ -49,6 +51,8 @@ import {
   OWNER_EMAIL,
   calculateRemainingTime,
   redeemKey,
+  checkUserTrialStatus,
+  claim30MinuteTrial,
   LICENSE_PLANS,
   PAYMENT_INFO,
 } from './services/license';
@@ -273,6 +277,16 @@ export default function App() {
             (snap) => {
               if (snap.exists()) {
                 const data = snap.data();
+                if (data.hasUsedTrial === false) {
+                  setHasClaimedTrial(false);
+                  localStorage.removeItem(`solvatech_trial_${user.uid}`);
+                  if (user.email) {
+                    localStorage.removeItem(`solvatech_trial_${user.email.toLowerCase()}`);
+                  }
+                } else if (data.hasUsedTrial === true) {
+                  setHasClaimedTrial(true);
+                }
+
                 setUserLicenseData({
                   expiresAt: data.licenseExpiresAt || null,
                   isUnlimited: !!data.isUnlimited,
@@ -592,6 +606,72 @@ export default function App() {
       setInTabError(err.message || 'Error activating key');
     } finally {
       setInTabRedeeming(false);
+    }
+  };
+
+  // 30-Minute Free Test (Once in a Lifetime) state and check
+  const [hasClaimedTrial, setHasClaimedTrial] = useState(false);
+  const [claimingTrial, setClaimingTrial] = useState(false);
+  const [trialMessage, setTrialMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  useEffect(() => {
+    if (!currentUser) {
+      setHasClaimedTrial(false);
+      return;
+    }
+
+    const check = () => {
+      checkUserTrialStatus(currentUser.uid, currentUser.email).then((claimed) => {
+        setHasClaimedTrial(claimed);
+      });
+    };
+
+    check();
+    const interval = setInterval(check, 3500);
+    window.addEventListener('focus', check);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', check);
+    };
+  }, [currentUser]);
+
+  const handleClaim30MinTrial = async () => {
+    if (!currentUser) {
+      setIsAuthModalOpen(true);
+      return;
+    }
+    setClaimingTrial(true);
+    setTrialMessage(null);
+    try {
+      const res = await claim30MinuteTrial(
+        currentUser.uid,
+        currentUser.email || `${currentUser.uid}@solvatech.com`
+      );
+      if (res.success) {
+        setHasClaimedTrial(true);
+        setTrialMessage({ type: 'success', text: res.message });
+        setUserLicenseData((prev) => ({
+          ...prev,
+          expiresAt: res.expiresAt || new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+          plan: '⚡ 30-Minute Free Trial (Active)',
+          isUnlimited: false,
+        }));
+        setToastNotification({
+          id: 'trial_' + Date.now(),
+          type: 'system',
+          title: '🎉 30-Minute Free Test Activated!',
+          body: 'You now have 30 minutes of free access to link your WhatsApp and test all bot features!',
+          timestamp: new Date().toLocaleTimeString(),
+        });
+        setTimeout(() => setToastNotification(null), 5000);
+      } else {
+        setTrialMessage({ type: 'error', text: res.message });
+        setHasClaimedTrial(true);
+      }
+    } catch (err: any) {
+      setTrialMessage({ type: 'error', text: err.message || 'Error claiming 30-minute trial' });
+    } finally {
+      setClaimingTrial(false);
     }
   };
 
@@ -1327,21 +1407,87 @@ export default function App() {
                     </button>
                   </div>
 
-                  {!isLicenseActive && (
-                    <div className="p-3 rounded-xl bg-amber-950/30 border border-amber-500/40 text-amber-300 text-xs flex items-start justify-between gap-2">
-                      <div className="flex items-start gap-2">
+                  {!isLicenseActive && !hasClaimedTrial && (
+                    <div className="p-4 rounded-2xl bg-gradient-to-r from-amber-950/70 via-slate-900 to-emerald-950/50 border-2 border-amber-500/60 shadow-xl space-y-3">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex items-start gap-3">
+                          <div className="w-10 h-10 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0 border border-amber-500/40">
+                            <Sparkles className="w-5 h-5 text-amber-400" />
+                          </div>
+                          <div>
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <h4 className="font-bold text-sm text-white">🎁 30-Minute Free Test</h4>
+                              <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[10px] font-bold uppercase tracking-wider">
+                                Once in a Lifetime
+                              </span>
+                            </div>
+                            <p className="text-[11px] text-slate-300 mt-1 leading-relaxed">
+                              New account bonus: Get <strong>30 minutes of free, unrestricted access</strong> to connect your WhatsApp and test all commands, Anti-Delete, and group defense!
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+
+                      {trialMessage && (
+                        <div
+                          className={`p-2.5 rounded-xl text-xs flex items-center gap-2 ${
+                            trialMessage.type === 'success'
+                              ? 'bg-emerald-950/50 border border-emerald-500/50 text-emerald-300'
+                              : 'bg-rose-950/50 border border-rose-500/50 text-rose-300'
+                          }`}
+                        >
+                          {trialMessage.type === 'success' ? (
+                            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                          ) : (
+                            <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                          )}
+                          <span>{trialMessage.text}</span>
+                        </div>
+                      )}
+
+                      <div className="flex items-center justify-between gap-3 pt-2 border-t border-slate-800/80">
+                        <div className="text-[11px] text-slate-400 flex items-center gap-1.5">
+                          <Clock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                          <span>Status: Ready to Claim (No payment needed)</span>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={handleClaim30MinTrial}
+                          disabled={claimingTrial}
+                          className="px-4 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-emerald-400 hover:from-amber-400 hover:to-emerald-300 text-slate-950 font-black text-xs shadow-lg shadow-amber-950/40 transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50 active:scale-95"
+                        >
+                          {claimingTrial ? (
+                            <>
+                              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                              <span>Activating...</span>
+                            </>
+                          ) : (
+                            <>
+                              <Zap className="w-3.5 h-3.5 fill-slate-950" />
+                              <span>{currentUser ? 'Claim Free 30-Min Test' : 'Sign In to Claim'}</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {!isLicenseActive && hasClaimedTrial && (
+                    <div className="p-3.5 rounded-xl bg-amber-950/30 border border-amber-500/40 text-amber-300 text-xs flex items-start justify-between gap-3">
+                      <div className="flex items-start gap-2.5">
                         <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-amber-400" />
                         <div>
                           <p className="font-semibold text-white">License Key Required</p>
                           <p className="text-[11px] text-amber-300/80 mt-0.5">
-                            You need an active license key to link WhatsApp.
+                            Your 30-minute free trial has ended. Renew with an official license key to reconnect.
                           </p>
                         </div>
                       </div>
                       <button
                         type="button"
                         onClick={() => setActiveTab('license')}
-                        className="px-2.5 py-1 rounded-lg bg-amber-500 text-slate-950 font-bold text-[11px] flex items-center gap-1 shrink-0 active:scale-95"
+                        className="px-3 py-1.5 rounded-lg bg-amber-500 text-slate-950 font-bold text-[11px] flex items-center gap-1 shrink-0 active:scale-95 cursor-pointer"
                       >
                         <span>Get Key</span>
                         <Zap className="w-3 h-3" />
@@ -1435,7 +1581,78 @@ export default function App() {
           {/* TAB 3: LICENSE */}
           {activeTab === 'license' && (
             <div className="space-y-4">
+              {/* 30-MINUTE FREE TEST (ONCE IN A LIFETIME PER ACCOUNT) */}
+              <div className="p-4 rounded-2xl bg-gradient-to-r from-amber-950/70 via-slate-900 to-emerald-950/50 border-2 border-amber-500/60 shadow-xl space-y-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-start gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0 border border-amber-500/40">
+                      <Sparkles className="w-5 h-5 text-amber-400" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h4 className="font-bold text-sm text-white">🎁 30-Minute Free Test</h4>
+                        <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[10px] font-bold uppercase tracking-wider">
+                          Once in a Lifetime
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-300 mt-1 leading-relaxed">
+                        Every account gets <strong>30 minutes of free, unrestricted access</strong> to connect WhatsApp and test all bot features! Stacks on top of your balance if activated.
+                      </p>
+                    </div>
+                  </div>
+                </div>
 
+                {trialMessage && (
+                  <div
+                    className={`p-2.5 rounded-xl text-xs flex items-center gap-2 ${
+                      trialMessage.type === 'success'
+                        ? 'bg-emerald-950/50 border border-emerald-500/50 text-emerald-300'
+                        : 'bg-rose-950/50 border border-rose-500/50 text-rose-300'
+                    }`}
+                  >
+                    {trialMessage.type === 'success' ? (
+                      <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                    ) : (
+                      <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                    )}
+                    <span>{trialMessage.text}</span>
+                  </div>
+                )}
+
+                <div className="flex items-center justify-between gap-3 pt-2 border-t border-slate-800/80">
+                  <div className="text-[11px] text-slate-400 flex items-center gap-1.5">
+                    <Clock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                    <span>
+                      {hasClaimedTrial ? 'Status: 30-Minute Trial Already Used' : 'Status: Ready to Activate (Free)'}
+                    </span>
+                  </div>
+
+                  {hasClaimedTrial ? (
+                    <span className="px-3 py-1.5 rounded-xl bg-slate-850 border border-slate-700/80 text-slate-400 text-xs font-semibold">
+                      ✓ Trial Completed
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={handleClaim30MinTrial}
+                      disabled={claimingTrial}
+                      className="px-4 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-emerald-400 hover:from-amber-400 hover:to-emerald-300 text-slate-950 font-black text-xs shadow-lg shadow-amber-950/40 transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50 active:scale-95"
+                    >
+                      {claimingTrial ? (
+                        <>
+                          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                          <span>Activating...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Zap className="w-3.5 h-3.5 fill-slate-950" />
+                          <span>{currentUser ? 'Activate 30-Min Free Test' : 'Sign In to Activate'}</span>
+                        </>
+                      )}
+                    </button>
+                  )}
+                </div>
+              </div>
 
               {/* NUMBER ONE REQUIREMENT: PROMINENT, BOLD OPAY BANK SHOWCASE */}
               <div className="p-4 sm:p-5 rounded-3xl bg-gradient-to-br from-emerald-950 via-slate-900 to-teal-950 border-2 border-emerald-400/80 shadow-2xl shadow-emerald-950/80 space-y-4 relative overflow-hidden">

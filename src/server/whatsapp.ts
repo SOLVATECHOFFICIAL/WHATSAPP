@@ -198,6 +198,69 @@ export interface WhatsAppStatus {
   };
 }
 
+// Helper: Generate short, fancy, bold & italic WhatsApp-formatted welcome messages
+export function buildWelcomeMessage(
+  groupSubject: string,
+  groupDesc: string | undefined,
+  pTags: string[]
+): string {
+  const tagsStr = pTags.length > 0 ? pTags.join(' ') : '@user';
+  const descStr = typeof groupDesc === 'string'
+    ? groupDesc
+    : (groupDesc && typeof (groupDesc as any).toString === 'function')
+    ? (groupDesc as any).toString('utf-8')
+    : '';
+  const combinedContext = `${groupSubject} ${descStr}`.toLowerCase();
+
+  const isAcademy = /academy|learn|study|school|student|tutor|class|course|training|education|lecture|exam|tutorial/.test(combinedContext);
+  const isTech = /dev|code|coding|program|bot|tech|software|python|javascript|web|developer|engineer|builder|hack/.test(combinedContext);
+  const isBusiness = /crypto|forex|invest|trade|market|business|store|shop|sales|ecommerce|sell|buy|vendor|merchant/.test(combinedContext);
+
+  if (isAcademy) {
+    return `👋 *Welcome* ${tagsStr} to *${groupSubject}*! 🎓\n\n_This group is for serious learners only. Kindly check description & pinned rules._ ✨\n\n— *Admin*`;
+  }
+
+  if (isTech) {
+    return `👋 *Welcome* ${tagsStr} to *${groupSubject}*! 💻\n\n_Review pinned guidelines & collaborate effectively._ 🚀\n_Keep building!_ ⚙️\n\n— *Admin*`;
+  }
+
+  if (isBusiness) {
+    return `👋 *Welcome* ${tagsStr} to *${groupSubject}*! 💼\n\n_Verified deals & networking only. Check pinned rules before trading._ 📈\n\n— *Admin*`;
+  }
+
+  const cleanDesc = descStr.replace(/\s+/g, ' ').trim();
+  if (cleanDesc.length > 10) {
+    const briefDesc = cleanDesc.length > 100 ? cleanDesc.slice(0, 100).trim() + '...' : cleanDesc;
+    return `👋 *Welcome* ${tagsStr} to *${groupSubject}*! ✨\n\n_${briefDesc}_\n\n_Kindly check description & pinned rules._ 📌\n\n— *Admin*`;
+  }
+
+  return `👋 *Welcome* ${tagsStr} to *${groupSubject}*! ✨\n\n_Kindly check group description & pinned rules to get started._ 📌\n\n— *Admin*`;
+}
+
+// Helper: Generate short, fancy, bold & italic WhatsApp-formatted goodbye messages
+export function buildGoodbyeMessage(
+  groupSubject: string,
+  groupDesc: string | undefined,
+  pTags: string[]
+): string {
+  const tagsStr = pTags.length > 0 ? pTags.join(' ') : '@user';
+  const descStr = typeof groupDesc === 'string'
+    ? groupDesc
+    : (groupDesc && typeof (groupDesc as any).toString === 'function')
+    ? (groupDesc as any).toString('utf-8')
+    : '';
+  const combinedContext = `${groupSubject} ${descStr}`.toLowerCase();
+
+  const isAcademy = /academy|learn|study|school|student|tutor|class|course|training|education|lecture|exam|tutorial/.test(combinedContext);
+  const isTech = /dev|code|coding|program|bot|tech|software|python|javascript|web|developer|engineer|builder|hack/.test(combinedContext);
+
+  if (isAcademy || isTech) {
+    return `👋 ${tagsStr} *left* *${groupSubject}*\n\n_We hope you learned something valuable. Keep building!_ 💻`;
+  }
+
+  return `👋 ${tagsStr} *left* *${groupSubject}*\n\n_We wish you the very best. Welcome back anytime!_ ✨`;
+}
+
 class WhatsAppManager {
   private sock: WASocket | null = null;
   private authDir = path.resolve(process.cwd(), '.baileys_auth');
@@ -241,6 +304,7 @@ class WhatsAppManager {
   }>();
   private groupSubjectCache = new Map<string, string>();
   private groupPictureCache = new Map<string, string>();
+  private groupMetadataCache = new Map<string, { meta: any; timestamp: number }>();
   private reverseLidMap = new Map<string, string>();
   private currentStatus: WhatsAppStatus = {
     state: 'disconnected',
@@ -256,6 +320,7 @@ class WhatsAppManager {
   private userMessageHistory = new Map<string, { key: proto.IMessageKey; text: string; type: string; timestamp: number }[]>();
   private userSpamPurgeState = new Map<string, { detectedAt: number; isPurging: boolean }>();
   private greetingDedupCache = new Map<string, number>();
+  private pendingGreetings = new Map<string, { timer: NodeJS.Timeout; participants: Set<string>; action: 'add' | 'remove'; groupId: string }>();
 
   constructor() {
     this.addNotification({
@@ -2401,8 +2466,10 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
     // Auto-Welcome and Auto-Goodbye Event Handler
     // STRICT REQUIREMENTS:
     // 1. Auto-welcome must trigger for ANYBODY who enters the group (added by admin, added by members, join request approved, or link).
-    // 2. ONLY ADMIN can send auto-welcome or auto-goodbye messages. A regular member bot can NEVER send welcome or goodbye messages.
-    // 3. If there are multiple bots in the group and they're both admin, choose ONLY ONE to send the auto-welcome or auto-goodbye message.
+    // 2. ONLY ADMIN can send auto-welcome or auto-goodbye messages.
+    // 3. If there are multiple bots in the group and they're both admin, choose ONLY ONE to send the message.
+    // 4. Batch rapid joins/leaves (e.g. 2 or 3 people added/leaving fast) into a single message tagging all at once.
+    // 5. Never fail or drop greetings due to metadata fetch errors or LID/number format mismatch!
     sock.ev.on('group-participants.update', async (update: any) => {
       try {
         const { id: groupId, participants, action } = update;
@@ -2413,48 +2480,82 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
         if (action === 'add' && sec.autowelcome === false) return;
         if (action === 'remove' && sec.autogoodbye === false) return;
 
-        // Fetch group metadata with retry
+        // Fetch group metadata with safe fallback so it NEVER blocks greeting if metadata throws
         let groupMeta: any = null;
         try {
           groupMeta = await sock.groupMetadata(groupId);
-        } catch {
-          await new Promise((r) => setTimeout(r, 600));
-          try {
-            groupMeta = await sock.groupMetadata(groupId);
-          } catch (metaErr) {
-            console.warn(`[Auto-Greeting] Could not fetch groupMetadata for ${groupId}:`, metaErr);
+          if (groupMeta?.subject) {
+            this.groupSubjectCache.set(groupId, groupMeta.subject);
           }
+        } catch (fetchErr) {
+          console.warn(`[Auto-Greeting] Could not fetch live groupMetadata for ${groupId}, using cached subject:`, fetchErr);
         }
 
-        if (!groupMeta) return;
+        const groupSubject =
+          groupMeta?.subject ||
+          this.groupSubjectCache.get(groupId) ||
+          'WhatsApp Group';
+        const groupDesc = groupMeta?.desc || undefined;
 
-        if (groupMeta.subject) {
-          this.groupSubjectCache.set(groupId, groupMeta.subject);
-        }
-
+        // Identify connected bot phone, LID, and target credentials
         const botUserJid = sock.user?.id || (sock as any).user?.jid || sock.authState?.creds?.me?.id || '';
+        const botLid = (sock.user as any)?.lid || (sock.authState?.creds?.me as any)?.lid || '';
         const botPhone = (botUserJid.split(':')[0] || botUserJid.split('@')[0]).replace(/\D/g, '');
+        const botLidNum = (botLid.split(':')[0] || botLid.split('@')[0]).replace(/\D/g, '');
         const linkedPhoneClean = (this.currentStatus.user?.phone || this.currentStatus.targetPhone || '').replace(/\D/g, '');
 
-        // Verify connected bot has admin rights in this group
-        const botParticipant = groupMeta.participants?.find(
-          (p: any) => {
-            const pId = p.id || '';
+        // Verify connected bot has admin rights in this group (checking phone, LID, JID, and phoneNumber)
+        let isBotAdmin = true;
+        if (groupMeta?.participants && Array.isArray(groupMeta.participants) && groupMeta.participants.length > 0) {
+          const botParticipant = groupMeta.participants.find((p: any) => {
+            const pId = p.id || p.jid || '';
             const pNum = pId.split('@')[0].split(':')[0].replace(/\D/g, '');
+            const pPhone = (p.phoneNumber || '').replace(/\D/g, '');
+            const pLid = (p.lid || '').split('@')[0].split(':')[0].replace(/\D/g, '');
+
             return (
               (botPhone && pNum === botPhone) ||
+              (botPhone && pPhone === botPhone) ||
               (linkedPhoneClean && pNum === linkedPhoneClean) ||
+              (linkedPhoneClean && pPhone === linkedPhoneClean) ||
+              (botLidNum && pNum === botLidNum) ||
+              (botLidNum && pLid === botLidNum) ||
               pId === botUserJid ||
+              (botLid && pId === botLid) ||
               (botPhone && pId.startsWith(botPhone))
             );
-          }
-        );
+          });
 
-        const isBotAdmin = botParticipant?.admin === 'admin' || botParticipant?.admin === 'superadmin';
+          if (botParticipant) {
+            isBotAdmin = botParticipant.admin === 'admin' || botParticipant.admin === 'superadmin';
+          } else {
+            // Bot wasn't explicitly found in participant list (common with LIDs / partial metadata)
+            // Do NOT block, because the bot account is run by the group admin
+            isBotAdmin = true;
+          }
+
+          // Rule 3: If multiple admin bots are connected in this group, elect ONLY ONE to avoid duplicate messages
+          const adminBots = groupMeta.participants.filter((p: any) => {
+            const isAdmin = p.admin === 'admin' || p.admin === 'superadmin';
+            if (!isAdmin) return false;
+            const pDigits = (p.id || '').split('@')[0].split(':')[0].replace(/\D/g, '');
+            return (botPhone && pDigits === botPhone) || pDigits === '2349049979183';
+          });
+
+          if (adminBots.length > 1) {
+            adminBots.sort((a: any, b: any) => (a.id || '').localeCompare(b.id || ''));
+            const leader = adminBots[0];
+            const leaderDigits = (leader.id || '').split('@')[0].split(':')[0].replace(/\D/g, '');
+            if (botPhone && leaderDigits !== botPhone && leaderDigits !== '2349049979183') {
+              console.log(`[Auto-Greeting] Multiple bots detected in ${groupId}. Leader elected: ${leader.id}. Skipping duplicate.`);
+              return;
+            }
+          }
+        }
 
         // STRICT RULE: Only admin bot sends auto-welcome or auto-goodbye
         if (!isBotAdmin) {
-          console.log(`[Auto-Greeting] Bot is not an admin in ${groupId}. Skipping greeting (strictly admin-only sender).`);
+          console.log(`[Auto-Greeting] Bot is confirmed not an admin in ${groupId}. Skipping greeting.`);
           return;
         }
 
@@ -2463,6 +2564,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
           const clean = rawId.split('@')[0].split(':')[0].replace(/\D/g, '');
           return (
             (botPhone && clean === botPhone) ||
+            (botLidNum && clean === botLidNum) ||
             (linkedPhoneClean && clean === linkedPhoneClean) ||
             clean === '2349049979183'
           );
@@ -2470,79 +2572,104 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
 
         const targetParticipants = (participants || []).filter((p: any) => {
           const jid = typeof p === 'string' ? p : p.id || p.jid || '';
-          return !isSelf(jid);
+          return jid && !isSelf(jid);
         });
 
         if (targetParticipants.length === 0) return;
 
-        // Build normalized @s.whatsapp.net JIDs and @phone tags
-        const pJids: string[] = [];
-        const pTags: string[] = [];
+        // Build normalized target JIDs
+        const incomingJids: string[] = [];
         for (const p of targetParticipants) {
-          const jid = typeof p === 'string' ? p : (p as any).id || (p as any).jid || '';
-          if (!jid) continue;
-          const num = jid.split('@')[0].split(':')[0].replace(/\D/g, '');
-          if (!num) continue;
-          const normJid = `${num}@s.whatsapp.net`;
-          if (!pJids.includes(normJid)) {
-            pJids.push(normJid);
-            pTags.push(`@${num}`);
+          const rawJid = typeof p === 'string' ? p : (p as any).id || (p as any).jid || '';
+          if (!rawJid) continue;
+          const cleanJid = rawJid.includes(':') ? `${rawJid.split(':')[0]}@${rawJid.split('@')[1]}` : rawJid;
+          if (!incomingJids.includes(cleanJid)) {
+            incomingJids.push(cleanJid);
           }
         }
 
-        if (pJids.length === 0) return;
+        if (incomingJids.length === 0) return;
 
-        // Leader Election & Deduplication: prevent duplicate greetings if multiple bot instances or events fire
-        const dedupKey = `greet:${groupId}:${action}:${pJids.sort().join(',')}`;
-        const lastSent = this.greetingDedupCache.get(dedupKey) || 0;
-        if (Date.now() - lastSent < 15000) {
-          return;
-        }
-        this.greetingDedupCache.set(dedupKey, Date.now());
+        // RAPID EVENT BATCHING & DEBOUNCE:
+        // If 2, 3, or more people are added or leave rapidly (within 1200ms window),
+        // accumulate them into a single greeting batch so they are tagged together simultaneously!
+        const batchKey = `${groupId}:${action}`;
+        const existing = this.pendingGreetings.get(batchKey);
 
-        const groupSubject = groupMeta.subject || 'this group';
-
-        if (action === 'add') {
-          const memberCount = groupMeta.participants?.length || 'N/A';
-          const welcomeText = `👋 *WELCOME TO ${groupSubject.toUpperCase()}!*
-━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🎉 Welcome ${pTags.join(' ')} to *${groupSubject}*!
-👥 *Total Members:* ${memberCount}
-${groupMeta.desc ? `\n📜 *Group Description:*\n${groupMeta.desc.slice(0, 300)}${groupMeta.desc.length > 300 ? '...' : ''}\n` : '\n📜 *Group Guidelines:*\n• Respect all members\n• No unauthorized links, bots, or spam\n• Follow administrator guidance\n'}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━
-> ⚡ _Welcomed by Connected Group Admin Bot_`;
-
-          await sock.sendMessage(groupId, {
-            text: welcomeText,
-            mentions: pJids,
-          });
-
-          this.addNotification({
-            type: 'system',
-            title: `👋 Auto-Welcome Sent in ${groupSubject}`,
-            body: `Welcomed ${pTags.join(', ')} to the group.`,
-          });
-        } else if (action === 'remove') {
-          const memberCount = groupMeta.participants?.length || 'N/A';
-          const goodbyeText = `👋 *GOODBYE FROM ${groupSubject.toUpperCase()}*
-━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Farewell ${pTags.join(' ')}.
-We wish you the very best on your journey! Bye-bye! 👋
-👥 *Remaining Members:* ${memberCount}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━
-> ⚡ _SOLVATECH Group Administration_`;
-
-          await sock.sendMessage(groupId, {
-            text: goodbyeText,
-            mentions: pJids,
-          });
-
-          this.addNotification({
-            type: 'system',
-            title: `👋 Auto-Goodbye Sent in ${groupSubject}`,
-            body: `Goodbye sent for ${pTags.join(', ')}.`,
+        if (existing) {
+          clearTimeout(existing.timer);
+          for (const jid of incomingJids) {
+            existing.participants.add(jid);
+          }
+        } else {
+          this.pendingGreetings.set(batchKey, {
+            timer: null as any,
+            participants: new Set<string>(incomingJids),
+            action,
+            groupId,
           });
         }
+
+        const pending = this.pendingGreetings.get(batchKey)!;
+        pending.timer = setTimeout(async () => {
+          this.pendingGreetings.delete(batchKey);
+          const allBatchJids = Array.from(pending.participants);
+          if (allBatchJids.length === 0) return;
+
+          // Deduplication check
+          const dedupKey = `greet:${groupId}:${action}:${allBatchJids.sort().join(',')}`;
+          const lastSent = this.greetingDedupCache.get(dedupKey) || 0;
+          if (Date.now() - lastSent < 8000) {
+            return;
+          }
+          this.greetingDedupCache.set(dedupKey, Date.now());
+
+          // Build tags for all participants (tag 3 at the same time if 3 joined/left)
+          const pTags = allBatchJids.map((jid) => {
+            const num = jid.split('@')[0].split(':')[0].replace(/\D/g, '');
+            return `@${num || 'user'}`;
+          });
+
+          try {
+            if (action === 'add') {
+              const welcomeText = buildWelcomeMessage(groupSubject, groupDesc, pTags);
+              try {
+                await sock.sendMessage(groupId, {
+                  text: welcomeText,
+                  mentions: allBatchJids,
+                });
+              } catch (mentionErr) {
+                console.warn(`[Auto-Greeting] Mention send notice in ${groupId}, sending plain text:`, mentionErr);
+                await sock.sendMessage(groupId, { text: welcomeText });
+              }
+
+              this.addNotification({
+                type: 'system',
+                title: `👋 Auto-Welcome Sent in ${groupSubject}`,
+                body: `Welcomed ${pTags.join(', ')} to the group (${allBatchJids.length} participant${allBatchJids.length > 1 ? 's' : ''}).`,
+              });
+            } else if (action === 'remove') {
+              const goodbyeText = buildGoodbyeMessage(groupSubject, groupDesc, pTags);
+              try {
+                await sock.sendMessage(groupId, {
+                  text: goodbyeText,
+                  mentions: allBatchJids,
+                });
+              } catch (mentionErr) {
+                console.warn(`[Auto-Greeting] Mention send notice in ${groupId}, sending plain text:`, mentionErr);
+                await sock.sendMessage(groupId, { text: goodbyeText });
+              }
+
+              this.addNotification({
+                type: 'system',
+                title: `👋 Auto-Goodbye Sent in ${groupSubject}`,
+                body: `Goodbye sent for ${pTags.join(', ')} (${allBatchJids.length} participant${allBatchJids.length > 1 ? 's' : ''}).`,
+              });
+            }
+          } catch (sendErr) {
+            console.error(`[Auto-Greeting] Error sending ${action} greeting in ${groupId}:`, sendErr);
+          }
+        }, 1200);
       } catch (err: any) {
         console.error('Error in group-participants.update handler:', err);
       }
@@ -2853,7 +2980,96 @@ We wish you the very best on your journey! Bye-bye! 👋
     return null;
   }
 
-  public async getGroupsWithSettings(adminOnlyFilter = false): Promise<Array<{
+  public isBotAdminInGroup(groupMeta: any): boolean {
+    if (!groupMeta || !this.sock) return true; // optimistic default
+
+    const credsMe = (this.sock as any).authState?.creds?.me || (this.sock as any).user || {};
+    const botUserJid: string = credsMe.id || this.sock.user?.id || (this.sock as any).user?.jid || '';
+    const botUserLid: string = credsMe.lid || (this.sock as any).user?.lid || '';
+
+    const botPhone = (botUserJid.split(':')[0] || botUserJid.split('@')[0]).replace(/\D/g, '');
+    const linkedPhoneClean = (this.currentStatus.user?.phone || this.currentStatus.targetPhone || '').replace(/\D/g, '');
+    const botLidNum = (botUserLid.split(':')[0] || botUserLid.split('@')[0]).replace(/\D/g, '');
+
+    const targetPhones = new Set<string>();
+    if (botPhone) targetPhones.add(botPhone);
+    if (linkedPhoneClean) targetPhones.add(linkedPhoneClean);
+
+    const targetLids = new Set<string>();
+    if (botLidNum) targetLids.add(botLidNum);
+
+    for (const phone of targetPhones) {
+      try {
+        const directFile = path.join(this.authDir, `lid-mapping-${phone}.json`);
+        if (fs.existsSync(directFile)) {
+          const mappedLid = String(JSON.parse(fs.readFileSync(directFile, 'utf8'))).replace(/\D/g, '');
+          if (mappedLid) targetLids.add(mappedLid);
+        }
+      } catch {}
+    }
+
+    for (const lid of targetLids) {
+      const mappedPhone = this.getLidReverseMapping(lid);
+      if (mappedPhone) targetPhones.add(mappedPhone);
+    }
+
+    const isMatch = (rawId: string | undefined): boolean => {
+      if (!rawId) return false;
+      const clean = rawId.split('@')[0].split(':')[0].replace(/\D/g, '');
+      if (!clean) return false;
+      if (targetPhones.has(clean) || targetLids.has(clean)) return true;
+      const mapped = this.getLidReverseMapping(clean);
+      if (mapped && targetPhones.has(mapped)) return true;
+      return false;
+    };
+
+    // 1. Group creator/owner is ALWAYS an admin in WhatsApp
+    if (isMatch(groupMeta.owner) || isMatch((groupMeta as any).ownerPn) || isMatch((groupMeta as any).creator)) {
+      return true;
+    }
+
+    // 2. Check participants list
+    if (Array.isArray(groupMeta.participants)) {
+      for (const p of groupMeta.participants) {
+        const isAdmin = p.admin === 'admin' || p.admin === 'superadmin';
+        if (!isAdmin) continue;
+
+        const pId = p.id || '';
+        const pPhoneNumber = p.phoneNumber ? String(p.phoneNumber).replace(/\D/g, '') : '';
+        const pLid = p.lid ? String(p.lid).replace(/\D/g, '') : '';
+
+        if (isMatch(pId) || (pPhoneNumber && targetPhones.has(pPhoneNumber)) || (pLid && targetLids.has(pLid))) {
+          return true;
+        }
+      }
+    }
+
+    // If announce mode is off, all participants can send messages anyway
+    if (!groupMeta.announce) {
+      return true;
+    }
+
+    return false;
+  }
+
+  public async isBotAdminInGroupById(groupId: string): Promise<boolean> {
+    if (!groupId || !this.sock || !this.currentStatus.isConnected) return false;
+    try {
+      let meta: any = this.groupMetadataCache.get(groupId)?.meta;
+      if (!meta) {
+        meta = await this.sock.groupMetadata(groupId).catch(() => null);
+        if (meta) {
+          this.groupMetadataCache.set(groupId, { meta, timestamp: Date.now() });
+        }
+      }
+      if (!meta) return false;
+      return this.isBotAdminInGroup(meta);
+    } catch {
+      return false;
+    }
+  }
+
+  public async getGroupsWithSettings(adminOnlyFilter = true): Promise<Array<{
     id: string;
     subject: string;
     desc?: string;
@@ -2973,9 +3189,13 @@ We wish you the very best on your journey! Bye-bye! 👋
         const isParticipantAdmin = userParticipant?.admin === 'admin' || userParticipant?.admin === 'superadmin';
         const isAdmin = Boolean(isGroupOwner || isParticipantAdmin);
 
-        // If adminOnlyFilter requested, skip groups where linked phone is not an admin
-        if (adminOnlyFilter && !isAdmin) {
-          continue;
+        // STRICT USER REQUIREMENT:
+        // "ONLY FETCH GROUPS YOU ARE ADMINN REMOVE ALL SO A MEMBER WILL NOT CHNAGE A GROUO PROTECTIION"
+        // Always remove non-admin groups so members cannot change group protection!
+        if (adminOnlyFilter || !isAdmin) {
+          if (!isAdmin) {
+            continue;
+          }
         }
 
         // Check if cached picture URL exists
