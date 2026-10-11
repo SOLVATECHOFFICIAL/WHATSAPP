@@ -556,13 +556,19 @@ class WhatsAppManager {
       try {
         if (this.sock) {
           try {
+            (this.sock as any)._isIntentionalClose = true;
             this.sock.end(undefined);
           } catch {}
           this.sock = null;
         }
 
         this.ensureAuthDir();
-        this.currentStatus.state = 'connecting';
+        if (
+          this.currentStatus.pairingStage !== 'code_generated' &&
+          this.currentStatus.pairingStage !== 'pairing_handshake'
+        ) {
+          this.currentStatus.state = 'connecting';
+        }
         this.isConnecting = true;
 
         const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
@@ -584,7 +590,7 @@ class WhatsAppManager {
           },
           logger: pinoLogger,
           printQRInTerminal: false,
-          browser: Browsers.windows('Chrome'),
+          browser: Browsers.ubuntu('Chrome'),
           connectTimeoutMs: 60000,
           defaultQueryTimeoutMs: 60000,
           keepAliveIntervalMs: 30000,
@@ -598,10 +604,11 @@ class WhatsAppManager {
 
         sock.ev.on('creds.update', (creds) => {
           saveCreds();
-          // Detect genuine WhatsApp companion confirmation when WhatsApp server approves registration
+          // Detect genuine WhatsApp companion confirmation ONLY when WhatsApp server confirms device registration
           if (
             (this.currentStatus.pairingStage === 'code_generated' || this.currentStatus.state === 'awaiting_pairing') &&
-            (creds.registered || Boolean(creds.account))
+            creds.registered === true &&
+            Boolean((creds as any).me?.id || (creds as any).account?.details)
           ) {
             if (this.currentStatus.pairingStage !== 'pairing_handshake' && this.currentStatus.pairingStage !== 'connected') {
               this.currentStatus.pairingStage = 'pairing_handshake';
@@ -610,7 +617,7 @@ class WhatsAppManager {
               this.addNotification({
                 type: 'pairing',
                 title: 'WhatsApp Handshake Confirmed',
-                body: 'Handshake received from WhatsApp phone! Companion link accepted.',
+                body: 'Companion handshake accepted by your WhatsApp phone! Finalizing link...',
               });
             }
           }
@@ -619,21 +626,16 @@ class WhatsAppManager {
         sock.ev.on('connection.update', async (update) => {
           const { connection, lastDisconnect, qr } = update;
 
-          // Detect WhatsApp handshake stage
-          if (
-            (update.isNewLogin || (update as any).isOnline || update.receivedPendingNotifications) &&
-            this.currentStatus.pairingStage !== 'connected'
-          ) {
-            if (this.currentStatus.pairingStage !== 'pairing_handshake') {
-              this.currentStatus.pairingStage = 'pairing_handshake';
-              this.currentStatus.state = 'pairing_handshake';
-              this.currentStatus.latestHandshakeTime = new Date().toLocaleTimeString();
-              this.addNotification({
-                type: 'pairing',
-                title: 'WhatsApp Handshake Confirmed',
-                body: 'Handshake received from WhatsApp phone! Companion link accepted.',
-              });
-            }
+          // Detect companion link confirmation on explicit new login event
+          if (update.isNewLogin && this.currentStatus.pairingStage !== 'connected') {
+            this.currentStatus.pairingStage = 'pairing_handshake';
+            this.currentStatus.state = 'pairing_handshake';
+            this.currentStatus.latestHandshakeTime = new Date().toLocaleTimeString();
+            this.addNotification({
+              type: 'pairing',
+              title: 'WhatsApp Handshake Confirmed',
+              body: 'Handshake received from WhatsApp phone! Companion link accepted.',
+            });
           }
 
           if (qr) {
@@ -651,7 +653,7 @@ class WhatsAppManager {
           }
 
           if (connection === 'close') {
-            if (this.isIntentionalClosure) {
+            if ((sock as any)._isIntentionalClose || this.isIntentionalClosure) {
               this.isIntentionalClosure = false;
               console.log('[Baileys Connection] Closed intentionally for fresh connection setup or logout.');
               return;
@@ -686,13 +688,21 @@ class WhatsAppManager {
             } else {
               // NEVER clear session, credentials, or pairing code during pairing or normal reconnects!
               if (statusCode === 515 || statusCode === DisconnectReason.restartRequired) {
-                console.log('[Baileys Connection] Connection closed (code: 515 restartRequired). Device pairing accepted, restarting connection immediately...');
+                console.log('[Baileys Connection] Connection closed (code: 515 restartRequired). Device pairing accepted by phone, restarting connection immediately...');
+                this.currentStatus.pairingStage = 'pairing_handshake';
+                this.currentStatus.state = 'pairing_handshake';
+                this.currentStatus.latestHandshakeTime = new Date().toLocaleTimeString();
+                this.addNotification({
+                  type: 'pairing',
+                  title: 'WhatsApp Handshake Confirmed',
+                  body: 'Handshake received from WhatsApp phone! Companion link accepted. Finalizing connection...',
+                });
                 if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
                 this.reconnectTimer = setTimeout(() => {
                   this.initSocket().catch((err) => {
                     console.warn('Auto-restart note:', err);
                   });
-                }, 1500);
+                }, 1000);
               } else {
                 if (!isAwaitingPairing) {
                   this.currentStatus.state = 'disconnected';
@@ -703,7 +713,7 @@ class WhatsAppManager {
                   this.initSocket().catch((err) => {
                     console.warn('Auto-reconnect note:', err);
                   });
-                }, 3000);
+                }, 2000);
               }
             }
           } else if (connection === 'open') {
@@ -3117,9 +3127,9 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
     }
 
     // 1. Clean up old socket cleanly with intentional closure flag
-    this.isIntentionalClosure = true;
     if (this.sock) {
       try {
+        (this.sock as any)._isIntentionalClose = true;
         this.sock.end(undefined);
       } catch {}
       this.sock = null;
@@ -3140,6 +3150,9 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
 
     // Reset initPromise so we start fresh
     this.initPromise = null;
+    this.currentStatus.pairingStage = 'code_generated';
+    this.currentStatus.state = 'awaiting_pairing';
+    this.currentStatus.latestHandshakeTime = undefined;
 
     // 3. Initialize fresh socket
     const sock = await this.initSocket();
@@ -3164,7 +3177,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
       if (!activeSock) continue;
 
       try {
-        console.log(`[Baileys Pairing] Requesting pairing code from WhatsApp server (attempt ${attempt}/10)...`);
+        console.log(`[Baileys Pairing] Requesting pairing code from WhatsApp server via Ubuntu Chrome (attempt ${attempt}/10)...`);
         const raw = await activeSock.requestPairingCode(cleanPhone);
         if (raw && typeof raw === 'string') {
           pairingCodeResult = raw;
@@ -3190,11 +3203,12 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
     this.currentStatus.pairingCode = formattedCode;
     this.currentStatus.pairingStage = 'code_generated';
     this.currentStatus.state = 'awaiting_pairing';
+    this.currentStatus.latestHandshakeTime = undefined;
 
     this.addNotification({
       type: 'pairing',
-      title: 'Pairing Code Generated',
-      body: `Pairing Code: ${formattedCode} generated for +${cleanPhone}. Enter this in WhatsApp > Linked Devices > Link with phone number.`,
+      title: 'WhatsApp Pairing Code Dispatched',
+      body: `Pairing Code: ${formattedCode} dispatched to WhatsApp (Chrome · Ubuntu). Real push notification sent to +${cleanPhone}. Enter this in WhatsApp > Linked Devices > Link with phone number.`,
     });
 
     if (this.pairingCodeTimer) clearTimeout(this.pairingCodeTimer);
@@ -3221,6 +3235,8 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
     if (!jid.includes('@')) {
       const cleanTo = toPhone.replace(/\D/g, '');
       jid = `${cleanTo}@s.whatsapp.net`;
+    } else if (!jid.endsWith('@g.us')) {
+      jid = jidNormalizedUser(jid);
     }
 
     await this.sock.sendMessage(jid, { text });

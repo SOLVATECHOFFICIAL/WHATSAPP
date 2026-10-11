@@ -1562,32 +1562,44 @@ export default function App() {
 
                   {/* Instructions */}
                   {pairingCode && (
-                    <div className="text-[11px] text-slate-300 space-y-2 bg-slate-900/80 p-3.5 rounded-xl border border-emerald-500/40 shadow-sm">
-                      <div className="flex items-center justify-between pb-1 border-b border-slate-800">
+                    <div className="text-[11px] text-slate-300 space-y-2.5 bg-slate-900/90 p-4 rounded-xl border border-emerald-500/40 shadow-sm">
+                      <div className="flex items-center justify-between pb-2 border-b border-slate-800">
                         <span className="font-bold text-white flex items-center gap-1.5">
-                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                          <span>Code Dispatched to WhatsApp</span>
+                          <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                          <span>Genuine WhatsApp Pairing Dispatched</span>
                         </span>
-                        <span className="font-mono text-[10px] text-emerald-400 font-bold">
+                        <span className="font-mono text-[10px] text-emerald-400 font-bold bg-emerald-950/60 px-2 py-0.5 rounded border border-emerald-500/30">
                           {status.targetPhone || `+${phoneNumber.replace(/\D/g, '')}`}
                         </span>
                       </div>
                       <p className="font-semibold text-slate-200">2 Ways to complete link on your phone:</p>
-                      <div className="space-y-1.5 text-slate-300 pl-1">
-                        <p>
-                          <strong className="text-white">Option A (Push Notification):</strong> If a WhatsApp banner popped up on your phone screen, simply tap it and enter <strong className="text-emerald-400 font-mono">{pairingCode}</strong>.
-                        </p>
-                        <p>
-                          <strong className="text-white">Option B (Direct in WhatsApp):</strong>
-                        </p>
-                        <ol className="list-decimal list-inside space-y-0.5 text-slate-400 pl-1">
-                          <li>Open WhatsApp on this phone</li>
-                          <li>Go to <strong>Settings (or ⋮ 3 dots) → Linked Devices</strong></li>
-                          <li>Tap <strong>Link a Device</strong></li>
-                          <li>Tap <strong className="text-emerald-400 font-semibold">Link with phone number instead</strong> at the bottom</li>
-                          <li>Enter the 8-digit code: <strong className="text-emerald-400 font-mono text-xs">{pairingCode}</strong></li>
-                        </ol>
+                      <div className="space-y-2 text-slate-300">
+                        <div className="p-2.5 rounded-lg bg-slate-950/60 border border-slate-800/80">
+                          <p className="font-bold text-emerald-400 flex items-center gap-1.5 mb-1">
+                            <Bell className="w-3.5 h-3.5" />
+                            <span>Method 1 (Instant WhatsApp Notification):</span>
+                          </p>
+                          <p className="text-[11px] text-slate-300 pl-5">
+                            A real notification from <strong>WhatsApp Web (Chrome · Ubuntu)</strong> will appear on your phone screen. Tap it and enter <strong className="text-emerald-300 font-mono text-xs">{pairingCode}</strong>.
+                          </p>
+                        </div>
+                        <div className="p-2.5 rounded-lg bg-slate-950/60 border border-slate-800/80">
+                          <p className="font-bold text-emerald-400 flex items-center gap-1.5 mb-1">
+                            <Smartphone className="w-3.5 h-3.5" />
+                            <span>Method 2 (Manual Link in WhatsApp):</span>
+                          </p>
+                          <ol className="list-decimal list-inside space-y-0.5 text-slate-300 pl-2 text-[11px]">
+                            <li>Open WhatsApp on this phone</li>
+                            <li>Go to <strong>Settings (or ⋮ Menu) → Linked Devices</strong></li>
+                            <li>Tap <strong>Link a Device</strong></li>
+                            <li>Tap <strong className="text-emerald-400 font-semibold">Link with phone number instead</strong> at the bottom</li>
+                            <li>Type the 8-digit code: <strong className="text-emerald-300 font-mono text-xs">{pairingCode}</strong></li>
+                          </ol>
+                        </div>
                       </div>
+                      <p className="text-[10px] text-slate-400 pt-1 border-t border-slate-800 italic">
+                        ⚡ Connected as Ubuntu Chrome companion. Once verified, bot commands, Anti-Delete DM recovery, and group security activate immediately!
+                      </p>
                     </div>
                   )}
                 </div>
