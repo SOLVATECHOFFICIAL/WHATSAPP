@@ -331,16 +331,25 @@ export default function App() {
       );
       setRemainingTimeDisplay(info.formatted);
 
-      // Automatic disconnect if license finishes: bot runs 24/7 for life EXCEPT if license expires
-      if (info.isExpired && !(isOwner || userLicenseData.isUnlimited) && status.isConnected) {
-        console.warn('License has expired. Disconnecting bot automatically...');
+      // Automatic disconnect ONLY if a verified active license finishes (expiresAt is non-null and reached 0)
+      // STRICT FIX: Never disconnect on page load / refresh when userLicenseData.expiresAt is null or initializing!
+      const hasRealExpiry = Boolean(userLicenseData.expiresAt);
+      const isPastExpiry = hasRealExpiry && new Date(userLicenseData.expiresAt!).getTime() <= Date.now();
+
+      if (
+        hasRealExpiry &&
+        isPastExpiry &&
+        !(isOwner || userLicenseData.isUnlimited) &&
+        status.isConnected
+      ) {
+        console.warn('Active license time elapsed. Disconnecting bot...');
         fetch('/api/whatsapp/disconnect', { method: 'POST' }).catch(() => {});
         setStatus((prev) => ({ ...prev, isConnected: false, state: 'disconnected' }));
         setToastNotification({
           id: 'lic_exp_' + Date.now(),
           type: 'error',
           title: '⚠️ License Expired',
-          body: 'Your license time has elapsed. The bot was automatically disconnected.',
+          body: 'Your active license duration has elapsed. The bot was automatically disconnected.',
           timestamp: new Date().toLocaleTimeString(),
         });
       }
@@ -353,14 +362,16 @@ export default function App() {
 
   // Sync active license state to server 24/7 heartbeat watchdog
   useEffect(() => {
-    fetch('/api/whatsapp/sync-license', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        expiresAt: userLicenseData.expiresAt,
-        isUnlimited: isOwner || userLicenseData.isUnlimited,
-      }),
-    }).catch(() => {});
+    if (userLicenseData.expiresAt || isOwner || userLicenseData.isUnlimited) {
+      fetch('/api/whatsapp/sync-license', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          expiresAt: userLicenseData.expiresAt,
+          isUnlimited: isOwner || userLicenseData.isUnlimited,
+        }),
+      }).catch(() => {});
+    }
   }, [userLicenseData.expiresAt, userLicenseData.isUnlimited, isOwner]);
 
   // Polling backend status and real-time notifications
@@ -1135,6 +1146,9 @@ export default function App() {
 
         {/* Content Body - Scrollable independently while header and footer stay pinned */}
         <div className="flex-1 overflow-y-auto p-4 space-y-4 overscroll-contain">
+          {/* Universal PWA App Install Banner for Phone, Android, Chrome & iOS */}
+          <PWAInstallButton variant="banner" />
+
           {/* 2 MANDATORY LINKS STRICTLY FORCED FOR EVERY USER */}
           <div className="p-3.5 rounded-2xl bg-gradient-to-r from-emerald-950/70 via-slate-900 to-amber-950/50 border border-emerald-500/40 space-y-2.5 shadow-md">
             <div className="flex items-center justify-between">
@@ -1191,9 +1205,6 @@ export default function App() {
           {/* TAB 1: PAIR WHATSAPP */}
           {activeTab === 'pair' && (
             <div className="space-y-4">
-              {/* Native PWA App Install Banner for Chrome, Android & iOS */}
-              <PWAInstallButton variant="banner" />
-
               {/* WhatsApp Connection Status Banner if Connected */}
               {status.isConnected && (
                 <div className="p-4 rounded-2xl bg-emerald-950/30 border border-emerald-500/40 space-y-3">

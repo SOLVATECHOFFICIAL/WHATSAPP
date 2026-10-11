@@ -9,6 +9,8 @@ export function usePWAInstall() {
   const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
   const [isInstalled, setIsInstalled] = useState(false);
   const [isIOS, setIsIOS] = useState(false);
+  const [isAndroid, setIsAndroid] = useState(false);
+  const [isInAppBrowser, setIsInAppBrowser] = useState(false);
 
   useEffect(() => {
     // Detect standalone mode (already installed or running as standalone PWA)
@@ -18,10 +20,15 @@ export function usePWAInstall() {
       document.referrer.includes('android-app://');
     setIsInstalled(isStandalone);
 
-    // Detect iOS devices
+    // Detect platform
     const userAgent = window.navigator.userAgent.toLowerCase();
     const isIOSDevice = /iphone|ipad|ipod/.test(userAgent);
+    const isAndroidDevice = /android/.test(userAgent);
+    const inApp = /wv|whatsapp|fbav|instagram|messenger|line|micromessenger/.test(userAgent);
+
     setIsIOS(isIOSDevice);
+    setIsAndroid(isAndroidDevice);
+    setIsInAppBrowser(inApp);
 
     const handleBeforeInstallPrompt = (e: Event) => {
       // Prevent default mini-infobar and capture event
@@ -61,8 +68,11 @@ export function usePWAInstall() {
 
   return {
     isInstallable: !!deferredPrompt,
+    hasPrompt: !!deferredPrompt,
     isInstalled,
     isIOS,
+    isAndroid,
+    isInAppBrowser,
     install,
   };
 }

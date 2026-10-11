@@ -370,13 +370,61 @@ class WhatsAppManager {
       }
     }
 
+    // Restore persistent session license from disk
+    this.loadSessionLicense();
+
     // Start 24/7 active heartbeat watchdog so bot stays alive continuously
     this.start247Heartbeat();
   }
 
+  private saveSessionLicense() {
+    try {
+      if (!fs.existsSync(this.authDir)) {
+        fs.mkdirSync(this.authDir, { recursive: true });
+      }
+      const licFile = path.join(this.authDir, 'session_license.json');
+      fs.writeFileSync(
+        licFile,
+        JSON.stringify({
+          expiresAt: this.sessionLicenseExpiresAt,
+          isUnlimited: this.isSessionUnlimited,
+          updatedAt: new Date().toISOString(),
+        }),
+        'utf-8'
+      );
+    } catch (e) {
+      console.warn('Failed to save session license to disk:', e);
+    }
+  }
+
+  private loadSessionLicense() {
+    try {
+      const licFile = path.join(this.authDir, 'session_license.json');
+      if (fs.existsSync(licFile)) {
+        const raw = fs.readFileSync(licFile, 'utf-8');
+        const parsed = JSON.parse(raw);
+        if (parsed.expiresAt) {
+          this.sessionLicenseExpiresAt = parsed.expiresAt;
+        }
+        if (typeof parsed.isUnlimited === 'boolean') {
+          this.isSessionUnlimited = parsed.isUnlimited;
+        }
+        console.log('[Baileys Startup] Restored active session license:', {
+          expiresAt: this.sessionLicenseExpiresAt,
+          isUnlimited: this.isSessionUnlimited,
+        });
+      }
+    } catch (e) {
+      console.warn('Failed to load session license from disk:', e);
+    }
+  }
+
   public setSessionLicense(expiresAt: string | null, isUnlimited: boolean) {
-    this.sessionLicenseExpiresAt = expiresAt;
-    this.isSessionUnlimited = isUnlimited;
+    if (expiresAt || isUnlimited) {
+      this.sessionLicenseExpiresAt = expiresAt;
+      this.isSessionUnlimited = isUnlimited;
+      this.saveSessionLicense();
+    }
   }
 
   public isLicenseExpired(): boolean {
