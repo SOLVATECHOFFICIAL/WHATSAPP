@@ -552,20 +552,30 @@ class WhatsAppManager {
       this.ensureAuthDir();
       const credsPath = path.join(this.authDir, 'creds.json');
       if (!fs.existsSync(credsPath)) {
-        // First try full session files backup
+        // First try full session backup
         const fullSnap = await getDoc(doc(db, 'whatsapp_sessions', 'current_session'));
         if (fullSnap.exists()) {
           const data = fullSnap.data();
-          if (data?.files && typeof data.files === 'object') {
-            for (const [filename, content] of Object.entries(data.files)) {
+          let sessionFiles: Record<string, string> | null = null;
+          if (data?.rawSessionData && typeof data.rawSessionData === 'string') {
+            try {
+              sessionFiles = JSON.parse(data.rawSessionData);
+            } catch {}
+          } else if (data?.files && typeof data.files === 'object') {
+            sessionFiles = data.files;
+          }
+
+          if (sessionFiles && Object.keys(sessionFiles).length > 0) {
+            for (const [filename, content] of Object.entries(sessionFiles)) {
               if (typeof content === 'string' && filename) {
                 fs.writeFileSync(path.join(this.authDir, filename), content, 'utf-8');
               }
             }
-            console.log(`[WhatsApp Auth] Restored ${Object.keys(data.files).length} session files from Firebase Firestore!`);
+            console.log(`[WhatsApp Auth] Restored ${Object.keys(sessionFiles).length} session files from Firebase Firestore!`);
             return;
           }
         }
+
         // Fallback to legacy single creds document
         const snap = await getDoc(doc(db, 'whatsapp_sessions', 'current_creds'));
         if (snap.exists()) {
@@ -596,9 +606,10 @@ class WhatsAppManager {
         }
       }
       if (hasCreds) {
+        // Store session as stringified JSON to prevent Firestore dot-in-key errors
         await setDoc(
           doc(db, 'whatsapp_sessions', 'current_session'),
-          { files: sessionFiles, updatedAt: new Date().toISOString() },
+          { rawSessionData: JSON.stringify(sessionFiles), updatedAt: new Date().toISOString() },
           { merge: true }
         );
         // Also keep legacy single doc updated
@@ -622,7 +633,7 @@ class WhatsAppManager {
     } catch {}
   }
 
-  public async initSocket(): Promise<WASocket> {
+  public async initSocket(isFreshPairing = false): Promise<WASocket> {
     if (this.sock && this.currentStatus.isConnected) {
       return this.sock;
     }
@@ -641,7 +652,9 @@ class WhatsAppManager {
         }
 
         this.ensureAuthDir();
-        await this.restoreAuthFromFirebaseIfMissing();
+        if (!isFreshPairing) {
+          await this.restoreAuthFromFirebaseIfMissing();
+        }
 
         if (
           this.currentStatus.pairingStage !== 'code_generated' &&
@@ -653,7 +666,7 @@ class WhatsAppManager {
 
         const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
 
-        let version: [number, number, number] = [2, 3000, 1015901307];
+        let version: [number, number, number] = [2, 3000, 1043857760];
         try {
           const v = await fetchLatestBaileysVersion();
           if (v?.version) version = v.version;
@@ -678,6 +691,13 @@ class WhatsAppManager {
           getUrlInfo: (text: string) => getUrlInfo(text),
           syncFullHistory: false,
           markOnlineOnConnect: true,
+          getMessage: async (key: any) => {
+            if (key.id && this.messageCache.has(key.id)) {
+              const cached = this.messageCache.get(key.id);
+              if (cached) return { conversation: cached.text };
+            }
+            return undefined;
+          },
         } as any);
 
         this.sock = sock;
@@ -3085,30 +3105,28 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
     this.currentStatus.state = 'awaiting_pairing';
     this.currentStatus.latestHandshakeTime = undefined;
 
-    // 3. Initialize fresh socket
-    const sock = await this.initSocket();
+    // 3. Initialize fresh socket without loading stale Firebase credentials
+    const sock = await this.initSocket(true);
 
-    // 4. Relax and wait for socket and WhatsApp server to be ready for pairing code!
+    // 4. Wait for WebSocket connection to establish with WhatsApp
     console.log(`[Baileys Pairing] Waiting for WebSocket connection to establish for +${cleanPhone}...`);
 
     let pairingCodeResult: string | null = null;
     let lastErr: any = null;
 
-    // Patiently attempt to request pairing code up to 10 times across ~35 seconds
-    for (let attempt = 1; attempt <= 10; attempt++) {
-      const waitTime = attempt === 1 ? 3500 : 3000;
-      await new Promise((r) => setTimeout(r, waitTime));
-
+    // Attempt to request pairing code with reasonable wait
+    for (let attempt = 1; attempt <= 3; attempt++) {
       if (this.currentStatus.isConnected) {
         return 'ALREADY_PAIRED';
       }
 
-      // Always use current active socket instance
+      await new Promise((r) => setTimeout(r, attempt === 1 ? 2500 : 2000));
+
       const activeSock = this.sock || sock;
       if (!activeSock) continue;
 
       try {
-        console.log(`[Baileys Pairing] Requesting pairing code from WhatsApp server (attempt ${attempt}/10)...`);
+        console.log(`[Baileys Pairing] Requesting pairing code from WhatsApp server (attempt ${attempt}/3)...`);
         const raw = await activeSock.requestPairingCode(cleanPhone);
         if (raw && typeof raw === 'string') {
           pairingCodeResult = raw;
