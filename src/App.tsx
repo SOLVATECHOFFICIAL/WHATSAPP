@@ -1580,13 +1580,13 @@ export default function App() {
                             <span>Method 1 (Instant WhatsApp Notification):</span>
                           </p>
                           <p className="text-[11px] text-slate-300 pl-5">
-                            A real notification from <strong>WhatsApp Web (Chrome · Ubuntu)</strong> will appear on your phone screen. Tap it and enter <strong className="text-emerald-300 font-mono text-xs">{pairingCode}</strong>.
+                            A notification from <strong>WhatsApp</strong> will appear on your phone screen. Tap it and enter <strong className="text-emerald-300 font-mono text-xs">{pairingCode}</strong>.
                           </p>
                         </div>
                         <div className="p-2.5 rounded-lg bg-slate-950/60 border border-slate-800/80">
                           <p className="font-bold text-emerald-400 flex items-center gap-1.5 mb-1">
                             <Smartphone className="w-3.5 h-3.5" />
-                            <span>Method 2 (Manual Link in WhatsApp):</span>
+                            <span>Method 2 (Direct Entry in WhatsApp):</span>
                           </p>
                           <ol className="list-decimal list-inside space-y-0.5 text-slate-300 pl-2 text-[11px]">
                             <li>Open WhatsApp on this phone</li>
@@ -1598,7 +1598,7 @@ export default function App() {
                         </div>
                       </div>
                       <p className="text-[10px] text-slate-400 pt-1 border-t border-slate-800 italic">
-                        ⚡ Connected as Ubuntu Chrome companion. Once verified, bot commands, Anti-Delete DM recovery, and group security activate immediately!
+                        ⚡ Genuine pairing code generated directly by WhatsApp authentication servers. All rules, user warnings, and configurations are permanently stored in Firebase Firestore.
                       </p>
                     </div>
                   )}

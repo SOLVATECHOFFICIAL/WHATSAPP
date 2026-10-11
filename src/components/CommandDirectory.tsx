@@ -40,8 +40,6 @@ export const CommandDirectory: React.FC<CommandDirectoryProps> = ({ onRunCommand
         { cmd: '.read', desc: 'Extract verbatim text from image via High-Precision OCR' },
         { cmd: '.open / .vv', desc: 'Reveal view-once media privately to your personal DM' },
         { cmd: '.send', desc: 'Reply to any WhatsApp Status to extract and send into chat' },
-        { cmd: '.gcstatus [caption]', desc: 'Upload replied or attached media to 24h WhatsApp Status for current group' },
-        { cmd: '.gcstatus everyone [caption]', desc: 'Upload to 24h WhatsApp Status for all groups you belong to' },
       ],
     },
     {

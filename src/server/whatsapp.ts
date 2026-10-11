@@ -19,6 +19,8 @@ import sharp from 'sharp';
 import webpmux from 'node-webpmux';
 import { createWorker } from 'tesseract.js';
 import { commandHandler, parseSpamArgs } from './commands.ts';
+import { db } from '../services/firebase.ts';
+import { doc, getDoc, setDoc, deleteDoc } from 'firebase/firestore';
 
 // Helper: Iteratively unwrap ephemeral, viewOnce, and document wrappers
 export function unwrapMessage(msgObj: any): any {
@@ -544,6 +546,49 @@ class WhatsAppManager {
     }
   }
 
+  // Restore session credentials from Firebase Firestore if local container disk was wiped/restarted
+  private async restoreAuthFromFirebaseIfMissing() {
+    try {
+      this.ensureAuthDir();
+      const credsPath = path.join(this.authDir, 'creds.json');
+      if (!fs.existsSync(credsPath)) {
+        const snap = await getDoc(doc(db, 'whatsapp_sessions', 'current_creds'));
+        if (snap.exists()) {
+          const credsData = snap.data();
+          if (credsData?.rawCreds) {
+            fs.writeFileSync(credsPath, credsData.rawCreds, 'utf-8');
+            console.log('[WhatsApp Auth] Restored authentication session from Firebase Firestore!');
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('[WhatsApp Auth] Firebase creds check note:', e);
+    }
+  }
+
+  // Persist session credentials to Firebase Firestore so restarts/new host deployments retain connection
+  private async syncCredsToFirebase() {
+    try {
+      const credsPath = path.join(this.authDir, 'creds.json');
+      if (fs.existsSync(credsPath)) {
+        const raw = fs.readFileSync(credsPath, 'utf-8');
+        await setDoc(
+          doc(db, 'whatsapp_sessions', 'current_creds'),
+          { rawCreds: raw, updatedAt: new Date().toISOString() },
+          { merge: true }
+        );
+      }
+    } catch (e) {
+      console.warn('[WhatsApp Auth] Firebase sync creds note:', e);
+    }
+  }
+
+  private async clearCredsFromFirebase() {
+    try {
+      await deleteDoc(doc(db, 'whatsapp_sessions', 'current_creds'));
+    } catch {}
+  }
+
   public async initSocket(): Promise<WASocket> {
     if (this.sock && this.currentStatus.isConnected) {
       return this.sock;
@@ -563,6 +608,8 @@ class WhatsAppManager {
         }
 
         this.ensureAuthDir();
+        await this.restoreAuthFromFirebaseIfMissing();
+
         if (
           this.currentStatus.pairingStage !== 'code_generated' &&
           this.currentStatus.pairingStage !== 'pairing_handshake'
@@ -590,7 +637,7 @@ class WhatsAppManager {
           },
           logger: pinoLogger,
           printQRInTerminal: false,
-          browser: Browsers.ubuntu('Chrome'),
+          browser: Browsers.macOS('Desktop'),
           connectTimeoutMs: 60000,
           defaultQueryTimeoutMs: 60000,
           keepAliveIntervalMs: 30000,
@@ -604,6 +651,7 @@ class WhatsAppManager {
 
         sock.ev.on('creds.update', (creds) => {
           saveCreds();
+          this.syncCredsToFirebase().catch(() => {});
           // Detect genuine WhatsApp companion confirmation ONLY when WhatsApp server confirms device registration
           if (
             (this.currentStatus.pairingStage === 'code_generated' || this.currentStatus.state === 'awaiting_pairing') &&
@@ -747,7 +795,7 @@ class WhatsAppManager {
             setTimeout(async () => {
               try {
                 await sock.sendMessage(ownerDm, {
-                  text: `⚡ *SOLVATECH BOT CONNECTED SUCCESSFULLY* ⚡\n\n🎉 Welcome! Your WhatsApp account (+${phone}) is now officially linked with the SOLVATECH automation engine.\n\n🛡️ *Active Features:*\n• Anti-Delete Message Recovery (deleted messages flood here)\n• View-Once Media Decryption (*.open* / *.vv*)\n• Group Security, Anti-Link & Anti-Bot matrix\n• High-Speed Media & Sticker Converters\n• Over 35+ Automation Commands\n\n💬 *Commands Directory:* Type *.menu* to view all commands.\n🌐 *Web Console:* https://solvatech.up.railway.app\n\n> 👑 _Developer: Solomon Oladimeji (+234 904 997 9183)_`,
+                  text: `⚡ *SOLVATECH BOT CONNECTED SUCCESSFULLY* ⚡\n\n🎉 Welcome! Your WhatsApp account (+${phone}) is now officially linked with the SOLVATECH automation engine.\n\n🛡️ *Active Features:*\n• Anti-Delete Message Recovery (deleted messages flood here)\n• View-Once Media Decryption (*.open* / *.vv*)\n• Group Security, Anti-Link & Anti-Bot matrix\n• High-Speed Media & Sticker Converters\n• Over 35+ Automation Commands\n\n💬 *Commands Directory:* Type *.menu* to view all commands.\n🌐 *Web Console:* ${process.env.APP_URL || 'SOLVATECH Web Portal'}\n\n> 👑 _Developer: Solomon Oladimeji (+234 904 997 9183)_`,
                 });
                 console.log(`[WhatsApp Notification] Confirmation sent to ${ownerDm}`);
               } catch (dmErr) {
@@ -1208,14 +1256,8 @@ class WhatsAppManager {
           // Command handling: Prefix '.'
           if (text.startsWith('.')) {
             const parts = text.slice(1).trim().split(/\s+/);
-            let command = parts[0]?.toLowerCase();
-            let args = parts.slice(1);
-
-            // Support .gc status with space as equivalent to .gcstatus
-            if (command === 'gc' && args[0]?.toLowerCase() === 'status') {
-              command = 'gcstatus';
-              args = args.slice(1);
-            }
+            const command = parts[0]?.toLowerCase();
+            const args = parts.slice(1);
 
             // STRICT RULE: All commands are strictly for bot users only — ignore any other person
             if (!isOwner) {
@@ -1503,151 +1545,6 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
 
               await sock.sendMessage(remoteJid, {
                 text: `⚠️ *[STATUS EXTRACTOR]*\nPlease reply to any WhatsApp Status with *.send* to extract the media and caption live & direct right here!`,
-              }, { quoted: msg });
-              return;
-            }
-
-            // 6. .gcstatus (Group Status Broadcast: real posting to group status or all groups + 24h WhatsApp status)
-            if (command === 'gcstatus' || command === 'groupstatus') {
-              if (!isGroup) {
-                reactError();
-                await sock.sendMessage(remoteJid, {
-                  text: `⚠️ *[GROUP ONLY]*\nThe *.gcstatus* command can only be used inside a WhatsApp group!`,
-                }, { quoted: msg });
-                return;
-              }
-
-              const isEveryone = args[0]?.toLowerCase() === 'everyone' || args[0]?.toLowerCase() === 'all';
-              const captionWords = isEveryone ? args.slice(1) : args;
-              const captionText = captionWords.join(' ').trim();
-
-              const targetObj = quotedRaw || rawMsg;
-              const media = extractMediaFromMessage(targetObj);
-
-              // Link detection: If link detected, pause 3.5s so WhatsApp servers and getUrlInfo generate full card preview
-              const hasLink = /(https?:\/\/[^\s]+|whatsapp\.com\/[^\s]+|wa\.me\/[^\s]+)/i.test(captionText);
-              if (hasLink) {
-                await new Promise((resolve) => setTimeout(resolve, 3500));
-              }
-
-              let targetGroups: string[] = [remoteJid];
-              if (isEveryone) {
-                try {
-                  const allGroups = await sock.groupFetchAllParticipating();
-                  const keys = Object.keys(allGroups);
-                  if (keys.length > 0) targetGroups = keys;
-                } catch (e) {
-                  console.warn('Error fetching all groups for gcstatus everyone:', e);
-                  targetGroups = [remoteJid];
-                }
-              }
-
-              // Audience list for WhatsApp Status (connected bot account so WhatsApp accepts status without device query timeout)
-              const myNormalizedJid = jidNormalizedUser(sock.user?.id || (sock as any).authState?.creds?.me?.id || '');
-              const statusJidList = myNormalizedJid ? [myNormalizedJid] : [];
-
-              const fullCaption = captionText
-                ? `${captionText}\n\n> 📢 *Group Status Story (24h)* • _SOLVATECH BOT_`
-                : '> 📢 *Group Status Story (24h)* • _SOLVATECH BOT_';
-
-              if (media && (media.type === 'image' || media.type === 'video' || media.type === 'audio')) {
-                try {
-                  const buf = await downloadMediaBuffer(media.target, media.type);
-
-                  // 1. Post to WhatsApp 24h status (status@broadcast)
-                  try {
-                    if (media.type === 'video') {
-                      await sock.sendMessage(
-                        'status@broadcast',
-                        { video: buf, caption: fullCaption },
-                        { broadcast: true, statusJidList } as any
-                      );
-                    } else if (media.type === 'image') {
-                      await sock.sendMessage(
-                        'status@broadcast',
-                        { image: buf, caption: fullCaption },
-                        { broadcast: true, statusJidList } as any
-                      );
-                    } else {
-                      await sock.sendMessage(
-                        'status@broadcast',
-                        { audio: buf, mimetype: 'audio/mp4', ptt: true },
-                        { broadcast: true, statusJidList } as any
-                      );
-                    }
-                  } catch (statusErr) {
-                    console.error('[gcstatus] Status broadcast upload note:', statusErr);
-                  }
-
-                  // 2. Post real media to target group chats
-                  await Promise.allSettled(
-                    targetGroups.map((gid) => {
-                      if (media.type === 'video') {
-                        return sock.sendMessage(gid, { video: buf, caption: fullCaption });
-                      } else if (media.type === 'image') {
-                        return sock.sendMessage(gid, { image: buf, caption: fullCaption });
-                      } else {
-                        return sock.sendMessage(gid, { audio: buf, mimetype: 'audio/ogg; codecs=opus', ptt: true });
-                      }
-                    })
-                  );
-
-                  reactDone();
-                  await sock.sendMessage(remoteJid, {
-                    text: isEveryone
-                      ? `📢 *[GROUP STATUS STORY UPLOADED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n✅ 24h Story successfully uploaded to *all ${targetGroups.length} groups* and WhatsApp Status!\n${captionText ? `📝 *Caption:* "${captionText}"\n` : ''}━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _Broadcasted live via SOLVATECH_`
-                      : `📢 *[GROUP STATUS STORY UPLOADED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n✅ 24h Story successfully uploaded to this *Group Story* and WhatsApp Status!\n${captionText ? `📝 *Caption:* "${captionText}"\n` : ''}━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _Posted live via SOLVATECH_`,
-                  }, { quoted: msg });
-                  return;
-                } catch (e: any) {
-                  console.error('Error broadcasting media in gcstatus:', e);
-                  reactError();
-                  await sock.sendMessage(remoteJid, {
-                    text: `⚠️ *[GCSTATUS ERROR]*\nFailed to upload group story: ${e.message}`,
-                  }, { quoted: msg });
-                  return;
-                }
-              }
-
-              // Text / announcement story post
-              const broadcastBody = captionText || '📢 Group status announcement updated.';
-              const storyCard =
-                `╭━━━〔 📢 *GROUP 24-HOUR STORY UPDATE* 〕━━━╮\n` +
-                `┃\n` +
-                `┃ 📌 *Story:* "${broadcastBody}"\n` +
-                `┃ 🕒 *Duration:* 24 Hours\n` +
-                `┃ 👥 *Audience:* All Group Members\n` +
-                `┃\n` +
-                `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n` +
-                `> ⚡ _Posted via SOLVATECH Story Engine_`;
-
-              // Post text to 24h WhatsApp status (status@broadcast)
-              try {
-                await sock.sendMessage(
-                  'status@broadcast',
-                  {
-                    text: `${broadcastBody}\n\n> 📢 *Group Status Story (24h)* • _SOLVATECH_`,
-                    backgroundColor: '#1E3A8A',
-                    font: 2,
-                  } as any,
-                  { broadcast: true, statusJidList } as any
-                );
-              } catch (stErr) {
-                console.error('[gcstatus] Error posting text to status@broadcast:', stErr);
-              }
-
-              // Post real story card to target group chats
-              await Promise.allSettled(
-                targetGroups.map((gid) => {
-                  return sock.sendMessage(gid, { text: storyCard });
-                })
-              );
-
-              reactDone();
-              await sock.sendMessage(remoteJid, {
-                text: isEveryone
-                  ? `📢 *[GROUP STATUS STORY UPLOADED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n✅ Announcement posted to *all ${targetGroups.length} groups* and WhatsApp Status!\n📝 *Content:* "${broadcastBody}"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _Broadcasted live via SOLVATECH_`
-                  : `📢 *[GROUP STATUS STORY UPLOADED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n✅ Announcement posted to this *Group Story* and WhatsApp Status!\n📝 *Content:* "${broadcastBody}"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _Posted live via SOLVATECH_`,
               }, { quoted: msg });
               return;
             }
@@ -3177,7 +3074,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
       if (!activeSock) continue;
 
       try {
-        console.log(`[Baileys Pairing] Requesting pairing code from WhatsApp server via Ubuntu Chrome (attempt ${attempt}/10)...`);
+        console.log(`[Baileys Pairing] Requesting pairing code from WhatsApp server (attempt ${attempt}/10)...`);
         const raw = await activeSock.requestPairingCode(cleanPhone);
         if (raw && typeof raw === 'string') {
           pairingCodeResult = raw;
@@ -3208,7 +3105,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
     this.addNotification({
       type: 'pairing',
       title: 'WhatsApp Pairing Code Dispatched',
-      body: `Pairing Code: ${formattedCode} dispatched to WhatsApp (Chrome · Ubuntu). Real push notification sent to +${cleanPhone}. Enter this in WhatsApp > Linked Devices > Link with phone number.`,
+      body: `Pairing Code: ${formattedCode} generated by WhatsApp servers for +${cleanPhone}. Enter this in WhatsApp > Settings > Linked Devices > Link with phone number.`,
     });
 
     if (this.pairingCodeTimer) clearTimeout(this.pairingCodeTimer);
@@ -3273,8 +3170,9 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
       if (fs.existsSync(this.authDir)) {
         fs.rmSync(this.authDir, { recursive: true, force: true });
       }
+      await this.clearCredsFromFirebase();
     } catch (e) {
-      console.error('Error clearing auth dir:', e);
+      console.error('Error clearing auth dir / Firebase:', e);
     }
 
     this.connectedAt = null;

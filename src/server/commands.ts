@@ -63,7 +63,7 @@ export const SOLVATECH_MENU = `╭━━━〔 ⚡ *SOLVATECH BOT COMMAND DIRECT
 ┃ 🔒 *Bot Access Mode:* _100% Private (Owner-Only)_
 ┃ 🛡️ *Deleted-Message Recovery:* _Auto-Forwarded to Personal DM_
 ┃ 👁️ *View-Once Recovery:* _Personal DM (Owner Protected)_
-┃ 🚄 *Production Domain:* _solvatech.up.railway.app_
+┃ 🌐 *Cloud Engine:* _24/7 Multi-Worker Operational_
 ┃ ⚙️ *Group Cloud Sync:* _Active (Firebase Cloud)_
 
 ╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯
@@ -96,8 +96,6 @@ export const SOLVATECH_MENU = `╭━━━〔 ⚡ *SOLVATECH BOT COMMAND DIRECT
 │ • *.read* — _Extract verbatim text from image via OCR_
 │ • *.open / .vv* — _Reveal view-once media privately to your personal DM_
 │ • *.send* — _Extract and send target WhatsApp status_
-│ • *.gcstatus [caption]* — _Upload to group 24h WhatsApp status_
-│ • *.gcstatus everyone* — _Upload to all groups 24h WhatsApp status_
 │
 ╰──────────────────────────────────────
 
@@ -140,11 +138,13 @@ class CommandHandler {
   private securitySettings: Record<string, { antilink: boolean; antibot: boolean; antistatus: boolean; antispam: boolean; autowelcome: boolean; autogoodbye: boolean; warnLimit?: number }> = {};
   private antiDeleteEnabled = true;
   private cacheFilePath = path.resolve(process.cwd(), '.group_security_cache.json');
+  private warningsCacheFilePath = path.resolve(process.cwd(), '.group_warnings_cache.json');
 
   constructor() {
     this.loadSettingsFromCache();
-    // Asynchronously load settings from Firebase Firestore
-    this.loadAllSecuritySettingsFromFirebase().catch(() => {});
+    this.loadWarningsFromCache();
+    // Asynchronously load all data from Firebase Firestore (group security, user warnings, bot settings)
+    this.loadAllDataFromFirebase().catch(() => {});
   }
 
   private saveSettingsToCache() {
@@ -165,10 +165,30 @@ class CommandHandler {
     } catch {}
   }
 
-  public async loadAllSecuritySettingsFromFirebase() {
+  private saveWarningsToCache() {
     try {
-      const snap = await getDocs(collection(db, 'group_security'));
-      snap.forEach((docSnap) => {
+      fs.writeFileSync(this.warningsCacheFilePath, JSON.stringify(this.warnings, null, 2));
+    } catch {}
+  }
+
+  private loadWarningsFromCache() {
+    try {
+      if (fs.existsSync(this.warningsCacheFilePath)) {
+        const raw = fs.readFileSync(this.warningsCacheFilePath, 'utf-8');
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') {
+          this.warnings = parsed;
+        }
+      }
+    } catch {}
+  }
+
+  // Load everything from Firebase Firestore: Group security rules, member warnings, and bot settings
+  public async loadAllDataFromFirebase() {
+    try {
+      // 1. Group Security Rules
+      const securitySnap = await getDocs(collection(db, 'group_security'));
+      securitySnap.forEach((docSnap) => {
         const d = docSnap.data();
         if (d && docSnap.id) {
           this.securitySettings[docSnap.id] = {
@@ -178,7 +198,7 @@ class CommandHandler {
             antispam: d.antispam !== false,
             autowelcome: d.autowelcome !== false,
             autogoodbye: d.autogoodbye !== false,
-            warnLimit: d.warnLimit || 3,
+            warnLimit: typeof d.warnLimit === 'number' ? d.warnLimit : 3,
           };
         }
       });
@@ -186,6 +206,42 @@ class CommandHandler {
     } catch (err) {
       console.warn('Firebase group_security fetch note:', err);
     }
+
+    try {
+      // 2. Member Warnings
+      const warningsSnap = await getDocs(collection(db, 'group_warnings'));
+      warningsSnap.forEach((docSnap) => {
+        const d = docSnap.data();
+        if (d && docSnap.id) {
+          const count = typeof d.count === 'number' ? d.count : 0;
+          if (count > 0) {
+            this.warnings[docSnap.id] = count;
+          } else {
+            delete this.warnings[docSnap.id];
+          }
+        }
+      });
+      this.saveWarningsToCache();
+    } catch (err) {
+      console.warn('Firebase group_warnings fetch note:', err);
+    }
+
+    try {
+      // 3. Bot Settings (Anti-Delete)
+      const antiDoc = await getDoc(doc(db, 'bot_settings', 'anti_delete'));
+      if (antiDoc.exists()) {
+        const d = antiDoc.data();
+        if (d && typeof d.enabled === 'boolean') {
+          this.antiDeleteEnabled = d.enabled;
+        }
+      }
+    } catch (err) {
+      console.warn('Firebase bot_settings fetch note:', err);
+    }
+  }
+
+  public async loadAllSecuritySettingsFromFirebase() {
+    return this.loadAllDataFromFirebase();
   }
 
   public getAntiDeleteEnabled(): boolean {
@@ -287,8 +343,15 @@ class CommandHandler {
   public addWarning(gid: string, userJid: string): { count: number; max: number } {
     const key = `${gid}:${userJid}`;
     this.warnings[key] = (this.warnings[key] || 0) + 1;
+    this.saveWarningsToCache();
     const max = this.securitySettings[gid]?.warnLimit || 3;
-    this.syncToFirebase('group_warnings', key, { count: this.warnings[key] });
+    this.syncToFirebase('group_warnings', key, {
+      count: this.warnings[key],
+      groupId: gid,
+      userJid,
+      warnLimit: max,
+      lastWarnedAt: new Date().toISOString(),
+    });
     return { count: this.warnings[key], max };
   }
 
@@ -297,14 +360,28 @@ class CommandHandler {
   }
 
   public clearWarnings(gid: string, userJid: string) {
-    delete this.warnings[`${gid}:${userJid}`];
-    this.syncToFirebase('group_warnings', `${gid}:${userJid}`, { count: 0 });
+    const key = `${gid}:${userJid}`;
+    delete this.warnings[key];
+    this.saveWarningsToCache();
+    this.syncToFirebase('group_warnings', key, {
+      count: 0,
+      groupId: gid,
+      userJid,
+      clearedAt: new Date().toISOString(),
+    });
   }
 
   public resetAllWarnings(gid: string) {
-    Object.keys(this.warnings).forEach((k) => {
-      if (k.startsWith(`${gid}:`)) delete this.warnings[k];
+    const keysToReset = Object.keys(this.warnings).filter((k) => k.startsWith(`${gid}:`));
+    keysToReset.forEach((k) => {
+      delete this.warnings[k];
+      this.syncToFirebase('group_warnings', k, {
+        count: 0,
+        groupId: gid,
+        clearedAt: new Date().toISOString(),
+      });
     });
+    this.saveWarningsToCache();
   }
 
   public async handle(ctx: CommandContext): Promise<CommandResult> {
@@ -322,9 +399,9 @@ class CommandHandler {
         reply: `⚡ *PONG!*
 Speed: *${latency}ms*
 Status: *Active & Operational* 🟢
-Engine: *SOLVATECH Engine*
-Railway Node: *Ready* 🚄
-Domain: *solvatech.up.railway.app*`,
+Engine: *SOLVATECH Multi-Device Engine*
+Cloud Worker: *Online & Synced* 🛡️
+Web Portal: *${process.env.APP_URL || 'SOLVATECH Web Console'}*`,
       };
     }
 
@@ -351,7 +428,7 @@ Domain: *solvatech.up.railway.app*`,
 ⏳ Linked Duration: *${durationParts.join(' ')}* (${totalMins} minutes active)
 🟢 Status: *Actively Connected via Multi-Device*
 🛡️ Protections: *Anti-Delete & Recovery Live*
-🚄 Server: *Railway (solvatech.up.railway.app)*`,
+⚡ Cloud Host: *24/7 Automated Engine*`,
         };
       }
 
@@ -360,7 +437,7 @@ Domain: *solvatech.up.railway.app*`,
 
 📱 Linked Account: *No WhatsApp account actively linked* ⚪
 ⏳ Linked Duration: *0 minutes*
-ℹ️ Use the Web Pairing Code on *solvatech.up.railway.app* to link your WhatsApp number.`,
+ℹ️ Use the Web Pairing Code on the web console to link your WhatsApp number.`,
       };
     }
 
@@ -373,7 +450,7 @@ Domain: *solvatech.up.railway.app*`,
 💳 OPay Account: *9049979183* (Solomon Oladimeji)
 💬 Official WhatsApp: *+234 904 997 9183*
 🔒 Bot Mode: *100% Private (Owner Protected)*
-🚄 Production: *https://solvatech.up.railway.app*
+🌐 Web Console: *${process.env.APP_URL || 'SOLVATECH Web Console'}*
 🛡️ Status: *Official Certified Developer*
 
 🌐 *WEB DEVELOPMENT SERVICES:*
@@ -390,7 +467,7 @@ _Need a custom website of any kind? Developer Solomon builds high-performance we
 🔑 License Key: *SOLVA-OWNER-UNLIMITED-MASTER*
 ⏳ Duration: *👑 Unlimited Lifetime Master Access*
 🟢 Status: *ACTIVE FOREVER*
-🚄 Deployment: *solvatech.up.railway.app*
+⚡ Deployment: *24/7 Cloud Automation*
 💳 Support: *wa.me/2349049979183*`,
         };
       }
@@ -447,7 +524,7 @@ Type *.plans* or *.buy* to select a duration and pay to OPay *9049979183*.`,
 👤 *Account Name*: *SOLOMON OLADIMEJI*
 
 📝 *Payment Verification*: Transfer to OPay *9049979183* and send payment screenshot/receipt to WhatsApp *wa.me/2349049979183* for instant license key activation!
-🌐 *Redeem Key*: https://solvatech.up.railway.app`,
+🌐 *Redeem Key*: ${process.env.APP_URL || 'Official Web Console'}`,
       };
     }
 
@@ -465,7 +542,7 @@ Empower your WhatsApp account and groups with next-generation automated security
 🌐 *WEB SERVICES:*
 Developer Solomon also builds websites of any kind! DM *wa.me/2349049979183* for web development projects.
 
-👉 *Visit https://solvatech.up.railway.app to connect your WhatsApp!*
+👉 *Visit ${process.env.APP_URL || 'the Web Console'} to connect your WhatsApp!*
 _Forward this message to friends & groups to share!_`,
       };
     }
@@ -842,22 +919,6 @@ Policy: ${
       };
     }
 
-    if (cmd === 'gcstatus' || cmd === 'groupstatus') {
-      if (!ctx.isGroup) {
-        return {
-          reply: `⚠️ *[GROUP ONLY]*\nThe *.gcstatus* command can only be used inside a WhatsApp group to update the group status!`,
-        };
-      }
-      const caption = ctx.args.join(' ');
-      return {
-        reply: `📢 *[GROUP STATUS BROADCAST]*
-━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✅ Media/text posted to Group Status with 4.5s rich preview generation!
-${caption ? `📝 *Caption:* "${caption}"\n` : ''}━━━━━━━━━━━━━━━━━━━━━━━━━━━
-⚡ _Posted to Group Status by SOLVATECH_`,
-      };
-    }
-
     // 3. Group Security & Admin Commands
     if (cmd === 'pin') {
       if (!ctx.isGroup) {
@@ -1171,7 +1232,7 @@ _All anti violations share the same unified warning threshold._`,
 💳 *OPay Account:* 9049979183 (Solomon Oladimeji)
 💬 *Official WhatsApp:* +234 904 997 9183
 🔒 *Bot Access Mode:* 100% Private (Owner-Only Execution)
-🚄 *Production Platform:* https://solvatech.up.railway.app
+🌐 *Platform:* ${process.env.APP_URL || 'SOLVATECH Cloud Automation'}
 
 🌐 *WEB SERVICES:*
 Developer Solomon builds websites of any kind! DM *wa.me/2349049979183* for custom web applications, SaaS dashboards, e-commerce, and bots.
