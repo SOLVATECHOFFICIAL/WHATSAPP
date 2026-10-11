@@ -18,13 +18,16 @@ export const RailwayGuideModal: React.FC<RailwayGuideModalProps> = ({ isOpen, on
   };
 
   const dockerfileCode = `# SOLVATECH BOT 24/7 Production Dockerfile
-FROM node:20-alpine
+FROM node:22-alpine
 
 WORKDIR /app
 
+# Install FFmpeg for media & sticker conversion
+RUN apk add --no-cache ffmpeg
+
 # Install dependencies
 COPY package*.json ./
-RUN npm install --production=false
+RUN npm install --legacy-peer-deps
 
 # Copy source
 COPY . .
@@ -42,6 +45,7 @@ CMD ["npm", "run", "start"]`;
   const railwayEnvCode = `# Railway Environment Variables
 PORT=3000
 NODE_ENV=production
+NIXPACKS_NODE_VERSION=22
 GEMINI_API_KEY=YOUR_GEMINI_API_KEY`;
 
   return (

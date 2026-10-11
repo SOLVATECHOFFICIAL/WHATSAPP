@@ -29,6 +29,7 @@
     "react-dom": "^19.0.1",
     "sharp": "^0.35.5",
     "tesseract.js": "^7.0.0",
+    "tsx": "^4.21.0",
     "vite": "^8.3.0"
   },
   "devDependencies": {
@@ -40,13 +41,12 @@
     "autoprefixer": "^10.4.21",
     "esbuild": "^0.25.0",
     "tailwindcss": "^4.3.3",
-    "tsx": "^4.21.0",
     "typescript": "^7.0.2"
   },
   "overrides": {
     "link-preview-js": "^3.0.0"
   },
   "engines": {
-    "node": ">=20.x"
+    "node": ">=22.0.0"
   }
 }
