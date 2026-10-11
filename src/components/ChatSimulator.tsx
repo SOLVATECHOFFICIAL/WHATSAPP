@@ -194,6 +194,47 @@ export const ChatSimulator: React.FC<ChatSimulatorProps> = ({
         <div ref={messagesEndRef} />
       </div>
 
+      {/* Quick Action Chips */}
+      <div className="px-3 py-1.5 bg-slate-900/80 border-t border-slate-800/80 flex items-center gap-1.5 overflow-x-auto text-[11px] scrollbar-none">
+        <span className="text-[10px] text-slate-500 font-mono uppercase tracking-wider shrink-0">Quick Test:</span>
+        <button
+          onClick={() => handleSendCommand('.open')}
+          className="px-2 py-0.5 rounded-md bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-cyan-800/40 shrink-0 font-mono transition-colors"
+        >
+          👁️ .open / .vv
+        </button>
+        <button
+          onClick={() => handleSendCommand('.sticker')}
+          className="px-2 py-0.5 rounded-md bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-800/40 shrink-0 font-mono transition-colors"
+        >
+          🎨 .sticker
+        </button>
+        <button
+          onClick={() => handleSendCommand('.antisticker')}
+          className="px-2 py-0.5 rounded-md bg-slate-800 hover:bg-slate-700 text-rose-300 border border-rose-800/40 shrink-0 font-mono transition-colors"
+        >
+          🖼️ .antisticker
+        </button>
+        <button
+          onClick={() => handleSendCommand('.read')}
+          className="px-2 py-0.5 rounded-md bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-emerald-800/40 shrink-0 font-mono transition-colors"
+        >
+          🔍 .read (OCR)
+        </button>
+        <button
+          onClick={() => handleSendCommand('.ping')}
+          className="px-2 py-0.5 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 shrink-0 font-mono transition-colors"
+        >
+          ⚡ .ping
+        </button>
+        <button
+          onClick={() => handleSendCommand('.uptime')}
+          className="px-2 py-0.5 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 shrink-0 font-mono transition-colors"
+        >
+          ⏱️ .uptime
+        </button>
+      </div>
+
       {/* Input bar */}
       <div className="p-3 bg-slate-900 border-t border-slate-800">
         <form
@@ -205,7 +246,7 @@ export const ChatSimulator: React.FC<ChatSimulatorProps> = ({
         >
           <input
             type="text"
-            placeholder="Type a command (e.g. .menu, .ping, .uptime, .owner, .expire)..."
+            placeholder="Type a command (e.g. .open, .sticker, .antisticker, .read, .menu)..."
             value={inputText}
             onChange={(e) => setInputText(e.target.value)}
             className="flex-1 bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"

@@ -109,19 +109,24 @@ async function startServer() {
       const args = parts.slice(1);
 
       const status = whatsappManager.getStatus();
+      const isSimulatedGroup = req.body.isGroup ?? (command === 'link' || command === 'groupinfo');
       const result = await commandHandler.handle({
         command,
         args,
         fullText: cleanText,
-        senderJid: 'web-simulator@s.whatsapp.net',
+        senderJid: '2349049979183@s.whatsapp.net',
         senderNumber: status.user?.phone?.replace(/\D/g, '') || '2349049979183',
-        isGroup: false,
+        isGroup: isSimulatedGroup,
+        groupJid: isSimulatedGroup ? (req.body.groupJid || '1203630248491823@g.us') : undefined,
         pushName: 'Solvatech Tester',
         isOwner: isOwner ?? true,
         linkedSince: whatsappManager.getConnectedAt(),
         linkedPhone: status.user?.phone || null,
         licenseExpiresAt: req.body.licenseExpiresAt || null,
         licensePlan: req.body.licensePlan || null,
+        quotedParticipant: req.body.quotedParticipant || undefined,
+        mentionedJids: req.body.mentionedJids || [],
+        getTopChatted: (phone: string) => whatsappManager.getTopChatted(phone),
       });
 
       res.json({ success: true, result });
