@@ -1137,12 +1137,18 @@ class WhatsAppManager {
           if (isGroup) {
             try {
               const groupMeta = await this.getCachedGroupMetadata(sock, remoteJid);
-              const p = groupMeta.participants.find(
-                (x: any) => x.id.replace(/\D/g, '') === senderNum || x.id === senderJid
-              );
-              isSenderAdmin = p?.admin === 'admin' || p?.admin === 'superadmin';
+              if (groupMeta?.participants) {
+                const p = groupMeta.participants.find(
+                  (x: any) => {
+                    const cleanP = x.id?.split('@')[0]?.split(':')[0]?.replace(/\D/g, '');
+                    return cleanP === senderNum || x.id === senderJid || (msg.key.participant && x.id === msg.key.participant);
+                  }
+                );
+                isSenderAdmin = p?.admin === 'admin' || p?.admin === 'superadmin';
+              }
             } catch {}
           }
+          const isAuthorizedAdmin = isOwner || isSenderAdmin;
 
           // Group Security Enforcement (Anti-Bot, Anti-Link, Anti-Status, Anti-Spam)
           // STRICT RULE: Only applies to regular members ("only applies to member oo")! Never applies to admins or bot owner!
@@ -1338,20 +1344,22 @@ class WhatsAppManager {
             const command = parts[0]?.toLowerCase();
             const args = parts.slice(1);
 
-            // STRICT RULE: Group commands NEVER answer in 1v1 chat!
-            if (!isGroup && GROUP_ONLY_COMMANDS.has(command)) {
+            const isGroupCmd = GROUP_ONLY_COMMANDS.has(command);
+
+            // STRICT RULE: Group commands NEVER answer in 1v1 chat! (Silent ignore, no reply, no reactions)
+            if (!isGroup && isGroupCmd) {
               return;
             }
 
-            // In groups: Group commands can ONLY be executed by an Admin connected to the bot!
-            if (isGroup && GROUP_ONLY_COMMANDS.has(command)) {
-              if (!isOwner && !isSenderAdmin) {
+            // STRICT RULE: In groups: Group commands can ONLY be executed by an Admin connected to the bot!
+            if (isGroup && isGroupCmd) {
+              if (!isAuthorizedAdmin) {
                 return; // Non-admin members in group get no response
               }
             }
 
             // For non-group commands: strictly owner/controller execution only
-            if (!isOwner && !GROUP_ONLY_COMMANDS.has(command)) {
+            if (!isOwner && !isGroupCmd) {
               return;
             }
 
@@ -1642,30 +1650,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
 
             // 7. .pin (Pin group message for 7 days: connected bot user + group admin only)
             if (command === 'pin') {
-              if (!isGroup) {
-                await sock.sendMessage(remoteJid, {
-                  text: `⚠️ *[GROUP ONLY]*\nThe *.pin* command can only be used inside a WhatsApp group.`,
-                }, { quoted: msg });
-                return;
-              }
-
-              let isAdmin = false;
-              try {
-                const groupMeta = await sock.groupMetadata(remoteJid);
-                const participant = groupMeta.participants.find(
-                  (p) => p.id.replace(/\D/g, '') === senderNum || p.id === senderJid
-                );
-                isAdmin = participant?.admin === 'admin' || participant?.admin === 'superadmin';
-              } catch (err) {
-                console.error('Error checking admin for .pin:', err);
-              }
-
-              if (!isAdmin) {
-                await sock.sendMessage(remoteJid, {
-                  text: `⛔ *[ACCESS DENIED]*\nYou must be a Group Administrator to pin messages in this group.`,
-                }, { quoted: msg });
-                return;
-              }
+              if (!isGroup || !isAuthorizedAdmin) return;
 
               const quotedStanzaId = contextInfo?.stanzaId;
               if (!quotedStanzaId) {
@@ -1690,10 +1675,12 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                   time: 604800,
                 });
 
+                reactDone();
                 await sock.sendMessage(remoteJid, {
                   text: `📌 *[MESSAGE PINNED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nMessage successfully pinned for 7 days by Group Admin!\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _Protected by SOLVATECH_`,
                 }, { quoted: msg });
               } catch (pinErr: any) {
+                reactError();
                 console.error('Pin error:', pinErr);
                 await sock.sendMessage(remoteJid, {
                   text: `⚠️ *[PIN ERROR]*\nFailed to pin message: ${pinErr.message || 'Make sure bot account is an admin in this group'}.`,
@@ -1704,18 +1691,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
 
             // 8. .del (Delete message: reply deletes chat + trigger; .del N deletes N msgs with admin vs normal user rules)
             if (command === 'del' || command === 'delete') {
-              let isAdmin = !isGroup;
-              if (isGroup) {
-                try {
-                  const groupMeta = await sock.groupMetadata(remoteJid);
-                  const participant = groupMeta.participants.find(
-                    (p) => p.id.replace(/\D/g, '') === senderNum || p.id === senderJid
-                  );
-                  isAdmin = participant?.admin === 'admin' || participant?.admin === 'superadmin';
-                } catch {
-                  // Fallback
-                }
-              }
+              let isAdmin = !isGroup || isAuthorizedAdmin;
 
               const countArg = args[0] ? parseInt(args[0], 10) : NaN;
 
@@ -1796,18 +1772,13 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
 
             // 9. .tagall (Mention all group members: connected bot user, bold & styled, no links)
             if (command === 'tagall' || command === 'everyone') {
-              if (!isGroup) {
-                await sock.sendMessage(remoteJid, {
-                  text: `⚠️ *[GROUP ONLY]*\nThe *.tagall* command can only be used inside a WhatsApp group.`,
-                }, { quoted: msg });
-                return;
-              }
+              if (!isGroup || !isAuthorizedAdmin) return;
 
               try {
-                const groupMeta = await sock.groupMetadata(remoteJid);
-                const participants = groupMeta.participants || [];
+                const groupMeta = await this.getCachedGroupMetadata(sock, remoteJid);
+                const participants = groupMeta?.participants || [];
                 const customMessage = args.join(' ').trim();
-                const groupTitle = groupMeta.subject || 'WhatsApp Group';
+                const groupTitle = groupMeta?.subject || 'WhatsApp Group';
 
                 let output = `╭━━━〔 📢 *GROUP ANNOUNCEMENT* 〕━━━╮\n`;
                 output += `┃ 👥 *Group:* *${groupTitle}*\n`;
@@ -1818,7 +1789,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                 output += `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n`;
 
                 output += `╭──〔 👥 *ATTENDANCE ROSTER* 〕──╮\n`;
-                participants.forEach((p, idx) => {
+                participants.forEach((p: any, idx: number) => {
                   const num = p.id.split('@')[0];
                   output += `│ ${idx + 1}. @${num}\n`;
                 });
@@ -1830,7 +1801,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                   remoteJid,
                   {
                     text: output,
-                    mentions: participants.map((p) => p.id),
+                    mentions: participants.map((p: any) => p.id),
                   },
                   { quoted: msg }
                 );
@@ -1846,21 +1817,15 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
 
             // 10. .admin / .admins (Summon and tag all group administrators)
             if (command === 'admin' || command === 'admins') {
-              if (!isGroup) {
-                reactError();
-                await sock.sendMessage(remoteJid, {
-                  text: `⚠️ *[GROUP ONLY]*\nThe *.admin* command can only be used inside a WhatsApp group.`,
-                }, { quoted: msg });
-                return;
-              }
+              if (!isGroup || !isAuthorizedAdmin) return;
 
               try {
-                const groupMeta = await sock.groupMetadata(remoteJid);
-                const admins = groupMeta.participants.filter(
-                  (p) => p.admin === 'admin' || p.admin === 'superadmin'
-                );
+                const groupMeta = await this.getCachedGroupMetadata(sock, remoteJid);
+                const admins = groupMeta?.participants?.filter(
+                  (p: any) => p.admin === 'admin' || p.admin === 'superadmin'
+                ) || [];
                 const customReason = args.join(' ').trim();
-                const groupTitle = groupMeta.subject || 'WhatsApp Group';
+                const groupTitle = groupMeta?.subject || 'WhatsApp Group';
 
                 let output = `╭━━━〔 🛡️ *ADMINISTRATOR ROSTER* 〕━━━╮\n`;
                 output += `┃ 👥 *Group:* *${groupTitle}*\n`;
@@ -1871,7 +1836,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                 output += `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n`;
 
                 output += `╭──〔 ⚡ *GROUP ADMINISTRATORS* 〕──╮\n`;
-                admins.forEach((admin, i) => {
+                admins.forEach((admin: any, i: number) => {
                   const num = admin.id.split('@')[0];
                   const isSuper = admin.admin === 'superadmin' ? ' 👑 (Creator)' : '';
                   output += `│ ${i + 1}. @${num}${isSuper}\n`;
@@ -1884,7 +1849,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                   remoteJid,
                   {
                     text: output,
-                    mentions: admins.map((a) => a.id),
+                    mentions: admins.map((a: any) => a.id),
                   },
                   { quoted: msg }
                 );
@@ -1900,26 +1865,16 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
 
             // 11. .kick (Remove participant from group: connected user must be group admin)
             if (command === 'kick' || command === 'remove') {
-              if (!isGroup) {
-                reactError();
-                await sock.sendMessage(remoteJid, {
-                  text: `⚠️ *[GROUP ONLY]*\nThe *.kick* command can only be used inside a WhatsApp group.`,
-                }, { quoted: msg });
-                return;
-              }
+              if (!isGroup || !isAuthorizedAdmin) return;
 
               try {
-                const groupMeta = await sock.groupMetadata(remoteJid);
-                const senderParticipant = groupMeta.participants.find(
-                  (p) => p.id.replace(/\D/g, '') === senderNum || p.id === senderJid
+                const groupMeta = await this.getCachedGroupMetadata(sock, remoteJid);
+                const senderParticipant = groupMeta?.participants?.find(
+                  (p: any) => p.id.replace(/\D/g, '') === senderNum || p.id === senderJid
                 );
-                const isSenderAdmin = senderParticipant?.admin === 'admin' || senderParticipant?.admin === 'superadmin';
+                const isSenderAdminLocal = senderParticipant?.admin === 'admin' || senderParticipant?.admin === 'superadmin' || isAuthorizedAdmin;
 
-                if (!isSenderAdmin) {
-                  reactError();
-                  await sock.sendMessage(remoteJid, {
-                    text: `⛔ *[ACCESS DENIED]*\nYou must be a Group Administrator to remove participants from this group.`,
-                  }, { quoted: msg });
+                if (!isSenderAdminLocal) {
                   return;
                 }
 
@@ -1940,8 +1895,8 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                 }
 
                 const targetNum = targetJid.split('@')[0].replace(/\D/g, '');
-                const targetInGroup = groupMeta.participants.find(
-                  (p) => p.id.replace(/\D/g, '') === targetNum
+                const targetInGroup = groupMeta?.participants?.find(
+                  (p: any) => p.id.replace(/\D/g, '') === targetNum
                 );
 
                 if (!targetInGroup) {
@@ -1955,7 +1910,15 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                 if (targetInGroup.admin === 'superadmin') {
                   reactError();
                   await sock.sendMessage(remoteJid, {
-                    text: `🛡️ *[PROTECTED]*\nCannot remove the Group Creator/Superadmin!`,
+                    text: `🛡️ *[PROTECTED CREATOR]*\nThe Group Creator cannot be removed from the group.`,
+                  }, { quoted: msg });
+                  return;
+                }
+
+                if (targetInGroup.admin === 'admin' && !isOwner) {
+                  reactError();
+                  await sock.sendMessage(remoteJid, {
+                    text: `🛡️ *[PROTECTED ADMINISTRATOR]*\nAdministrators cannot remove fellow administrators. Only the Creator or Owner can remove admins.`,
                   }, { quoted: msg });
                   return;
                 }
@@ -1971,14 +1934,14 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                 await sock.groupParticipantsUpdate(remoteJid, [targetInGroup.id], 'remove');
                 reactDone();
                 await sock.sendMessage(remoteJid, {
-                  text: `👢 *[MEMBER REMOVED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👤 *Participant:* @${targetNum}\n⚡ *Action:* Ejected from group by Group Administrator.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n> 🛡️ _SOLVATECH Group Security_`,
-                  mentions: [targetInGroup.id],
+                  text: `👢 *[MEMBER REMOVED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👤 *Participant:* @${targetNum}\n⚡ *Action:* Ejected from group by Group Administrator @${senderNum}.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n> 🛡️ _SOLVATECH Group Defense_`,
+                  mentions: [targetInGroup.id, senderJid],
                 }, { quoted: msg });
               } catch (err: any) {
                 reactError();
-                console.error('Error kicking user:', err);
+                console.error('Error executing .kick:', err);
                 await sock.sendMessage(remoteJid, {
-                  text: `⚠️ *[KICK ERROR]*\nFailed to remove member: ${err.message || 'Make sure your account has admin privileges'}`,
+                  text: `⚠️ *[KICK ERROR]*\nFailed to remove member: ${err.message || 'Ensure bot account is an admin in this group'}.`,
                 }, { quoted: msg });
               }
               return;
@@ -1986,29 +1949,10 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
 
             // 12. .add (Add participant to group with privacy invite fallback)
             if (command === 'add' || command === 'invite') {
-              if (!isGroup) {
-                reactError();
-                await sock.sendMessage(remoteJid, {
-                  text: `⚠️ *[GROUP ONLY]*\nThe *.add* command can only be used inside a WhatsApp group.`,
-                }, { quoted: msg });
-                return;
-              }
+              if (!isGroup || !isAuthorizedAdmin) return;
 
               try {
-                const groupMeta = await sock.groupMetadata(remoteJid);
-                const senderParticipant = groupMeta.participants.find(
-                  (p) => p.id.replace(/\D/g, '') === senderNum || p.id === senderJid
-                );
-                const isSenderAdmin = senderParticipant?.admin === 'admin' || senderParticipant?.admin === 'superadmin';
-
-                if (!isSenderAdmin) {
-                  reactError();
-                  await sock.sendMessage(remoteJid, {
-                    text: `⛔ *[ACCESS DENIED]*\nYou must be a Group Administrator to add participants to this group.`,
-                  }, { quoted: msg });
-                  return;
-                }
-
+                const groupMeta = await this.getCachedGroupMetadata(sock, remoteJid);
                 let targetDigits = (args[0] || '').replace(/\D/g, '');
                 if (!targetDigits && quotedParticipant) {
                   targetDigits = quotedParticipant.replace(/\D/g, '');
@@ -2038,14 +1982,14 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
 
                 reactDone();
                 await sock.sendMessage(remoteJid, {
-                  text: `➕ *[MEMBER ADDED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👤 *Participant:* @${targetDigits}\n✅ Successfully added to *${groupMeta.subject || 'this group'}*!\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n> ⚡ _SOLVATECH Group Management_`,
+                  text: `➕ *[MEMBER ADDED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👤 *Participant:* @${targetDigits}\n✅ Successfully added to *${groupMeta?.subject || 'this group'}*!\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n> ⚡ _SOLVATECH Group Management_`,
                   mentions: [targetJid],
                 }, { quoted: msg });
               } catch (err: any) {
                 reactError();
                 console.error('Error adding user:', err);
                 await sock.sendMessage(remoteJid, {
-                  text: `⚠️ *[ADD ERROR]*\nFailed to add user: ${err.message || 'Make sure your account is an admin'}`,
+                  text: `⚠️ *[ADD ERROR]*\nFailed to add user: ${err.message || 'Make sure bot account is an admin'}.`,
                 }, { quoted: msg });
               }
               return;
@@ -2053,29 +1997,10 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
 
             // 13. .promote (Promote member to Group Administrator)
             if (command === 'promote') {
-              if (!isGroup) {
-                reactError();
-                await sock.sendMessage(remoteJid, {
-                  text: `⚠️ *[GROUP ONLY]*\nThe *.promote* command can only be used inside a WhatsApp group.`,
-                }, { quoted: msg });
-                return;
-              }
+              if (!isGroup || !isAuthorizedAdmin) return;
 
               try {
-                const groupMeta = await sock.groupMetadata(remoteJid);
-                const senderParticipant = groupMeta.participants.find(
-                  (p) => p.id.replace(/\D/g, '') === senderNum || p.id === senderJid
-                );
-                const isSenderAdmin = senderParticipant?.admin === 'admin' || senderParticipant?.admin === 'superadmin';
-
-                if (!isSenderAdmin) {
-                  reactError();
-                  await sock.sendMessage(remoteJid, {
-                    text: `⛔ *[ACCESS DENIED]*\nYou must be a Group Administrator to promote participants in this group.`,
-                  }, { quoted: msg });
-                  return;
-                }
-
+                const groupMeta = await this.getCachedGroupMetadata(sock, remoteJid);
                 let targetJid = mentionedJids[0] || quotedParticipant;
                 if (!targetJid && args[0]) {
                   const cleanDigits = args[0].replace(/\D/g, '');
@@ -2091,7 +2016,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                 }
 
                 const targetNum = targetJid.split('@')[0].replace(/\D/g, '');
-                const participant = groupMeta.participants.find((p) => p.id.replace(/\D/g, '') === targetNum);
+                const participant = groupMeta?.participants?.find((p: any) => p.id.replace(/\D/g, '') === targetNum);
 
                 if (!participant) {
                   reactError();
@@ -2112,7 +2037,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                 reactDone();
                 await sock.sendMessage(remoteJid, {
                   text: `⭐ *[ADMIN PROMOTED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🎉 *Congratulations:* @${targetNum}\n🛡️ Promoted to *Group Administrator* by @${senderNum}!\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n> ⚡ _SOLVATECH Group Administration_`,
-                  mentions: [participant.id, senderParticipant?.id || senderJid],
+                  mentions: [participant.id, senderJid],
                 }, { quoted: msg });
               } catch (err: any) {
                 reactError();
@@ -2126,29 +2051,10 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
 
             // 14. .demote (Demote admin back to regular member)
             if (command === 'demote') {
-              if (!isGroup) {
-                reactError();
-                await sock.sendMessage(remoteJid, {
-                  text: `⚠️ *[GROUP ONLY]*\nThe *.demote* command can only be used inside a WhatsApp group.`,
-                }, { quoted: msg });
-                return;
-              }
+              if (!isGroup || !isAuthorizedAdmin) return;
 
               try {
-                const groupMeta = await sock.groupMetadata(remoteJid);
-                const senderParticipant = groupMeta.participants.find(
-                  (p) => p.id.replace(/\D/g, '') === senderNum || p.id === senderJid
-                );
-                const isSenderAdmin = senderParticipant?.admin === 'admin' || senderParticipant?.admin === 'superadmin';
-
-                if (!isSenderAdmin) {
-                  reactError();
-                  await sock.sendMessage(remoteJid, {
-                    text: `⛔ *[ACCESS DENIED]*\nYou must be a Group Administrator to demote participants in this group.`,
-                  }, { quoted: msg });
-                  return;
-                }
-
+                const groupMeta = await this.getCachedGroupMetadata(sock, remoteJid);
                 let targetJid = mentionedJids[0] || quotedParticipant;
                 if (!targetJid && args[0]) {
                   const cleanDigits = args[0].replace(/\D/g, '');
@@ -2164,7 +2070,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                 }
 
                 const targetNum = targetJid.split('@')[0].replace(/\D/g, '');
-                const participant = groupMeta.participants.find((p) => p.id.replace(/\D/g, '') === targetNum);
+                const participant = groupMeta?.participants?.find((p: any) => p.id.replace(/\D/g, '') === targetNum);
 
                 if (!participant) {
                   reactError();
@@ -2175,7 +2081,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                 if (participant.admin === 'superadmin') {
                   reactError();
                   await sock.sendMessage(remoteJid, {
-                    text: `🛡️ *[PROTECTED]*\nCannot demote the Group Creator/Superadmin!`,
+                    text: `🛡️ *[PROTECTED CREATOR]*\nCannot demote the Group Creator/Superadmin!`,
                   }, { quoted: msg });
                   return;
                 }
@@ -2207,19 +2113,8 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
 
             // 15. .lock (Lock group: announcements only)
             if (command === 'lock') {
-              if (!isGroup) {
-                reactError();
-                await sock.sendMessage(remoteJid, { text: `⚠️ *[GROUP ONLY]*\nThe *.lock* command can only be used inside a WhatsApp group.` }, { quoted: msg });
-                return;
-              }
+              if (!isGroup || !isAuthorizedAdmin) return;
               try {
-                const groupMeta = await sock.groupMetadata(remoteJid);
-                const p = groupMeta.participants.find(x => x.id.replace(/\D/g, '') === senderNum || x.id === senderJid);
-                if (p?.admin !== 'admin' && p?.admin !== 'superadmin') {
-                  reactError();
-                  await sock.sendMessage(remoteJid, { text: `⛔ *[ACCESS DENIED]*\nYou must be a Group Administrator to lock this group.` }, { quoted: msg });
-                  return;
-                }
                 await sock.groupSettingUpdate(remoteJid, 'announcement');
                 reactDone();
                 await sock.sendMessage(remoteJid, {
@@ -2227,26 +2122,15 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                 }, { quoted: msg });
               } catch (err: any) {
                 reactError();
-                await sock.sendMessage(remoteJid, { text: `⚠️ *[LOCK ERROR]*\nFailed to lock group: ${err.message}` }, { quoted: msg });
+                console.error('Failed to lock group:', err);
               }
               return;
             }
 
             // 16. .unlock (Unlock group: all members can message)
             if (command === 'unlock') {
-              if (!isGroup) {
-                reactError();
-                await sock.sendMessage(remoteJid, { text: `⚠️ *[GROUP ONLY]*\nThe *.unlock* command can only be used inside a WhatsApp group.` }, { quoted: msg });
-                return;
-              }
+              if (!isGroup || !isAuthorizedAdmin) return;
               try {
-                const groupMeta = await sock.groupMetadata(remoteJid);
-                const p = groupMeta.participants.find(x => x.id.replace(/\D/g, '') === senderNum || x.id === senderJid);
-                if (p?.admin !== 'admin' && p?.admin !== 'superadmin') {
-                  reactError();
-                  await sock.sendMessage(remoteJid, { text: `⛔ *[ACCESS DENIED]*\nYou must be a Group Administrator to unlock this group.` }, { quoted: msg });
-                  return;
-                }
                 await sock.groupSettingUpdate(remoteJid, 'not_announcement');
                 reactDone();
                 await sock.sendMessage(remoteJid, {
@@ -2254,177 +2138,109 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                 }, { quoted: msg });
               } catch (err: any) {
                 reactError();
-                await sock.sendMessage(remoteJid, { text: `⚠️ *[UNLOCK ERROR]*\nFailed to unlock group: ${err.message}` }, { quoted: msg });
+                console.error('Failed to unlock group:', err);
               }
               return;
             }
 
             // 17. .antilink (Toggle Anti-Link defense)
             if (command === 'antilink') {
-              if (!isGroup) {
-                reactError();
-                await sock.sendMessage(remoteJid, { text: `⚠️ *[GROUP ONLY]*\nThe *.antilink* command can only be used inside a WhatsApp group.` }, { quoted: msg });
-                return;
-              }
+              if (!isGroup || !isAuthorizedAdmin) return;
               try {
-                const groupMeta = await sock.groupMetadata(remoteJid);
-                const p = groupMeta.participants.find(x => x.id.replace(/\D/g, '') === senderNum || x.id === senderJid);
-                if (p?.admin !== 'admin' && p?.admin !== 'superadmin') {
-                  reactError();
-                  await sock.sendMessage(remoteJid, { text: `⛔ *[ACCESS DENIED]*\nYou must be a Group Administrator to configure anti-link.` }, { quoted: msg });
-                  return;
-                }
                 const val = args[0]?.toLowerCase() === 'off' ? false : true;
                 commandHandler.setSecuritySetting(remoteJid, 'antilink', val);
                 reactDone();
                 await sock.sendMessage(remoteJid, {
-                  text: `🛡️ *[ANTI-LINK SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED*' : '❌ *DISABLED*'}\nPolicy: Unauthorized external links will be auto-deleted with security warning issued to sender.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
+                  text: `🛡️ *[ANTI-LINK SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED & ENFORCED*' : '❌ *DISABLED*'}\nPolicy: Unauthorized external links will be auto-deleted with security warning issued to sender.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
                 }, { quoted: msg });
               } catch (err: any) {
                 reactError();
-                await sock.sendMessage(remoteJid, { text: `⚠️ Failed to configure anti-link: ${err.message}` }, { quoted: msg });
+                console.error('Failed to configure anti-link:', err);
               }
               return;
             }
 
             // 18. .antibot (Toggle Anti-Bot defense)
             if (command === 'antibot') {
-              if (!isGroup) {
-                reactError();
-                await sock.sendMessage(remoteJid, { text: `⚠️ *[GROUP ONLY]*\nThe *.antibot* command can only be used inside a WhatsApp group.` }, { quoted: msg });
-                return;
-              }
+              if (!isGroup || !isAuthorizedAdmin) return;
               try {
-                const groupMeta = await sock.groupMetadata(remoteJid);
-                const p = groupMeta.participants.find(x => x.id.replace(/\D/g, '') === senderNum || x.id === senderJid);
-                if (p?.admin !== 'admin' && p?.admin !== 'superadmin') {
-                  reactError();
-                  await sock.sendMessage(remoteJid, { text: `⛔ *[ACCESS DENIED]*\nYou must be a Group Administrator to configure anti-bot.` }, { quoted: msg });
-                  return;
-                }
                 const val = args[0]?.toLowerCase() === 'off' ? false : true;
                 commandHandler.setSecuritySetting(remoteJid, 'antibot', val);
                 reactDone();
                 await sock.sendMessage(remoteJid, {
-                  text: `🤖 *[ANTI-BOT SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED*' : '❌ *DISABLED*'}\nPolicy: Non-admin members using bot prefix commands (*.*) will have their message auto-deleted and receive a security warning.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
+                  text: `🤖 *[ANTI-BOT SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED & ENFORCED*' : '❌ *DISABLED*'}\nPolicy: Non-admin members using bot prefix commands (*.*) will have their message auto-deleted and receive a security warning.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
                 }, { quoted: msg });
               } catch (err: any) {
                 reactError();
-                await sock.sendMessage(remoteJid, { text: `⚠️ Failed to configure anti-bot: ${err.message}` }, { quoted: msg });
+                console.error('Failed to configure anti-bot:', err);
               }
               return;
             }
 
             // 19. .antistatus (Toggle Anti-Status Mentions defense)
             if (command === 'antistatus') {
-              if (!isGroup) {
-                reactError();
-                await sock.sendMessage(remoteJid, { text: `⚠️ *[GROUP ONLY]*\nThe *.antistatus* command can only be used inside a WhatsApp group.` }, { quoted: msg });
-                return;
-              }
+              if (!isGroup || !isAuthorizedAdmin) return;
               try {
-                const groupMeta = await sock.groupMetadata(remoteJid);
-                const p = groupMeta.participants.find(x => x.id.replace(/\D/g, '') === senderNum || x.id === senderJid);
-                if (p?.admin !== 'admin' && p?.admin !== 'superadmin') {
-                  reactError();
-                  await sock.sendMessage(remoteJid, { text: `⛔ *[ACCESS DENIED]*\nYou must be a Group Administrator to configure anti-status mentions.` }, { quoted: msg });
-                  return;
-                }
                 const val = args[0]?.toLowerCase() === 'off' ? false : true;
                 commandHandler.setSecuritySetting(remoteJid, 'antistatus', val);
                 reactDone();
                 await sock.sendMessage(remoteJid, {
-                  text: `📱 *[ANTI-STATUS MENTION SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED*' : '❌ *DISABLED*'}\nPolicy: Non-admin members mentioning this group in their personal WhatsApp status will have the alert deleted and receive a security warning.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
+                  text: `📱 *[ANTI-STATUS MENTION SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED & ENFORCED*' : '❌ *DISABLED*'}\nPolicy: Non-admin members mentioning this group in their personal WhatsApp status will have the alert deleted and receive a security warning.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
                 }, { quoted: msg });
               } catch (err: any) {
                 reactError();
-                await sock.sendMessage(remoteJid, { text: `⚠️ Failed to configure anti-status: ${err.message}` }, { quoted: msg });
+                console.error('Failed to configure anti-status:', err);
               }
               return;
             }
 
             // 20. .antispam (Toggle Anti-Spam defense)
             if (command === 'antispam') {
-              if (!isGroup) {
-                reactError();
-                await sock.sendMessage(remoteJid, { text: `⚠️ *[GROUP ONLY]*\nThe *.antispam* command can only be used inside a WhatsApp group.` }, { quoted: msg });
-                return;
-              }
+              if (!isGroup || !isAuthorizedAdmin) return;
               try {
-                const groupMeta = await sock.groupMetadata(remoteJid);
-                const p = groupMeta.participants.find(x => x.id.replace(/\D/g, '') === senderNum || x.id === senderJid);
-                if (p?.admin !== 'admin' && p?.admin !== 'superadmin') {
-                  reactError();
-                  await sock.sendMessage(remoteJid, { text: `⛔ *[ACCESS DENIED]*\nYou must be a Group Administrator to configure anti-spam.` }, { quoted: msg });
-                  return;
-                }
                 const val = args[0]?.toLowerCase() === 'off' ? false : true;
                 commandHandler.setSecuritySetting(remoteJid, 'antispam', val);
                 reactDone();
                 await sock.sendMessage(remoteJid, {
-                  text: `🚫 *[ANTI-SPAM DEFENSE SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED*' : '❌ *DISABLED*'}\nPolicy: Flood messages, rapid stickers/media spam, and repetitive text/words will be automatically purged (including original spam messages). If a member continues sending messages while deletion is underway, they are *INSTANTLY KICKED*!\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
+                  text: `🚫 *[ANTI-SPAM DEFENSE SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED & ENFORCED*' : '❌ *DISABLED*'}\nPolicy: Flood messages, rapid stickers/media spam, and repetitive text/words will be automatically purged (including original spam messages). If a member continues sending messages while deletion is underway, they are *INSTANTLY KICKED*!\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
                 }, { quoted: msg });
               } catch (err: any) {
                 reactError();
-                await sock.sendMessage(remoteJid, { text: `⚠️ Failed to configure anti-spam: ${err.message}` }, { quoted: msg });
+                console.error('Failed to configure anti-spam:', err);
               }
               return;
             }
 
             // 21. .autowelcome (Toggle Auto-Welcome for joining members - Strictly Admin Only)
             if (command === 'autowelcome') {
-              if (!isGroup) {
-                reactError();
-                await sock.sendMessage(remoteJid, { text: `⚠️ *[GROUP ONLY]*\nThe *.autowelcome* command can only be used inside a WhatsApp group.` }, { quoted: msg });
-                return;
-              }
+              if (!isGroup || !isAuthorizedAdmin) return;
               try {
-                const groupMeta = await sock.groupMetadata(remoteJid);
-                const p = groupMeta.participants.find(x => x.id.replace(/\D/g, '') === senderNum || x.id === senderJid);
-                const isSenderAdmin = p?.admin === 'admin' || p?.admin === 'superadmin' || isOwner;
-                if (!isSenderAdmin) {
-                  reactError();
-                  await sock.sendMessage(remoteJid, { text: `⛔ *[ACCESS DENIED]*\nYou must be a Group Administrator connected to the bot to configure auto-welcome.` }, { quoted: msg });
-                  return;
-                }
                 const val = args[0]?.toLowerCase() === 'off' ? false : true;
                 commandHandler.setSecuritySetting(remoteJid, 'autowelcome', val);
                 reactDone();
                 await sock.sendMessage(remoteJid, {
-                  text: `👋 *[AUTO-WELCOME SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED*' : '❌ *DISABLED*'}\nPolicy: Automatically greets anyone who enters the group (whether approved by admin, added by members, or added via link).\nRule: Strictly sent only by connected admin bots (choosing exactly 1 admin bot if multiple are connected).\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
+                  text: `👋 *[AUTO-WELCOME SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED*' : '❌ *DISABLED*'}\nPolicy: Automatically greets anyone who enters the group.\nRule: Strictly sent only by connected admin bots.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
                 }, { quoted: msg });
               } catch (err: any) {
                 reactError();
-                await sock.sendMessage(remoteJid, { text: `⚠️ Failed to configure auto-welcome: ${err.message}` }, { quoted: msg });
+                console.error('Failed to configure auto-welcome:', err);
               }
               return;
             }
 
             // 22. .autogoodbye (Toggle Auto-Goodbye for departing members - Strictly Admin Only)
             if (command === 'autogoodbye') {
-              if (!isGroup) {
-                reactError();
-                await sock.sendMessage(remoteJid, { text: `⚠️ *[GROUP ONLY]*\nThe *.autogoodbye* command can only be used inside a WhatsApp group.` }, { quoted: msg });
-                return;
-              }
+              if (!isGroup || !isAuthorizedAdmin) return;
               try {
-                const groupMeta = await sock.groupMetadata(remoteJid);
-                const p = groupMeta.participants.find(x => x.id.replace(/\D/g, '') === senderNum || x.id === senderJid);
-                const isSenderAdmin = p?.admin === 'admin' || p?.admin === 'superadmin' || isOwner;
-                if (!isSenderAdmin) {
-                  reactError();
-                  await sock.sendMessage(remoteJid, { text: `⛔ *[ACCESS DENIED]*\nYou must be a Group Administrator connected to the bot to configure auto-goodbye.` }, { quoted: msg });
-                  return;
-                }
                 const val = args[0]?.toLowerCase() === 'off' ? false : true;
                 commandHandler.setSecuritySetting(remoteJid, 'autogoodbye', val);
                 reactDone();
                 await sock.sendMessage(remoteJid, {
-                  text: `👋 *[AUTO-GOODBYE SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED*' : '❌ *DISABLED*'}\nPolicy: Automatically acknowledges departing or removed participants.\nRule: Strictly sent only by connected admin bots (choosing exactly 1 admin bot if multiple are connected).\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
+                  text: `🚪 *[AUTO-GOODBYE SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED*' : '❌ *DISABLED*'}\nPolicy: Automatically acknowledges departing or removed participants.\nRule: Strictly sent only by connected admin bots.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
                 }, { quoted: msg });
               } catch (err: any) {
                 reactError();
-                await sock.sendMessage(remoteJid, { text: `⚠️ Failed to configure auto-goodbye: ${err.message}` }, { quoted: msg });
+                console.error('Failed to configure auto-goodbye:', err);
               }
               return;
             }
@@ -2433,24 +2249,16 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
             // STRICT RULE: All warns commands can only be used by admin connected to bot. Member can NEVER use .warn!
             // Admin cannot be warned by admin. Quoted message (pic, sticker, text, etc.) is auto-magically deleted.
             if (['warn', 'warnlimit', 'warns', 'unwarn', 'clearwarns', 'resetwarns'].includes(command)) {
-              if (!isGroup) {
-                reactError();
-                await sock.sendMessage(remoteJid, { text: `⚠️ *[GROUP ONLY]*\nWarn commands can only be used inside a WhatsApp group.` }, { quoted: msg });
-                return;
-              }
+              if (!isGroup || !isAuthorizedAdmin) return;
 
               try {
-                const groupMeta = await sock.groupMetadata(remoteJid);
-                const senderParticipant = groupMeta.participants.find(
-                  (p) => p.id.replace(/\D/g, '') === senderNum || p.id === senderJid
+                const groupMeta = await this.getCachedGroupMetadata(sock, remoteJid);
+                const senderParticipant = groupMeta?.participants?.find(
+                  (p: any) => p.id.replace(/\D/g, '') === senderNum || p.id === senderJid
                 );
-                const isSenderAdmin = senderParticipant?.admin === 'admin' || senderParticipant?.admin === 'superadmin' || isOwner;
+                const isSenderAdminLocal = senderParticipant?.admin === 'admin' || senderParticipant?.admin === 'superadmin' || isAuthorizedAdmin;
 
-                if (!isSenderAdmin) {
-                  reactError();
-                  await sock.sendMessage(remoteJid, {
-                    text: `⛔ *[ACCESS DENIED]*\nAll warning commands can ONLY be used by Group Administrators connected to the bot.\nRegular members cannot use .warn or modify warning thresholds.`,
-                  }, { quoted: msg });
+                if (!isSenderAdminLocal) {
                   return;
                 }
 
@@ -2550,8 +2358,8 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                   }
 
                   const targetClean = targetJid.split('@')[0].replace(/\D/g, '');
-                  const targetInGroup = groupMeta.participants.find(
-                    (p) => p.id.replace(/\D/g, '') === targetClean || p.id === targetJid
+                  const targetInGroup = groupMeta?.participants?.find(
+                    (p: any) => p.id.replace(/\D/g, '') === targetClean || p.id === targetJid
                   );
 
                   if (!targetInGroup) {
@@ -2621,9 +2429,24 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                 }
               } catch (err: any) {
                 reactError();
-                await sock.sendMessage(remoteJid, { text: `⚠️ *[WARN ERROR]*: ${err.message}` }, { quoted: msg });
+                console.error('[Warn Error]:', err);
                 return;
               }
+            }
+
+            // 24. .anti (Inspect group protection matrix - Admin connected to bot only)
+            if (command === 'anti') {
+              if (!isGroup || !isAuthorizedAdmin) return;
+              const sec = commandHandler.getSecuritySettings(remoteJid);
+              reactDone();
+              await sock.sendMessage(
+                remoteJid,
+                {
+                  text: `╭━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╮\n┃  🛡️ *SOLVATECH GROUP DEFENSE MATRIX* 🛡️  ┃\n╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n*STATUS:*  🟢 *ARMED & ENFORCED*\n*ACCESS:*  👑 *ADMINISTRATORS ONLY*\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🛡️ *ACTIVE SHIELD POLICIES*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n🌐 *ANTI-LINK SYSTEM:*\n   ► *STATUS:* ${sec.antilink ? '🟢 *ENABLED & ENFORCED*' : '🔴 *DISABLED*'}\n   ► *POLICY:* *Auto-delete link + 1 Security Warning*\n\n🤖 *ANTI-BOT SYSTEM:*\n   ► *STATUS:* ${sec.antibot ? '🟢 *ENABLED & ENFORCED*' : '🔴 *DISABLED*'}\n   ► *POLICY:* *Auto-purge member prefix commands + Warning*\n\n📱 *ANTI-STATUS MENTIONS:*\n   ► *STATUS:* ${sec.antistatus ? '🟢 *ENABLED & ENFORCED*' : '🔴 *DISABLED*'}\n   ► *POLICY:* *Block group status mentions + Warning*\n\n🚫 *ANTI-SPAM DEFENSE:*\n   ► *STATUS:* ${sec.antispam ? '🟢 *ENABLED & ENFORCED*' : '🔴 *DISABLED*'}\n   ► *POLICY:* *Auto-purge flood messages + INSTANT KICK*\n\n👋 *AUTO-WELCOME:*\n   ► *STATUS:* ${sec.autowelcome ? '🟢 *ENABLED (ADMIN BOT)*' : '🔴 *DISABLED*'}\n   ► *POLICY:* *Contextual welcome greeting to new members*\n\n🚪 *AUTO-GOODBYE:*\n   ► *STATUS:* ${sec.autogoodbye ? '🟢 *ENABLED (ADMIN BOT)*' : '🔴 *DISABLED*'}\n   ► *POLICY:* *Departure acknowledgments*\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚙️ *WARNING & PUNISHMENT RULES*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚠️ *WARNING LIMIT:* *${sec.warnLimit || 3} WARNINGS*\n🔨 *ENFORCEMENT:* *AUTOMATIC KICK AT STRIKE ${sec.warnLimit || 3}*\n🗑️ *OFFENDING MEDIA:* *Auto-deleted on warning (pics/stickers/text)*\n\n> 🛡️ *SOLVATECH AUTOMATED ENGINE* • _24/7 Group Defense_`,
+                },
+                { quoted: msg }
+              );
+              return;
             }
 
             // 9. .spam (Fast burst repeated broadcast: owner/controller only; supports .spam <msg> <count> or .spam <count> <msg>)
@@ -2750,6 +2573,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
               groupJid: isGroup ? remoteJid : undefined,
               pushName: msg.pushName || undefined,
               isOwner,
+              isGroupAdmin: isAuthorizedAdmin,
               linkedSince: this.connectedAt,
               linkedPhone: this.currentStatus.user?.phone,
               quotedParticipant: quotedParticipant || undefined,
