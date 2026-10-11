@@ -143,13 +143,20 @@ export default function App() {
 
   const [isRefreshingStatus, setIsRefreshingStatus] = useState(false);
 
-  // User Dashboard: Anti-Delete Message Recovery state
+  // 30-Minute Free Test (Once in a Lifetime) state
+  const [hasClaimedTrial, setHasClaimedTrial] = useState(false);
+  const [claimingTrial, setClaimingTrial] = useState(false);
+  const [trialMessage, setTrialMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  // User Dashboard: Anti-Delete Message Recovery state (isolated per user)
   const [antiDeleteEnabled, setAntiDeleteEnabled] = useState(true);
   const [togglingAntiDelete, setTogglingAntiDelete] = useState(false);
 
-  const fetchAntiDeleteStatus = async () => {
+  const fetchAntiDeleteStatus = async (uid?: string) => {
+    const targetUid = uid || currentUser?.uid;
+    if (!targetUid) return;
     try {
-      const res = await fetch('/api/user/anti-delete').catch(() => null);
+      const res = await fetch(`/api/user/anti-delete?userId=${encodeURIComponent(targetUid)}`).catch(() => null);
       if (res && res.ok) {
         const data = await safeParseJson<{ success: boolean; enabled: boolean }>(res);
         if (data && typeof data.enabled === 'boolean') {
@@ -162,6 +169,7 @@ export default function App() {
   };
 
   const handleToggleAntiDelete = async () => {
+    if (!currentUser?.uid) return;
     const nextValue = !antiDeleteEnabled;
     setTogglingAntiDelete(true);
     setAntiDeleteEnabled(nextValue); // Optimistic UI update
@@ -170,7 +178,7 @@ export default function App() {
       const res = await fetch('/api/user/anti-delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled: nextValue }),
+        body: JSON.stringify({ enabled: nextValue, userId: currentUser.uid }),
       });
 
       if (res.ok) {
@@ -202,14 +210,15 @@ export default function App() {
     currentUser.email.trim().toLowerCase() === OWNER_EMAIL.toLowerCase()
   );
 
-  // Manual status refresh: forces immediate fetch from backend
+  // Manual status refresh: forces immediate fetch from backend for current user
   const handleRefreshStatus = async () => {
+    if (!currentUser?.uid) return;
     setIsRefreshingStatus(true);
     try {
       const [resStatus, resNotifs] = await Promise.all([
-        fetch('/api/whatsapp/status').catch(() => null),
-        fetch('/api/whatsapp/notifications').catch(() => null),
-        fetchAntiDeleteStatus(),
+        fetch(`/api/whatsapp/status?userId=${encodeURIComponent(currentUser.uid)}`).catch(() => null),
+        fetch(`/api/whatsapp/notifications?userId=${encodeURIComponent(currentUser.uid)}`).catch(() => null),
+        fetchAntiDeleteStatus(currentUser.uid),
       ]);
 
       const data = await safeParseJson(resStatus);
@@ -243,46 +252,53 @@ export default function App() {
   };
 
   // Listen to Auth State and real-time Firestore license sync
+  // Zero property leakage: switching accounts completely resets state before fetching the new account's data
   useEffect(() => {
-    const unsubscribe = onAuthChange((user) => {
+    let currentDocUnsub: (() => void) | null = null;
+
+    const unsubscribeAuth = onAuthChange((user) => {
+      // Clean up previous user snapshot listener
+      if (currentDocUnsub) {
+        currentDocUnsub();
+        currentDocUnsub = null;
+      }
+
+      // Reset all user-specific state immediately so no properties leak across accounts
+      setPairingCode(null);
+      setPhoneNumber('');
+      setPairingError(null);
+      setStatus({
+        state: 'disconnected',
+        isConnected: false,
+        pairingStage: 'idle',
+      });
+      setNotifications([]);
+      setRemainingTimeDisplay('Checking...');
+      setUserLicenseData({
+        expiresAt: null,
+        isUnlimited: false,
+        plan: 'Trial',
+        key: null,
+      });
+
       setCurrentUser(user);
       setAuthLoading(false);
 
       if (user) {
-        // Reset pairing input on switching to another user account
-        setPairingCode(null);
-        setPhoneNumber('');
-        setPairingError(null);
-
-        const saved = localStorage.getItem(`solvatech_user_${user.uid}`);
-        if (saved) {
-          try {
-            const parsed = JSON.parse(saved);
-            setUserLicenseData({
-              expiresAt: parsed.licenseExpiresAt || null,
-              isUnlimited: !!parsed.isUnlimited,
-              plan: parsed.licensePlan || 'Active Plan',
-              key: parsed.licenseKey || null,
-            });
-          } catch (e) {
-            console.error('Failed to parse saved user license:', e);
-          }
-        }
+        // Query trial status from Firestore for this specific account
+        checkUserTrialStatus(user.uid, user.email).then((claimed) => {
+          setHasClaimedTrial(claimed);
+        });
 
         // Real-time Firestore sync
-        let unsubSnap: (() => void) | undefined;
         try {
-          unsubSnap = onSnapshot(
+          currentDocUnsub = onSnapshot(
             doc(db, 'users', user.uid),
             (snap) => {
               if (snap.exists()) {
                 const data = snap.data();
                 if (data.hasUsedTrial === false) {
                   setHasClaimedTrial(false);
-                  localStorage.removeItem(`solvatech_trial_${user.uid}`);
-                  if (user.email) {
-                    localStorage.removeItem(`solvatech_trial_${user.email.toLowerCase()}`);
-                  }
                 } else if (data.hasUsedTrial === true) {
                   setHasClaimedTrial(true);
                 }
@@ -308,18 +324,18 @@ export default function App() {
         }
       } else {
         // Clean account reset on logout
-        setPairingCode(null);
-        setPhoneNumber('');
-        setPairingError(null);
-        setUserLicenseData({
-          expiresAt: null,
-          isUnlimited: false,
-          plan: 'Trial',
-          key: null,
-        });
+        setHasClaimedTrial(false);
+        setAntiDeleteEnabled(true);
+        setRemainingTimeDisplay('No Key Active');
       }
     });
-    return () => unsubscribe();
+
+    return () => {
+      unsubscribeAuth();
+      if (currentDocUnsub) {
+        currentDocUnsub();
+      }
+    };
   }, []);
 
   // Real-time Countdown Timer (down to seconds & accurate stacking)
@@ -332,7 +348,6 @@ export default function App() {
       setRemainingTimeDisplay(info.formatted);
 
       // Automatic disconnect ONLY if a verified active license finishes (expiresAt is non-null and reached 0)
-      // STRICT FIX: Never disconnect on page load / refresh when userLicenseData.expiresAt is null or initializing!
       const hasRealExpiry = Boolean(userLicenseData.expiresAt);
       const isPastExpiry = hasRealExpiry && new Date(userLicenseData.expiresAt!).getTime() <= Date.now();
 
@@ -340,10 +355,15 @@ export default function App() {
         hasRealExpiry &&
         isPastExpiry &&
         !(isOwner || userLicenseData.isUnlimited) &&
-        status.isConnected
+        status.isConnected &&
+        currentUser?.uid
       ) {
         console.warn('Active license time elapsed. Disconnecting bot...');
-        fetch('/api/whatsapp/disconnect', { method: 'POST' }).catch(() => {});
+        fetch('/api/whatsapp/disconnect', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId: currentUser.uid }),
+        }).catch(() => {});
         setStatus((prev) => ({ ...prev, isConnected: false, state: 'disconnected' }));
         setToastNotification({
           id: 'lic_exp_' + Date.now(),
@@ -358,30 +378,38 @@ export default function App() {
     updateTime();
     const interval = setInterval(updateTime, 1000);
     return () => clearInterval(interval);
-  }, [userLicenseData, isOwner, status.isConnected]);
+  }, [userLicenseData, isOwner, status.isConnected, currentUser?.uid]);
 
-  // Sync active license state to server 24/7 heartbeat watchdog
+  // Sync active license state to server 24/7 heartbeat watchdog per user session
   useEffect(() => {
-    if (userLicenseData.expiresAt || isOwner || userLicenseData.isUnlimited) {
+    if (currentUser?.uid && (userLicenseData.expiresAt || isOwner || userLicenseData.isUnlimited)) {
       fetch('/api/whatsapp/sync-license', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          userId: currentUser.uid,
+          userEmail: currentUser.email,
           expiresAt: userLicenseData.expiresAt,
           isUnlimited: isOwner || userLicenseData.isUnlimited,
         }),
       }).catch(() => {});
     }
-  }, [userLicenseData.expiresAt, userLicenseData.isUnlimited, isOwner]);
+  }, [userLicenseData.expiresAt, userLicenseData.isUnlimited, isOwner, currentUser?.uid, currentUser?.email]);
 
-  // Polling backend status and real-time notifications
+  // Polling backend status and real-time notifications (isolated per user account)
   useEffect(() => {
-    fetchAntiDeleteStatus();
+    if (!currentUser?.uid) {
+      return;
+    }
+
+    const userId = currentUser.uid;
+    fetchAntiDeleteStatus(userId);
+
     const fetchData = async () => {
       try {
         const [resStatus, resNotifs] = await Promise.all([
-          fetch('/api/whatsapp/status').catch(() => null),
-          fetch('/api/whatsapp/notifications').catch(() => null),
+          fetch(`/api/whatsapp/status?userId=${encodeURIComponent(userId)}`).catch(() => null),
+          fetch(`/api/whatsapp/notifications?userId=${encodeURIComponent(userId)}`).catch(() => null),
         ]);
 
         const data = await safeParseJson(resStatus);
@@ -415,7 +443,7 @@ export default function App() {
     fetchData();
     const interval = setInterval(fetchData, 2500);
     return () => clearInterval(interval);
-  }, []);
+  }, [currentUser?.uid]);
 
   // Countdown timer for pairing code (120s)
   useEffect(() => {
@@ -431,8 +459,8 @@ export default function App() {
   // Tab visibility change: auto-refresh status when user switches back from WhatsApp
   useEffect(() => {
     const onVisibilityChange = () => {
-      if (document.visibilityState === 'visible') {
-        fetch('/api/whatsapp/status')
+      if (document.visibilityState === 'visible' && currentUser?.uid) {
+        fetch(`/api/whatsapp/status?userId=${encodeURIComponent(currentUser.uid)}`)
           .then((r) => safeParseJson(r))
           .then((data) => {
             if (data?.status) {
@@ -449,7 +477,7 @@ export default function App() {
     };
     document.addEventListener('visibilitychange', onVisibilityChange);
     return () => document.removeEventListener('visibilitychange', onVisibilityChange);
-  }, []);
+  }, [currentUser?.uid]);
 
   // Handle URL hash, query param, keyboard shortcut, and typing 'admin dashboard' (Owner only)
   useEffect(() => {
@@ -493,8 +521,13 @@ export default function App() {
 
   // Clear live notifications
   const handleClearNotifications = async () => {
+    if (!currentUser?.uid) return;
     try {
-      await fetch('/api/whatsapp/notifications', { method: 'DELETE' });
+      await fetch(`/api/whatsapp/notifications?userId=${encodeURIComponent(currentUser.uid)}`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: currentUser.uid }),
+      });
       setNotifications([]);
     } catch (e) {
       console.error('Failed to clear notifications:', e);
@@ -599,8 +632,11 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           phoneNumber: fullNumber,
+          userId: currentUser?.uid,
+          userEmail: currentUser?.email,
           isExpired: licenseCheck.isExpired,
           isUnlimited: isOwner || userLicenseData.isUnlimited,
+          licenseExpiresAt: userLicenseData.expiresAt,
           force: isForce,
         }),
       });
@@ -637,7 +673,11 @@ export default function App() {
     if (!confirm('Unlink this WhatsApp session?')) return;
     setLoading(true);
     try {
-      await fetch('/api/whatsapp/logout', { method: 'POST' });
+      await fetch('/api/whatsapp/logout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: currentUser?.uid }),
+      });
       setPairingCode(null);
       setStatus({ state: 'disconnected', isConnected: false, pairingStage: 'idle' });
     } catch (err) {
@@ -683,10 +723,6 @@ export default function App() {
   };
 
   // 30-Minute Free Test (Once in a Lifetime) state and check
-  const [hasClaimedTrial, setHasClaimedTrial] = useState(false);
-  const [claimingTrial, setClaimingTrial] = useState(false);
-  const [trialMessage, setTrialMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
-
   useEffect(() => {
     if (!currentUser) {
       setHasClaimedTrial(false);
@@ -1691,6 +1727,7 @@ export default function App() {
             <GroupAdminPanel
               isConnected={status.isConnected}
               targetPhone={status.user?.phone || status.targetPhone}
+              userId={currentUser?.uid}
               onShowToast={setToastNotification}
               onGoToPair={() => setActiveTab('pair')}
             />

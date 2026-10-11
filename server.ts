@@ -4,7 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
-import { whatsappManager } from './src/server/whatsapp.ts';
+import { sessionManager, whatsappManager } from './src/server/whatsapp.ts';
 import { commandHandler, SOLVATECH_MENU } from './src/server/commands.ts';
 
 dotenv.config();
@@ -18,6 +18,21 @@ async function startServer() {
   const isProd = process.env.NODE_ENV === 'production';
 
   app.use(express.json());
+
+  // Helper: Retrieve isolated per-user WhatsApp session based on request credentials
+  const getSessionForReq = (req: express.Request) => {
+    const userId =
+      (req.query.userId as string) ||
+      (req.body?.userId as string) ||
+      (req.headers['x-user-id'] as string) ||
+      '';
+    const userEmail =
+      (req.query.userEmail as string) ||
+      (req.body?.userEmail as string) ||
+      (req.headers['x-user-email'] as string) ||
+      '';
+    return sessionManager.getSession(userId, userEmail);
+  };
 
   // Serve solva.webp from root folder or public folder
   app.get('/solva.webp', (_req, res) => {
@@ -39,32 +54,54 @@ async function startServer() {
   app.post('/api/whatsapp/sync-license', (req, res) => {
     try {
       const { expiresAt, isUnlimited } = req.body;
-      whatsappManager.setSessionLicense(expiresAt || null, Boolean(isUnlimited));
+      const session = getSessionForReq(req);
+      session.setSessionLicense(expiresAt || null, Boolean(isUnlimited));
       res.json({ success: true, message: 'Session license synchronized with 24/7 heartbeat watchdog' });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
     }
   });
 
-  // WhatsApp Baileys API endpoints
-  app.get('/api/whatsapp/status', (_req, res) => {
+  // WhatsApp Baileys API endpoints (per-user session)
+  app.get('/api/whatsapp/status', (req, res) => {
+    const userId = (req.query.userId as string) || (req.headers['x-user-id'] as string) || '';
+    if (!userId) {
+      // Unauthenticated / clean slate: do NOT leak previous account's status
+      return res.json({
+        success: true,
+        botName: 'SOLVATECH',
+        firebaseProject: 'solvatechbot',
+        status: {
+          state: 'disconnected',
+          isConnected: false,
+          pairingStage: 'idle',
+        },
+      });
+    }
+    const session = getSessionForReq(req);
     res.json({
       success: true,
       botName: 'SOLVATECH',
       firebaseProject: 'solvatechbot',
-      status: whatsappManager.getStatus(),
+      status: session.getStatus(),
     });
   });
 
-  app.get('/api/whatsapp/notifications', (_req, res) => {
+  app.get('/api/whatsapp/notifications', (req, res) => {
+    const userId = (req.query.userId as string) || (req.headers['x-user-id'] as string) || '';
+    if (!userId) {
+      return res.json({ success: true, notifications: [] });
+    }
+    const session = getSessionForReq(req);
     res.json({
       success: true,
-      notifications: whatsappManager.getNotifications(),
+      notifications: session.getNotifications(),
     });
   });
 
-  app.delete('/api/whatsapp/notifications', (_req, res) => {
-    whatsappManager.clearNotifications();
+  app.delete('/api/whatsapp/notifications', (req, res) => {
+    const session = getSessionForReq(req);
+    session.clearNotifications();
     res.json({ success: true, message: 'Notifications cleared' });
   });
 
@@ -86,15 +123,15 @@ async function startServer() {
         });
       }
 
-      // Sync session license with 24/7 watchdog
-      whatsappManager.setSessionLicense(req.body.licenseExpiresAt || null, Boolean(isUnlimited));
+      const session = getSessionForReq(req);
+      session.setSessionLicense(req.body.licenseExpiresAt || null, Boolean(isUnlimited));
 
-      const pairingCode = await whatsappManager.requestPairingCode(phoneNumber, Boolean(force));
+      const pairingCode = await session.requestPairingCode(phoneNumber, Boolean(force));
       res.json({
         success: true,
         pairingCode,
-        targetPhone: whatsappManager.getStatus().targetPhone || req.body.phoneNumber,
-        status: whatsappManager.getStatus(),
+        targetPhone: session.getStatus().targetPhone || req.body.phoneNumber,
+        status: session.getStatus(),
       });
     } catch (err: any) {
       console.error('Pairing code error:', err);
@@ -115,7 +152,8 @@ async function startServer() {
         });
       }
 
-      await whatsappManager.sendMessage(to, message);
+      const session = getSessionForReq(req);
+      await session.sendMessage(to, message);
       res.json({ success: true, message: 'Message sent successfully' });
     } catch (err: any) {
       res.status(500).json({
@@ -125,13 +163,14 @@ async function startServer() {
     }
   });
 
-  app.post('/api/whatsapp/test-dm', async (_req, res) => {
+  app.post('/api/whatsapp/test-dm', async (req, res) => {
     try {
-      const status = whatsappManager.getStatus();
+      const session = getSessionForReq(req);
+      const status = session.getStatus();
       if (!status.isConnected) {
         return res.status(400).json({
           success: false,
-          error: 'WhatsApp is not currently connected. Please pair your WhatsApp account first.',
+          error: 'WhatsApp is not currently connected for this account. Please pair your WhatsApp account first.',
         });
       }
       const rawPhone = status.user?.phone || status.targetPhone || '';
@@ -142,7 +181,7 @@ async function startServer() {
           error: 'Could not determine connected WhatsApp number.',
         });
       }
-      await whatsappManager.sendMessage(
+      await session.sendMessage(
         cleanPhone,
         `🔔 *[SOLVATECH NOTIFICATION TEST]* 🔔\n\n✅ Your WhatsApp connection and notification engine are LIVE and healthy!\n⏰ Time: *${new Date().toLocaleTimeString()}*\n\n🛡️ *Status:* Connected & Listening\n📱 *Number:* +${cleanPhone}\n\n💬 All Anti-Delete DM recovery, View-Once decryption, and 35+ commands are actively functioning on your account.\n\n> ⚡ _SOLVATECH Multi-Device Engine_`
       );
@@ -159,10 +198,11 @@ async function startServer() {
     }
   });
 
-  // Groups Management & Security Settings (Auto-Welcome & Auto-Goodbye UI Switches)
+  // Groups Management & Security Settings (Auto-Welcome & Auto-Goodbye UI Switches per user session)
   app.get('/api/groups', async (req, res) => {
     try {
-      const status = whatsappManager.getStatus();
+      const session = getSessionForReq(req);
+      const status = session.getStatus();
       if (!status.isConnected) {
         return res.json({
           success: true,
@@ -172,7 +212,7 @@ async function startServer() {
         });
       }
       const adminOnly = req.query.adminOnly === 'true' || req.query.adminOnly === '1';
-      const groups = await whatsappManager.getGroupsWithSettings(adminOnly);
+      const groups = await session.getGroupsWithSettings(adminOnly);
       res.json({ success: true, connected: true, groups });
     } catch (err: any) {
       console.error('Error fetching groups:', err);
@@ -182,7 +222,8 @@ async function startServer() {
 
   app.post('/api/groups/sync', async (req, res) => {
     try {
-      const status = whatsappManager.getStatus();
+      const session = getSessionForReq(req);
+      const status = session.getStatus();
       if (!status.isConnected) {
         return res.json({
           success: true,
@@ -192,8 +233,7 @@ async function startServer() {
         });
       }
       // STRICT USER REQUIREMENT: Only fetch groups where the account is an admin
-      // Remove all non-admin groups so regular members cannot view or modify protection
-      const groups = await whatsappManager.getGroupsWithSettings(true);
+      const groups = await session.getGroupsWithSettings(true);
       res.json({ success: true, connected: true, groups });
     } catch (err: any) {
       console.error('Error syncing groups:', err);
@@ -203,8 +243,9 @@ async function startServer() {
 
   app.get('/api/groups/:gid/picture', async (req, res) => {
     try {
+      const session = getSessionForReq(req);
       const { gid } = req.params;
-      const pictureUrl = await whatsappManager.getGroupPictureUrl(gid);
+      const pictureUrl = await session.getGroupPictureUrl(gid);
       if (pictureUrl) {
         return res.json({ success: true, pictureUrl });
       }
@@ -216,6 +257,7 @@ async function startServer() {
 
   app.post('/api/groups/settings', async (req, res) => {
     try {
+      const session = getSessionForReq(req);
       const { groupId, key, value } = req.body;
       if (!groupId || !key || typeof value !== 'boolean') {
         return res.status(400).json({
@@ -225,7 +267,7 @@ async function startServer() {
       }
 
       // Security Check: Only group admins can change group protection
-      const isGroupAdmin = await whatsappManager.isBotAdminInGroupById(groupId);
+      const isGroupAdmin = await session.isBotAdminInGroupById(groupId);
       if (!isGroupAdmin) {
         return res.status(403).json({
           success: false,
@@ -244,6 +286,7 @@ async function startServer() {
 
   app.post('/api/groups/toggle-all', async (req, res) => {
     try {
+      const session = getSessionForReq(req);
       const { groupId, enableAll } = req.body;
       if (!groupId || typeof enableAll !== 'boolean') {
         return res.status(400).json({
@@ -253,7 +296,7 @@ async function startServer() {
       }
 
       // Security Check: Only group admins can change group protection
-      const isGroupAdmin = await whatsappManager.isBotAdminInGroupById(groupId);
+      const isGroupAdmin = await session.isBotAdminInGroupById(groupId);
       if (!isGroupAdmin) {
         return res.status(403).json({
           success: false,
@@ -271,6 +314,7 @@ async function startServer() {
 
   app.post('/api/groups/warn-limit', async (req, res) => {
     try {
+      const session = getSessionForReq(req);
       const { groupId, limit } = req.body;
       if (!groupId || typeof limit !== 'number') {
         return res.status(400).json({
@@ -280,7 +324,7 @@ async function startServer() {
       }
 
       // Security Check: Only group admins can change group protection
-      const isGroupAdmin = await whatsappManager.isBotAdminInGroupById(groupId);
+      const isGroupAdmin = await session.isBotAdminInGroupById(groupId);
       if (!isGroupAdmin) {
         return res.status(403).json({
           success: false,
@@ -296,22 +340,12 @@ async function startServer() {
     }
   });
 
-  app.post('/api/groups/sync', async (_req, res) => {
-    try {
-      await commandHandler.loadAllSecuritySettingsFromFirebase();
-      const groups = await whatsappManager.getGroupsWithSettings(true);
-      res.json({ success: true, groups, message: 'Synchronized with WhatsApp and Firebase (Admin Groups Only)' });
-    } catch (err: any) {
-      console.error('Error syncing groups:', err);
-      res.status(500).json({ success: false, error: err.message });
-    }
-  });
-
-  // User Anti-Delete Recovery Setting
-  app.get('/api/user/anti-delete', (_req, res) => {
+  // User Anti-Delete Recovery Setting (isolated per user session)
+  app.get('/api/user/anti-delete', (req, res) => {
+    const session = getSessionForReq(req);
     res.json({
       success: true,
-      enabled: commandHandler.getAntiDeleteEnabled(),
+      enabled: session.getAntiDeleteEnabled(),
     });
   });
 
@@ -321,10 +355,11 @@ async function startServer() {
       if (typeof enabled !== 'boolean') {
         return res.status(400).json({ success: false, error: 'Boolean "enabled" field required' });
       }
-      commandHandler.setAntiDeleteEnabled(enabled);
+      const session = getSessionForReq(req);
+      session.setAntiDeleteEnabled(enabled);
       res.json({
         success: true,
-        enabled: commandHandler.getAntiDeleteEnabled(),
+        enabled: session.getAntiDeleteEnabled(),
         message: enabled
           ? 'Anti-delete recovery is ON. Deleted messages will be forwarded to your personal WhatsApp DM.'
           : 'Anti-delete recovery is OFF. Deleted messages will be ignored.',
@@ -475,7 +510,8 @@ async function startServer() {
       const command = parts[0]?.toLowerCase();
       const args = parts.slice(1);
 
-      const status = whatsappManager.getStatus();
+      const session = getSessionForReq(req);
+      const status = session.getStatus();
       const isSimulatedGroup =
         req.body.isGroup ??
         (req.body.groupJid ||
@@ -485,19 +521,19 @@ async function startServer() {
         command,
         args,
         fullText: cleanText,
-        senderJid: '2349049979183@s.whatsapp.net',
+        senderJid: status.user?.phone ? `${status.user.phone.replace(/\D/g, '')}@s.whatsapp.net` : '2349049979183@s.whatsapp.net',
         senderNumber: status.user?.phone?.replace(/\D/g, '') || '2349049979183',
         isGroup: Boolean(isSimulatedGroup),
         groupJid,
-        pushName: 'Solvatech Tester',
+        pushName: status.user?.name || 'Solvatech User',
         isOwner: isOwner ?? true,
-        linkedSince: whatsappManager.getConnectedAt(),
+        linkedSince: session.getConnectedAt(),
         linkedPhone: status.user?.phone || null,
         licenseExpiresAt: req.body.licenseExpiresAt || null,
         licensePlan: req.body.licensePlan || null,
         quotedParticipant: req.body.quotedParticipant || undefined,
         mentionedJids: req.body.mentionedJids || [],
-        getTopChatted: (phone: string) => whatsappManager.getTopChatted(phone),
+        getTopChatted: (phone: string) => session.getTopChatted(phone),
       });
 
       res.json({ success: true, result });
@@ -506,10 +542,11 @@ async function startServer() {
     }
   });
 
-  app.post('/api/whatsapp/logout', async (_req, res) => {
+  app.post('/api/whatsapp/logout', async (req, res) => {
     try {
-      await whatsappManager.logout();
-      res.json({ success: true, message: 'Session logged out and cleared' });
+      const userId = (req.body?.userId as string) || (req.query?.userId as string) || (req.headers['x-user-id'] as string) || '';
+      await sessionManager.logoutSession(userId);
+      res.json({ success: true, message: 'Session logged out and cleared for this user account' });
     } catch (err: any) {
       res.status(500).json({
         success: false,
@@ -518,10 +555,11 @@ async function startServer() {
     }
   });
 
-  app.post('/api/whatsapp/disconnect', async (_req, res) => {
+  app.post('/api/whatsapp/disconnect', async (req, res) => {
     try {
-      await whatsappManager.logout();
-      res.json({ success: true, message: 'Bot disconnected successfully due to expired license or user request' });
+      const userId = (req.body?.userId as string) || (req.query?.userId as string) || (req.headers['x-user-id'] as string) || '';
+      await sessionManager.logoutSession(userId);
+      res.json({ success: true, message: 'Bot disconnected successfully for this user account' });
     } catch (err: any) {
       res.status(500).json({
         success: false,

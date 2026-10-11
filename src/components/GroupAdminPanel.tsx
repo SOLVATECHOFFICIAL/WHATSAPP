@@ -50,6 +50,7 @@ export interface GroupItem {
 interface GroupAdminPanelProps {
   isConnected: boolean;
   targetPhone?: string;
+  userId?: string;
   onShowToast?: (notification: WhatsAppNotification) => void;
   onGoToPair?: () => void;
 }
@@ -57,7 +58,8 @@ interface GroupAdminPanelProps {
 // Subcomponent: Live Group Picture Avatar with WhatsApp CDN fallback
 const GroupAvatar: React.FC<{
   group: GroupItem;
-}> = ({ group }) => {
+  userId?: string;
+}> = ({ group, userId }) => {
   const [imgError, setImgError] = useState(false);
   const [imgUrl, setImgUrl] = useState<string | null>(group.pictureUrl || null);
 
@@ -68,7 +70,8 @@ const GroupAvatar: React.FC<{
     } else {
       // Attempt on-demand picture retrieval from server
       let isMounted = true;
-      fetch(`/api/groups/${encodeURIComponent(group.id)}/picture`)
+      const q = userId ? `?userId=${encodeURIComponent(userId)}` : '';
+      fetch(`/api/groups/${encodeURIComponent(group.id)}/picture${q}`)
         .then((res) => (res.ok ? res.json() : null))
         .then((data) => {
           if (isMounted && data?.pictureUrl) {
@@ -81,7 +84,7 @@ const GroupAvatar: React.FC<{
         isMounted = false;
       };
     }
-  }, [group.id, group.pictureUrl]);
+  }, [group.id, group.pictureUrl, userId]);
 
   const initials = group.subject
     ? group.subject
@@ -123,6 +126,7 @@ const GroupAvatar: React.FC<{
 export const GroupAdminPanel: React.FC<GroupAdminPanelProps> = ({
   isConnected,
   targetPhone,
+  userId,
   onShowToast,
   onGoToPair,
 }) => {
@@ -149,9 +153,16 @@ export const GroupAdminPanel: React.FC<GroupAdminPanelProps> = ({
     }
 
     try {
-      const endpoint = isManualSync ? '/api/groups/sync' : '/api/groups?adminOnly=true';
+      const q = userId ? `&userId=${encodeURIComponent(userId)}` : '';
+      const endpoint = isManualSync
+        ? `/api/groups/sync?${userId ? `userId=${encodeURIComponent(userId)}` : ''}`
+        : `/api/groups?adminOnly=true${q}`;
       const method = isManualSync ? 'POST' : 'GET';
-      const res = await fetch(endpoint, { method }).catch(() => null);
+      const res = await fetch(endpoint, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        ...(isManualSync && userId ? { body: JSON.stringify({ userId }) } : {}),
+      }).catch(() => null);
 
       if (res && res.ok) {
         const data = await safeParseJson<{
@@ -232,7 +243,7 @@ export const GroupAdminPanel: React.FC<GroupAdminPanelProps> = ({
       const res = await fetch('/api/groups/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ groupId, key, value: nextVal }),
+        body: JSON.stringify({ groupId, key, value: nextVal, userId }),
       });
 
       if (res.ok) {
@@ -317,7 +328,7 @@ export const GroupAdminPanel: React.FC<GroupAdminPanelProps> = ({
       const res = await fetch('/api/groups/toggle-all', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ groupId, enableAll }),
+        body: JSON.stringify({ groupId, enableAll, userId }),
       });
 
       if (res.ok) {
@@ -356,7 +367,7 @@ export const GroupAdminPanel: React.FC<GroupAdminPanelProps> = ({
       await fetch('/api/groups/warn-limit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ groupId, limit }),
+        body: JSON.stringify({ groupId, limit, userId }),
       });
       onShowToast?.({
         id: 'warn_limit_' + Date.now(),
@@ -614,7 +625,7 @@ export const GroupAdminPanel: React.FC<GroupAdminPanelProps> = ({
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-800/80">
                   <div className="flex items-start gap-4">
                     {/* Real Group Picture Avatar */}
-                    <GroupAvatar group={group} />
+                    <GroupAvatar group={group} userId={userId} />
 
                     <div className="space-y-1">
                       <div className="flex items-center gap-2 flex-wrap">

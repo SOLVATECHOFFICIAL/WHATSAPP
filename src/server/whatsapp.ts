@@ -20,7 +20,7 @@ import webpmux from 'node-webpmux';
 import { createWorker } from 'tesseract.js';
 import { commandHandler, parseSpamArgs, GROUP_ONLY_COMMANDS } from './commands.ts';
 import { db } from '../services/firebase.ts';
-import { doc, getDoc, setDoc, deleteDoc } from 'firebase/firestore';
+import { doc, getDoc, setDoc, deleteDoc, collection, getDocs } from 'firebase/firestore';
 
 // Helper: Iteratively unwrap ephemeral, viewOnce, and document wrappers
 export function unwrapMessage(msgObj: any): any {
@@ -265,9 +265,13 @@ export function buildGoodbyeMessage(
   return `👋 ${tagsStr} *left* *${groupSubject}*\n\n_We wish you the very best. Welcome back anytime!_ ✨`;
 }
 
-class WhatsAppManager {
+export class WhatsAppManager {
+  public readonly userId: string;
+  public readonly userEmail: string;
+  public readonly sanitizedUserId: string;
   private sock: WASocket | null = null;
-  private authDir = path.resolve(process.cwd(), '.baileys_auth');
+  private authDir: string;
+  private antiDeleteEnabled = true;
   private notifications: WhatsAppNotification[] = [];
   private messageCache = new Map<string, {
     key: proto.IMessageKey;
@@ -349,12 +353,19 @@ class WhatsAppManager {
   private greetingDedupCache = new Map<string, number>();
   private pendingGreetings = new Map<string, { timer: NodeJS.Timeout; participants: Set<string>; action: 'add' | 'remove'; groupId: string }>();
 
-  constructor() {
+  constructor(userId: string = 'default', userEmail: string = '') {
+    this.userId = userId || 'default';
+    this.userEmail = userEmail || '';
+    this.sanitizedUserId = (userId || 'default').replace(/[^a-zA-Z0-9_-]/g, '_');
+    this.authDir = path.resolve(process.cwd(), '.baileys_auth', `session_${this.sanitizedUserId}`);
+    this.ensureAuthDir();
+
     this.addNotification({
       type: 'system',
       title: 'SOLVATECH Engine Initialized',
-      body: 'Baileys WhatsApp multi-device service is ready with command engine and Firebase sync.',
+      body: `Baileys WhatsApp service initialized for user account ${this.userEmail || this.userId}.`,
     });
+
     // If valid registered session credentials exist in auth dir, restore connection smoothly
     const credsFile = path.join(this.authDir, 'creds.json');
     if (fs.existsSync(credsFile)) {
@@ -362,19 +373,47 @@ class WhatsAppManager {
         const raw = fs.readFileSync(credsFile, 'utf-8');
         const parsed = JSON.parse(raw);
         if (parsed.registered) {
-          console.log('[Baileys Startup] Found registered session, reconnecting automatically...');
-          this.initSocket().catch((err) => console.warn('Auto-reconnect on startup note:', err));
+          console.log(`[Baileys Startup] Found registered session for ${this.userId}, reconnecting...`);
+          this.initSocket().catch((err) => console.warn(`Auto-reconnect note for ${this.userId}:`, err));
         }
       } catch (e) {
-        console.warn('Error reading existing creds.json:', e);
+        console.warn(`Error reading existing creds.json for ${this.userId}:`, e);
       }
     }
 
     // Restore persistent session license from disk
     this.loadSessionLicense();
+    this.loadAntiDeleteSetting();
 
     // Start 24/7 active heartbeat watchdog so bot stays alive continuously
     this.start247Heartbeat();
+  }
+
+  public getAntiDeleteEnabled(): boolean {
+    return this.antiDeleteEnabled;
+  }
+
+  public setAntiDeleteEnabled(val: boolean) {
+    this.antiDeleteEnabled = val;
+    try {
+      if (this.userId && this.userId !== 'default') {
+        setDoc(doc(db, 'user_settings', this.userId), { antiDelete: val, updatedAt: new Date().toISOString() }, { merge: true }).catch(() => {});
+      }
+    } catch {}
+  }
+
+  private async loadAntiDeleteSetting() {
+    try {
+      if (this.userId && this.userId !== 'default') {
+        const snap = await getDoc(doc(db, 'user_settings', this.userId));
+        if (snap.exists()) {
+          const d = snap.data();
+          if (typeof d?.antiDelete === 'boolean') {
+            this.antiDeleteEnabled = d.antiDelete;
+          }
+        }
+      }
+    } catch {}
   }
 
   private saveSessionLicense() {
@@ -495,7 +534,7 @@ class WhatsAppManager {
   // Anti-Delete Recovery Handler: Recovers deleted text and media and delivers directly to personal WhatsApp DM
   private async handleMessageRevoke(revokedKey: proto.IMessageKey, revokerNum?: string) {
     if (!this.sock || !revokedKey?.id) return;
-    if (!commandHandler.getAntiDeleteEnabled()) return;
+    if (!this.antiDeleteEnabled) return;
 
     const msgId = revokedKey.id;
     const cached = this.messageCache.get(msgId);
@@ -702,8 +741,12 @@ class WhatsAppManager {
       this.ensureAuthDir();
       const credsPath = path.join(this.authDir, 'creds.json');
       if (!fs.existsSync(credsPath)) {
-        // First try full session backup
-        const fullSnap = await getDoc(doc(db, 'whatsapp_sessions', 'current_session'));
+        const sessionDocId = `session_${this.sanitizedUserId}`;
+        let fullSnap = await getDoc(doc(db, 'whatsapp_sessions', sessionDocId));
+        if (!fullSnap.exists() && this.sanitizedUserId === 'default') {
+          fullSnap = await getDoc(doc(db, 'whatsapp_sessions', 'current_session'));
+        }
+
         if (fullSnap.exists()) {
           const data = fullSnap.data();
           let sessionFiles: Record<string, string> | null = null;
@@ -721,23 +764,25 @@ class WhatsAppManager {
                 fs.writeFileSync(path.join(this.authDir, filename), content, 'utf-8');
               }
             }
-            console.log(`[WhatsApp Auth] Restored ${Object.keys(sessionFiles).length} session files from Firebase Firestore!`);
+            console.log(`[WhatsApp Auth (${this.userId})] Restored ${Object.keys(sessionFiles).length} session files from Firebase Firestore!`);
             return;
           }
         }
 
         // Fallback to legacy single creds document
-        const snap = await getDoc(doc(db, 'whatsapp_sessions', 'current_creds'));
-        if (snap.exists()) {
-          const credsData = snap.data();
-          if (credsData?.rawCreds) {
-            fs.writeFileSync(credsPath, credsData.rawCreds, 'utf-8');
-            console.log('[WhatsApp Auth] Restored authentication session from Firebase Firestore!');
+        if (this.sanitizedUserId === 'default') {
+          const snap = await getDoc(doc(db, 'whatsapp_sessions', 'current_creds'));
+          if (snap.exists()) {
+            const credsData = snap.data();
+            if (credsData?.rawCreds) {
+              fs.writeFileSync(credsPath, credsData.rawCreds, 'utf-8');
+              console.log('[WhatsApp Auth] Restored authentication session from Firebase Firestore!');
+            }
           }
         }
       }
     } catch (e) {
-      console.warn('[WhatsApp Auth] Firebase creds check note:', e);
+      console.warn(`[WhatsApp Auth (${this.userId})] Firebase creds check note:`, e);
     }
   }
 
@@ -756,17 +801,35 @@ class WhatsAppManager {
         }
       }
       if (hasCreds) {
+        const sessionDocId = `session_${this.sanitizedUserId}`;
         // Store session as stringified JSON to prevent Firestore dot-in-key errors
         await setDoc(
-          doc(db, 'whatsapp_sessions', 'current_session'),
-          { rawSessionData: JSON.stringify(sessionFiles), updatedAt: new Date().toISOString() },
+          doc(db, 'whatsapp_sessions', sessionDocId),
+          {
+            userId: this.userId,
+            userEmail: this.userEmail,
+            rawSessionData: JSON.stringify(sessionFiles),
+            updatedAt: new Date().toISOString()
+          },
           { merge: true }
         );
-        // Also keep legacy single doc updated
-        if (sessionFiles['creds.json']) {
+        if (this.sanitizedUserId === 'default') {
           await setDoc(
-            doc(db, 'whatsapp_sessions', 'current_creds'),
-            { rawCreds: sessionFiles['creds.json'], updatedAt: new Date().toISOString() },
+            doc(db, 'whatsapp_sessions', 'current_session'),
+            { rawSessionData: JSON.stringify(sessionFiles), updatedAt: new Date().toISOString() },
+            { merge: true }
+          );
+        }
+
+        // Also persist connected status to users collection
+        if (this.userId && this.userId !== 'default') {
+          await setDoc(
+            doc(db, 'users', this.userId),
+            {
+              linkedPhone: this.currentStatus.user?.phone || this.currentStatus.targetPhone || null,
+              botConnected: this.currentStatus.isConnected,
+              updatedAt: new Date().toISOString(),
+            },
             { merge: true }
           );
         }
@@ -778,8 +841,23 @@ class WhatsAppManager {
 
   private async clearCredsFromFirebase() {
     try {
-      await deleteDoc(doc(db, 'whatsapp_sessions', 'current_session'));
-      await deleteDoc(doc(db, 'whatsapp_sessions', 'current_creds'));
+      const sessionDocId = `session_${this.sanitizedUserId}`;
+      await deleteDoc(doc(db, 'whatsapp_sessions', sessionDocId));
+      if (this.sanitizedUserId === 'default') {
+        await deleteDoc(doc(db, 'whatsapp_sessions', 'current_session'));
+        await deleteDoc(doc(db, 'whatsapp_sessions', 'current_creds'));
+      }
+      if (this.userId && this.userId !== 'default') {
+        await setDoc(
+          doc(db, 'users', this.userId),
+          {
+            linkedPhone: null,
+            botConnected: false,
+            updatedAt: new Date().toISOString(),
+          },
+          { merge: true }
+        );
+      }
     } catch {}
   }
 
@@ -2777,7 +2855,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
 
     // Anti-Delete Recovery Handlers: listens for message revokes / deletions
     sock.ev.on('messages.update', async (updates) => {
-      if (!commandHandler.getAntiDeleteEnabled()) return;
+      if (!this.antiDeleteEnabled) return;
       for (const update of updates) {
         if (update.key?.id && (update.update?.message === null || (update.update as any)?.messageStubType === 1)) {
           await this.handleMessageRevoke(update.key);
@@ -2786,7 +2864,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
     });
 
     sock.ev.on('messages.delete', async (item: any) => {
-      if (!commandHandler.getAntiDeleteEnabled()) return;
+      if (!this.antiDeleteEnabled) return;
       const keys = item?.keys || (item?.key ? [item.key] : []);
       for (const k of keys) {
         if (k?.id) {
@@ -3549,4 +3627,106 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
   }
 }
 
-export const whatsappManager = new WhatsAppManager();
+export class WhatsAppSessionManager {
+  private sessions = new Map<string, WhatsAppManager>();
+  private baseAuthDir = path.resolve(process.cwd(), '.baileys_auth');
+
+  constructor() {
+    this.autoRestoreAllSessions();
+  }
+
+  public getSession(userId: string = 'default', userEmail: string = ''): WhatsAppManager {
+    const cleanId = (userId && typeof userId === 'string' && userId.trim()) ? userId.trim() : 'default';
+    let session = this.sessions.get(cleanId);
+    if (!session) {
+      session = new WhatsAppManager(cleanId, userEmail);
+      this.sessions.set(cleanId, session);
+    }
+    return session;
+  }
+
+  public async logoutSession(userId: string = 'default'): Promise<void> {
+    const cleanId = (userId && typeof userId === 'string' && userId.trim()) ? userId.trim() : 'default';
+    const session = this.sessions.get(cleanId);
+    if (session) {
+      await session.logout();
+      this.sessions.delete(cleanId);
+    }
+  }
+
+  public async autoRestoreAllSessions(): Promise<void> {
+    try {
+      if (!fs.existsSync(this.baseAuthDir)) {
+        fs.mkdirSync(this.baseAuthDir, { recursive: true });
+        return;
+      }
+
+      // 1. Scan local session folders
+      const items = fs.readdirSync(this.baseAuthDir, { withFileTypes: true });
+      for (const item of items) {
+        if (item.isDirectory() && item.name.startsWith('session_')) {
+          const rawId = item.name.replace(/^session_/, '');
+          const creds = path.join(this.baseAuthDir, item.name, 'creds.json');
+          if (fs.existsSync(creds)) {
+            try {
+              const parsed = JSON.parse(fs.readFileSync(creds, 'utf-8'));
+              if (parsed.registered) {
+                console.log(`[Multi-Session] Restoring registered WhatsApp session for user: ${rawId}`);
+                const session = this.getSession(rawId);
+                session.initSocket().catch((err) => console.warn(`Auto-reconnect note for ${rawId}:`, err));
+              }
+            } catch {}
+          }
+        }
+      }
+
+      // Check legacy root creds for backward compatibility
+      const legacyCreds = path.join(this.baseAuthDir, 'creds.json');
+      if (fs.existsSync(legacyCreds)) {
+        try {
+          const parsed = JSON.parse(fs.readFileSync(legacyCreds, 'utf-8'));
+          if (parsed.registered) {
+            console.log('[Multi-Session] Restoring default session from legacy creds...');
+            const session = this.getSession('default');
+            session.initSocket().catch((err) => console.warn('Legacy auto-reconnect note:', err));
+          }
+        } catch {}
+      }
+
+      // 2. Also check Firestore whatsapp_sessions collection for any sessions saved in cloud
+      try {
+        const snap = await getDocs(collection(db, 'whatsapp_sessions'));
+        for (const docSnap of snap.docs) {
+          if (docSnap.id.startsWith('session_')) {
+            const rawId = docSnap.id.replace(/^session_/, '');
+            if (!this.sessions.has(rawId)) {
+              console.log(`[Multi-Session] Found cloud WhatsApp session for user: ${rawId}, initializing...`);
+              const session = this.getSession(rawId);
+              session.initSocket().catch((err) => console.warn(`Cloud auto-reconnect note for ${rawId}:`, err));
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('Firestore session auto-discovery note:', err);
+      }
+    } catch (e) {
+      console.warn('Error in autoRestoreAllSessions:', e);
+    }
+  }
+
+  public getAllSessions(): Map<string, WhatsAppManager> {
+    return this.sessions;
+  }
+}
+
+export const sessionManager = new WhatsAppSessionManager();
+
+// Maintain backward compatibility proxy for default session
+export const whatsappManager = new Proxy({} as WhatsAppManager, {
+  get: (_target, prop) => {
+    const defaultSess = sessionManager.getSession('default');
+    const val = (defaultSess as any)[prop];
+    return typeof val === 'function' ? val.bind(defaultSess) : val;
+  },
+});
+

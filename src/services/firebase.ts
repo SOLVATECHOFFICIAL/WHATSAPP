@@ -109,8 +109,11 @@ export async function syncUserProfile(user: { uid: string; email: string | null;
         email: user.email,
         displayName: user.displayName || 'Solvatech User',
         photoURL: user.photoURL || null,
-        licenseKey: `SOLVA-${user.uid.slice(0, 6).toUpperCase()}-2026`,
-        licenseStatus: 'active',
+        licenseKey: null,
+        licensePlan: 'New User (No Key)',
+        licenseStatus: 'expired',
+        licenseExpiresAt: null,
+        hasUsedTrial: false,
         createdAt: serverTimestamp(),
         lastLogin: serverTimestamp(),
       });
@@ -170,7 +173,15 @@ export async function signOutUser(): Promise<void> {
   } catch (e) {
     console.error('Sign out error:', e);
   }
-  localStorage.removeItem('solvatech_custom_user');
+  try {
+    localStorage.removeItem('solvatech_custom_user');
+    for (const key of Object.keys(localStorage)) {
+      if (key.startsWith('solvatech_')) {
+        localStorage.removeItem(key);
+      }
+    }
+    sessionStorage.clear();
+  } catch {}
 }
 
 // Listen to Auth State

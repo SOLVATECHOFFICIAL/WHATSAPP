@@ -92,10 +92,6 @@ export async function createLicense(plan: LicensePlan, createdBy: string = OWNER
     console.warn('Firestore license write:', err);
   }
 
-  const existing = JSON.parse(localStorage.getItem('solvatech_licenses') || '[]');
-  existing.unshift(record);
-  localStorage.setItem('solvatech_licenses', JSON.stringify(existing));
-
   return record;
 }
 
@@ -128,13 +124,6 @@ export async function redeemKey(
     }
   } catch (e) {
     console.warn('Firestore license read warning:', e);
-  }
-
-  // 2. Check localStorage licenses
-  if (!matchedLicense) {
-    const local = JSON.parse(localStorage.getItem('solvatech_licenses') || '[]');
-    const localMatch = local.find((l: LicenseRecord) => l?.key?.toUpperCase() === cleanKey);
-    if (localMatch) matchedLicense = localMatch;
   }
 
   if (!matchedLicense) {
@@ -186,15 +175,8 @@ export async function redeemKey(
         }
       }
     }
-  } catch {
-    // Fallback to local
-    const localUser = JSON.parse(localStorage.getItem(`solvatech_user_${userUid}`) || '{}');
-    if (localUser.licenseExpiresAt) {
-      const parsed = new Date(localUser.licenseExpiresAt).getTime();
-      if (parsed > Date.now()) {
-        currentExpiryTime = parsed;
-      }
-    }
+  } catch (e) {
+    console.warn('Firestore user expiry read note:', e);
   }
 
   const now = Date.now();
@@ -266,19 +248,6 @@ export async function redeemKey(
     console.warn('Firestore write warning:', e);
   }
 
-  // Local storage sync
-  localStorage.setItem(
-    `solvatech_user_${userUid}`,
-    JSON.stringify({
-      email: userEmail,
-      licenseKey: cleanKey,
-      licensePlan: matchedLicense.planName,
-      licenseExpiresAt: newExpiresAt,
-      licenseStatus: 'active',
-      isUnlimited: false,
-    })
-  );
-
   const isStacked = currentRemainingMs > 0;
   const message = isStacked
     ? `🎉 ${matchedLicense.planName} Activated! Added +${addedDays} Days (+${addedDays * 24}h) stacked on top of your existing ${prevHours}h ${prevMins}m balance. New total: ${newDays > 0 ? `${newDays}d ` : ''}${remHours}h ${remMins}m left!`
@@ -340,41 +309,6 @@ export async function toggleUserUnlimited(
     console.warn('Firestore toggle unlimited:', err);
   }
 
-  // Update local storage
-  const localUser = JSON.parse(localStorage.getItem(`solvatech_user_${userUid}`) || '{}');
-  localStorage.setItem(
-    `solvatech_user_${userUid}`,
-    JSON.stringify({
-      ...localUser,
-      uid: userUid,
-      email,
-      isUnlimited: enableUnlimited,
-      licenseStatus: enableUnlimited ? 'unlimited' : 'expired',
-      licensePlan: enableUnlimited ? '👑 Unlimited Lifetime (Admin Granted)' : 'Expired Plan',
-      licenseExpiresAt: enableUnlimited ? null : new Date().toISOString(),
-    })
-  );
-
-  // Also update master admin users list
-  try {
-    const adminList = JSON.parse(localStorage.getItem('solvatech_admin_all_users') || '[]');
-    if (Array.isArray(adminList)) {
-      const idx = adminList.findIndex((u: any) => u.uid === userUid);
-      if (idx >= 0) {
-        adminList[idx] = {
-          ...adminList[idx],
-          isUnlimited: enableUnlimited,
-          licenseStatus: enableUnlimited ? 'unlimited' : 'expired',
-          licensePlan: enableUnlimited ? '👑 Unlimited Lifetime (Admin Granted)' : 'Expired Plan',
-          licenseExpiresAt: enableUnlimited ? null : new Date().toISOString(),
-        };
-      }
-      localStorage.setItem('solvatech_admin_all_users', JSON.stringify(adminList));
-    }
-  } catch (e) {
-    // ignore
-  }
-
   return enableUnlimited;
 }
 
@@ -416,12 +350,8 @@ export async function grantUserExtraDays(
         currentExpiryTime = parsed;
       }
     }
-  } catch {
-    const local = JSON.parse(localStorage.getItem(`solvatech_user_${userUid}`) || '{}');
-    if (local?.licenseExpiresAt) {
-      const parsed = new Date(local.licenseExpiresAt).getTime();
-      if (parsed > Date.now()) currentExpiryTime = parsed;
-    }
+  } catch (err) {
+    console.warn('Firestore read extra days note:', err);
   }
 
   const now = Date.now();
@@ -447,21 +377,6 @@ export async function grantUserExtraDays(
   } catch (e) {
     console.error('Error granting extra days in Firestore:', e);
   }
-
-  // Update local storage
-  const localUser = JSON.parse(localStorage.getItem(`solvatech_user_${userUid}`) || '{}');
-  localStorage.setItem(
-    `solvatech_user_${userUid}`,
-    JSON.stringify({
-      ...localUser,
-      uid: userUid,
-      email: userEmail,
-      licenseExpiresAt: newExpiresAt,
-      licensePlan: `Admin Granted (+${days} Days)`,
-      licenseStatus: 'active',
-      isUnlimited: false,
-    })
-  );
 
   return {
     success: true,
@@ -503,18 +418,6 @@ export async function revokeUserAccess(
   } catch (e) {
     console.warn('Error revoking in Firestore:', e);
   }
-
-  const localUser = JSON.parse(localStorage.getItem(`solvatech_user_${userUid}`) || '{}');
-  localStorage.setItem(
-    `solvatech_user_${userUid}`,
-    JSON.stringify({
-      ...localUser,
-      licenseExpiresAt: nowIso,
-      licenseStatus: 'expired',
-      licensePlan: 'Revoked by Admin',
-      isUnlimited: false,
-    })
-  );
 
   return {
     success: true,
@@ -562,26 +465,10 @@ export async function fetchAllLicenses(): Promise<LicenseRecord[]> {
     console.warn('Firestore fetch licenses:', err);
   }
 
-  const local = JSON.parse(localStorage.getItem('solvatech_licenses') || '[]');
-  (Array.isArray(local) ? local : []).forEach((l: any) => {
-    const key = l?.key;
-    if (key && !map.has(key)) {
-      map.set(key, {
-        key,
-        planId: l?.planId || '1d',
-        planName: l?.planName || 'Local Plan',
-        durationDays: l?.durationDays || 1,
-        status: l?.status || 'unclaimed',
-        createdAt: l?.createdAt || new Date().toISOString(),
-        ...l,
-      });
-    }
-  });
-
   return Array.from(map.values());
 }
 
-// WIPE ALL UNUSED KEYS FROM FIREBASE & LOCAL STORAGE TO PREVENT UNAUTHORIZED REDEMPTION & CLEAR SPACE
+// WIPE ALL UNUSED KEYS FROM FIREBASE TO PREVENT UNAUTHORIZED REDEMPTION & CLEAR SPACE
 export async function wipeAllUnusedLicenses(): Promise<{ count: number; message: string }> {
   let wipedCount = 0;
 
@@ -607,26 +494,13 @@ export async function wipeAllUnusedLicenses(): Promise<{ count: number; message:
     console.warn('Firestore wipe unused keys warning:', e);
   }
 
-  // 2. Delete from local storage
-  try {
-    const local = JSON.parse(localStorage.getItem('solvatech_licenses') || '[]');
-    if (Array.isArray(local)) {
-      const remaining = local.filter((l: any) => l.status !== 'unclaimed' || Boolean(l.claimedBy));
-      const localPurged = local.length - remaining.length;
-      if (wipedCount === 0) wipedCount = localPurged;
-      localStorage.setItem('solvatech_licenses', JSON.stringify(remaining));
-    }
-  } catch (e) {
-    // ignore
-  }
-
   return {
     count: wipedCount,
-    message: `Wiped ${wipedCount} unused license keys from Firebase and local vault. Space cleared!`,
+    message: `Wiped ${wipedCount} unused license keys from Firebase Firestore. Space cleared!`,
   };
 }
 
-// WIPE ALL EXPIRED KEYS FROM FIREBASE & LOCAL STORAGE TO CLEAR SPACE
+// WIPE ALL EXPIRED KEYS FROM FIREBASE TO CLEAR SPACE
 export async function wipeAllExpiredLicenses(): Promise<{ count: number; message: string }> {
   let wipedCount = 0;
   const now = Date.now();
@@ -652,26 +526,9 @@ export async function wipeAllExpiredLicenses(): Promise<{ count: number; message
     console.warn('Firestore wipe expired keys warning:', e);
   }
 
-  // 2. Delete from local storage
-  try {
-    const local = JSON.parse(localStorage.getItem('solvatech_licenses') || '[]');
-    if (Array.isArray(local)) {
-      const remaining = local.filter((l: any) => {
-        const isStatusExpired = l.status === 'expired';
-        const isDateExpired = l.expiresAt && new Date(l.expiresAt).getTime() < now;
-        return !isStatusExpired && !isDateExpired;
-      });
-      const localPurged = local.length - remaining.length;
-      if (wipedCount === 0) wipedCount = localPurged;
-      localStorage.setItem('solvatech_licenses', JSON.stringify(remaining));
-    }
-  } catch (e) {
-    // ignore
-  }
-
   return {
     count: wipedCount,
-    message: `Wiped ${wipedCount} expired license keys from database. Space cleared!`,
+    message: `Wiped ${wipedCount} expired license keys from Firebase Firestore. Space cleared!`,
   };
 }
 
@@ -681,16 +538,6 @@ export async function deleteSingleLicense(key: string): Promise<{ success: boole
     await deleteDoc(doc(db, 'licenses', key));
   } catch (e) {
     console.warn('Firestore single license delete warning:', e);
-  }
-
-  try {
-    const local = JSON.parse(localStorage.getItem('solvatech_licenses') || '[]');
-    if (Array.isArray(local)) {
-      const filtered = local.filter((l: any) => l.key?.toUpperCase() !== key.toUpperCase());
-      localStorage.setItem('solvatech_licenses', JSON.stringify(filtered));
-    }
-  } catch {
-    // ignore
   }
 
   return {
@@ -731,26 +578,7 @@ export async function fetchAllUsers(): Promise<any[]> {
     console.warn('Firestore fetch users:', err);
   }
 
-  // 2. Fetch locally stored admin users
-  try {
-    const localSaved = JSON.parse(localStorage.getItem('solvatech_admin_all_users') || '[]');
-    if (Array.isArray(localSaved)) {
-      localSaved.forEach((u: any) => {
-        if (u && u.uid) {
-          // Merge with precedence to locally modified toggles
-          const existing = usersMap.get(u.uid);
-          usersMap.set(u.uid, {
-            ...existing,
-            ...u,
-          });
-        }
-      });
-    }
-  } catch (e) {
-    console.warn('Error reading local admin users:', e);
-  }
-
-  // 3. Ensure full spectrum of realistic user states (Online WhatsApp, License Active Offline, 30-Min Trial, Unlimited, Expired)
+  // 2. Ensure full spectrum of realistic user states (Online WhatsApp, License Active Offline, 30-Min Trial, Unlimited, Expired)
   const defaultSeeds: any[] = [
     {
       uid: 'owner_solomon',
@@ -889,12 +717,6 @@ export async function fetchAllUsers(): Promise<any[]> {
   });
 
   const resultList = Array.from(usersMap.values());
-  try {
-    localStorage.setItem('solvatech_admin_all_users', JSON.stringify(resultList));
-  } catch (e) {
-    // ignore
-  }
-
   return resultList;
 }
 
@@ -984,8 +806,6 @@ export async function checkUserTrialStatus(
       if (snap.exists()) {
         const d = snap.data();
         if (d?.claimedAt || d?.expiresAt || d?.userEmail) {
-          if (userUid) localStorage.setItem(`solvatech_trial_${userUid}`, 'true');
-          localStorage.setItem(`solvatech_trial_${cleanEmail}`, 'true');
           return true; // PERMANENT ONCE IN A LIFETIME LOCK
         }
       }
@@ -1002,8 +822,6 @@ export async function checkUserTrialStatus(
       if (snap.exists()) {
         const data = snap.data();
         if (data?.hasUsedTrial === true || data?.trialClaimedAt) {
-          localStorage.setItem(`solvatech_trial_${userUid}`, 'true');
-          if (cleanEmail) localStorage.setItem(`solvatech_trial_${cleanEmail}`, 'true');
           return true; // PERMANENT ONCE IN A LIFETIME LOCK
         }
       }
@@ -1021,22 +839,11 @@ export async function checkUserTrialStatus(
     if (res.ok) {
       const data = await res.json();
       if (data && data.success && data.hasUsedTrial === true) {
-        if (userUid) localStorage.setItem(`solvatech_trial_${userUid}`, 'true');
-        if (cleanEmail) localStorage.setItem(`solvatech_trial_${cleanEmail}`, 'true');
         return true;
       }
     }
   } catch (apiErr) {
     console.debug('Server trial status check note:', apiErr);
-  }
-
-  // 4. Fallback to local storage cache
-  const localUid = localStorage.getItem(`solvatech_trial_${userUid}`);
-  if (localUid === 'true') return true;
-
-  if (cleanEmail) {
-    const localEmail = localStorage.getItem(`solvatech_trial_${cleanEmail}`);
-    if (localEmail === 'true') return true;
   }
 
   return false;
@@ -1093,12 +900,8 @@ export async function claim30MinuteTrial(
         }
       }
     }
-  } catch {
-    const localUser = JSON.parse(localStorage.getItem(`solvatech_user_${userUid}`) || '{}');
-    if (localUser.licenseExpiresAt) {
-      const parsed = new Date(localUser.licenseExpiresAt).getTime();
-      if (parsed > Date.now()) currentExpiryTime = parsed;
-    }
+  } catch (err) {
+    console.warn('Firestore read current trial expiry note:', err);
   }
 
   const now = Date.now();
@@ -1160,23 +963,6 @@ export async function claim30MinuteTrial(
   } catch (err) {
     console.warn('Error saving 30-minute trial to Firestore:', err);
   }
-
-  // 3. Lock locally forever
-  localStorage.setItem(`solvatech_trial_${userUid}`, 'true');
-  localStorage.setItem(`solvatech_trial_${cleanEmail}`, 'true');
-
-  const cachedUser = JSON.parse(localStorage.getItem(`solvatech_user_${userUid}`) || '{}');
-  localStorage.setItem(
-    `solvatech_user_${userUid}`,
-    JSON.stringify({
-      ...cachedUser,
-      licenseExpiresAt: finalExpiresAt,
-      licensePlan: '⚡ 30-Minute Test (Active)',
-      hasUsedTrial: true,
-      trialClaimedAt: new Date().toISOString(),
-      lifetimeTrialLocked: true,
-    })
-  );
 
   return {
     success: true,
@@ -1257,24 +1043,6 @@ export async function terminateAllLicenses(): Promise<{ success: boolean; count:
   } catch (e) {
     console.warn('Licenses collection termination note:', e);
   }
-
-  // 3. Update locally stored admin users
-  try {
-    const localUsers = JSON.parse(localStorage.getItem('solvatech_admin_all_users') || '[]');
-    if (Array.isArray(localUsers)) {
-      const updated = localUsers.map((u: any) => {
-        if (u.email?.toLowerCase() === OWNER_EMAIL.toLowerCase()) return u;
-        return {
-          ...u,
-          licenseExpiresAt: nowIso,
-          licenseStatus: 'expired',
-          licensePlan: 'Terminated by Admin',
-          isUnlimited: false,
-        };
-      });
-      localStorage.setItem('solvatech_admin_all_users', JSON.stringify(updated));
-    }
-  } catch {}
 
   return {
     success: true,
