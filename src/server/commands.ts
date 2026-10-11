@@ -32,6 +32,32 @@ export interface CommandResult {
   metadata?: any;
 }
 
+export function parseSpamArgs(args: string[]): { text: string; count: number } {
+  if (!args || args.length === 0) {
+    return { text: 'SOLVATECH Active ⚡', count: 25 };
+  }
+
+  // Check if last argument is a positive number (e.g. .spam okay wassup 30)
+  const lastArg = args[args.length - 1];
+  const lastNum = parseInt(lastArg, 10);
+  if (!isNaN(lastNum) && lastNum > 0 && /^\d+$/.test(lastArg)) {
+    const textWords = args.slice(0, -1);
+    const text = textWords.join(' ').trim() || 'SOLVATECH Active ⚡';
+    return { text, count: Math.min(lastNum, 100) };
+  }
+
+  // Check if first argument is a positive number (e.g. .spam 30 okay wassup)
+  const firstArg = args[0];
+  const firstNum = parseInt(firstArg, 10);
+  if (!isNaN(firstNum) && firstNum > 0 && /^\d+$/.test(firstArg)) {
+    const textWords = args.slice(1);
+    const text = textWords.join(' ').trim() || 'SOLVATECH Active ⚡';
+    return { text, count: Math.min(firstNum, 100) };
+  }
+
+  return { text: args.join(' ').trim(), count: 25 };
+}
+
 export const SOLVATECH_MENU = `╭━━━〔 ⚡ *SOLVATECH BOT COMMAND DIRECTORY* 〕━━━╮
 
 ┃ 🔒 *Bot Access Mode:* _100% Private (Owner-Only)_
@@ -102,8 +128,8 @@ export const SOLVATECH_MENU = `╭━━━〔 ⚡ *SOLVATECH BOT COMMAND DIRECT
 
 ╭──〔 👑 *BATCH 8: CONTROLLER ONLY* 〕──╮
 │
-│ • *.spam <message>* — _Send controlled repeated broadcast_
-│ • *.stop* — _Terminate active repeated operation immediately_
+│ • *.spam [msg] [count]* — _Fast burst spam (e.g. .spam okay wassup 30)_
+│ • *.stop* — _Terminate active spam operation immediately_
 │
 ╰──────────────────────────────`;
 
@@ -169,6 +195,14 @@ class CommandHandler {
   public setAntiDeleteEnabled(val: boolean) {
     this.antiDeleteEnabled = val;
     this.syncToFirebase('bot_settings', 'anti_delete', { enabled: val });
+  }
+
+  public getSpamActive(): boolean {
+    return this.spamActive;
+  }
+
+  public setSpamActive(val: boolean) {
+    this.spamActive = val;
   }
 
   public getAllSecuritySettings(): Record<string, { antilink: boolean; antibot: boolean; antistatus: boolean; antispam: boolean; autowelcome: boolean; autogoodbye: boolean; warnLimit?: number }> {
@@ -1110,17 +1144,21 @@ _All anti violations share the same unified warning threshold._`,
       if (!ctx.isOwner) {
         return { reply: `⛔ *ACCESS DENIED:* Controller/Owner-only command.` };
       }
-      const msg = ctx.args.join(' ') || 'SOLVATECH Active';
+      const { text: msg, count } = parseSpamArgs(ctx.args);
       this.spamActive = true;
       return {
-        reply: `⚡ *CONTROLLED SPAM INITIATED*\nRepeating: "${msg}"\nType *.stop* to abort.`,
+        reply: `⚡ *[FAST SPAM INITIATED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n💬 *Message:* "${msg}"\n🔢 *Count:* *${count} messages*\n⏱️ *Speed:* Rapid burst mode\n🛑 *To Cancel:* Type *.stop* anytime\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n> ⚡ _SOLVATECH Fast Engine_`,
         action: 'spam',
+        metadata: { text: msg, count },
       };
     }
 
     if (cmd === 'stop') {
       this.spamActive = false;
-      return { reply: `🛑 *EMERGENCY STOP:* Repeated controller operation terminated.` };
+      return {
+        reply: `🛑 *[EMERGENCY STOP EXECUTED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nSpam operation stopped immediately!\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _Terminated by SOLVATECH_`,
+        action: 'stop_spam',
+      };
     }
 
     if (cmd === 'signature' || cmd === 'sign' || cmd === 'dev') {

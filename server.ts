@@ -454,8 +454,12 @@ async function startServer() {
       const cleanText = text.trim();
       const rawCmd = cleanText.startsWith('.') ? cleanText.slice(1) : cleanText;
       const parts = rawCmd.split(/\s+/);
-      const command = parts[0];
-      const args = parts.slice(1);
+      let command = parts[0]?.toLowerCase();
+      let args = parts.slice(1);
+      if (command === 'gc' && args[0]?.toLowerCase() === 'status') {
+        command = 'gcstatus';
+        args = args.slice(1);
+      }
 
       const status = whatsappManager.getStatus();
       const isSimulatedGroup =

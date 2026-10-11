@@ -7,6 +7,8 @@ import makeWASocket, {
   proto,
   downloadContentFromMessage,
   getUrlInfo,
+  jidNormalizedUser,
+  makeCacheableSignalKeyStore,
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import QRCode from 'qrcode';
@@ -16,7 +18,7 @@ import { execSync } from 'child_process';
 import sharp from 'sharp';
 import webpmux from 'node-webpmux';
 import { createWorker } from 'tesseract.js';
-import { commandHandler } from './commands.ts';
+import { commandHandler, parseSpamArgs } from './commands.ts';
 
 // Helper: Iteratively unwrap ephemeral, viewOnce, and document wrappers
 export function unwrapMessage(msgObj: any): any {
@@ -265,7 +267,23 @@ class WhatsAppManager {
   private sock: WASocket | null = null;
   private authDir = path.resolve(process.cwd(), '.baileys_auth');
   private notifications: WhatsAppNotification[] = [];
-  private messageCache = new Map<string, { key: proto.IMessageKey; sender: string; text: string; timestamp: number; isGroup: boolean; group?: string }>();
+  private messageCache = new Map<string, {
+    key: proto.IMessageKey;
+    sender: string;
+    senderJid?: string;
+    senderName?: string;
+    text: string;
+    timestamp: number;
+    isGroup: boolean;
+    group?: string;
+    groupName?: string;
+    mediaType?: 'image' | 'video' | 'audio' | 'sticker' | 'document';
+    mediaBuffer?: Buffer;
+    mimetype?: string;
+    fileName?: string;
+    _alreadyRecovered?: boolean;
+  }>();
+  private activeSpamSession: { remoteJid: string; abort: boolean } | null = null;
   private statusCache = new Map<string, {
     id: string;
     senderJid: string;
@@ -314,6 +332,8 @@ class WhatsAppManager {
   private pairingCodeTimer: NodeJS.Timeout | null = null;
   private isConnecting = false;
   private connectedAt: number | null = null;
+  private initPromise: Promise<WASocket> | null = null;
+  private reconnectTimer: NodeJS.Timeout | null = null;
   private userInteractions = new Map<string, Map<string, { count: number; name?: string }>>();
   private contactNames = new Map<string, string>();
   private groupInviteCodes = new Map<string, string>();
@@ -328,6 +348,120 @@ class WhatsAppManager {
       title: 'SOLVATECH Engine Initialized',
       body: 'Baileys WhatsApp multi-device service is ready with command engine and Firebase sync.',
     });
+    // If valid registered session credentials exist in auth dir, restore connection smoothly
+    const credsFile = path.join(this.authDir, 'creds.json');
+    if (fs.existsSync(credsFile)) {
+      try {
+        const raw = fs.readFileSync(credsFile, 'utf-8');
+        const parsed = JSON.parse(raw);
+        if (parsed.registered) {
+          console.log('[Baileys Startup] Found registered session, reconnecting automatically...');
+          this.initSocket().catch((err) => console.warn('Auto-reconnect on startup note:', err));
+        }
+      } catch (e) {
+        console.warn('Error reading existing creds.json:', e);
+      }
+    }
+  }
+
+  // Anti-Delete Recovery Handler: Recovers deleted text and media and delivers directly to personal WhatsApp DM
+  private async handleMessageRevoke(revokedKey: proto.IMessageKey, revokerNum?: string) {
+    if (!this.sock || !revokedKey?.id) return;
+    if (!commandHandler.getAntiDeleteEnabled()) return;
+
+    const msgId = revokedKey.id;
+    const cached = this.messageCache.get(msgId);
+    if (!cached) {
+      console.log(`[Anti-Delete] Revoked message ${msgId} not found in local cache.`);
+      return;
+    }
+
+    if (cached._alreadyRecovered) return;
+    cached._alreadyRecovered = true;
+
+    // Identify target DM JID: the connected WhatsApp account (Message yourself)
+    const myRawJid = this.sock.user?.id || (this.sock as any).authState?.creds?.me?.id || this.currentStatus.user?.id || '';
+    const myNormalizedJid = myRawJid ? jidNormalizedUser(myRawJid) : '';
+    const ownerPhone = (this.currentStatus.user?.phone || this.currentStatus.targetPhone || '').replace(/\D/g, '');
+    const targetOwnerJid = myNormalizedJid || (ownerPhone ? `${ownerPhone}@s.whatsapp.net` : '');
+
+    if (!targetOwnerJid) {
+      console.warn('[Anti-Delete] Could not determine owner personal DM JID');
+      return;
+    }
+
+    const chatTitle = cached.isGroup
+      ? (cached.groupName || this.groupSubjectCache.get(cached.group || '') || 'Group Chat')
+      : 'Private 1-on-1 Chat';
+    const sentTimeStr = new Date(cached.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const deleteTimeStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+    let alertText = `🚨 *[SOLVATECH ANTI-DELETE RECOVERY]* 🚨\n`;
+    alertText += `━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+    alertText += `👤 *Sender:* ${cached.senderName ? `${cached.senderName} ` : ''}(+${cached.sender})\n`;
+    if (revokerNum && revokerNum !== cached.sender) {
+      alertText += `🗑️ *Deleted By:* +${revokerNum}\n`;
+    }
+    alertText += `📍 *Chat:* ${chatTitle}\n`;
+    alertText += `⏰ *Sent Time:* ${sentTimeStr}\n`;
+    alertText += `⏱️ *Deleted Time:* ${deleteTimeStr}\n`;
+    if (cached.mediaType) {
+      alertText += `📦 *Media Type:* ${cached.mediaType.toUpperCase()}\n`;
+    }
+    if (cached.text) {
+      alertText += `💬 *Deleted Message:*\n"${cached.text}"\n`;
+    }
+    alertText += `━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+    alertText += `> 🛡️ _Recovered to Personal DM by SOLVATECH_`;
+
+    this.addNotification({
+      type: 'system',
+      title: '🛡️ Deleted Message Recovered to DM!',
+      body: `From +${cached.sender} in ${chatTitle}: "${cached.text || cached.mediaType || 'Media'}"`,
+      sender: `+${cached.sender}`,
+    });
+
+    try {
+      if (cached.mediaBuffer && cached.mediaType) {
+        if (cached.mediaType === 'image') {
+          await this.sock.sendMessage(targetOwnerJid, {
+            image: cached.mediaBuffer,
+            caption: alertText,
+          });
+        } else if (cached.mediaType === 'video') {
+          await this.sock.sendMessage(targetOwnerJid, {
+            video: cached.mediaBuffer,
+            caption: alertText,
+          });
+        } else if (cached.mediaType === 'audio') {
+          await this.sock.sendMessage(targetOwnerJid, { text: alertText });
+          await this.sock.sendMessage(targetOwnerJid, {
+            audio: cached.mediaBuffer,
+            mimetype: cached.mimetype || 'audio/ogg; codecs=opus',
+            ptt: true,
+          });
+        } else if (cached.mediaType === 'sticker') {
+          await this.sock.sendMessage(targetOwnerJid, { text: alertText });
+          await this.sock.sendMessage(targetOwnerJid, {
+            sticker: cached.mediaBuffer,
+          });
+        } else if (cached.mediaType === 'document') {
+          await this.sock.sendMessage(targetOwnerJid, {
+            document: cached.mediaBuffer,
+            mimetype: cached.mimetype || 'application/octet-stream',
+            fileName: cached.fileName || 'recovered_file',
+            caption: alertText,
+          });
+        } else {
+          await this.sock.sendMessage(targetOwnerJid, { text: alertText });
+        }
+      } else {
+        await this.sock.sendMessage(targetOwnerJid, { text: alertText });
+      }
+      console.log(`[Anti-Delete] Successfully forwarded recovered message from +${cached.sender} to owner DM (${targetOwnerJid})`);
+    } catch (err) {
+      console.error('[Anti-Delete] Error sending recovered message to personal DM:', err);
+    }
   }
 
   public getStatus(): WhatsAppStatus {
@@ -413,123 +547,159 @@ class WhatsAppManager {
     if (this.sock && this.currentStatus.isConnected) {
       return this.sock;
     }
-
-    this.ensureAuthDir();
-    this.currentStatus.state = 'connecting';
-    this.isConnecting = true;
-
-    const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
-
-    let version: [number, number, number] = [2, 3000, 1015901307];
-    try {
-      const v = await fetchLatestBaileysVersion();
-      if (v?.version) version = v.version;
-    } catch {
-      // Fallback
+    if (this.initPromise) {
+      return this.initPromise;
     }
 
-    const sock = makeWASocket({
-      version,
-      auth: state,
-      logger: pino({ level: 'silent' }),
-      printQRInTerminal: false,
-      browser: Browsers.ubuntu('Chrome'),
-      connectTimeoutMs: 60000,
-      defaultQueryTimeoutMs: 60000,
-      keepAliveIntervalMs: 30000,
-      generateHighQualityLinkPreview: true,
-      getUrlInfo: (text: string) => getUrlInfo(text),
-      syncFullHistory: false,
-      markOnlineOnConnect: true,
-    } as any);
-
-    this.sock = sock;
-
-    sock.ev.on('creds.update', (creds) => {
-      saveCreds();
-      // Detect companion handshake received from WhatsApp
-      if (
-        (this.currentStatus.pairingStage === 'code_generated' || this.currentStatus.state === 'awaiting_pairing') &&
-        (creds.me?.id || creds.account || (creds as any).pairingCode === undefined || (creds as any).signalIdentities)
-      ) {
-        if (this.currentStatus.pairingStage !== 'pairing_handshake' && this.currentStatus.pairingStage !== 'connected') {
-          this.currentStatus.pairingStage = 'pairing_handshake';
-          this.currentStatus.state = 'pairing_handshake';
-          this.currentStatus.latestHandshakeTime = new Date().toLocaleTimeString();
-          this.addNotification({
-            type: 'pairing',
-            title: 'WhatsApp Handshake Confirmed',
-            body: 'Handshake received from WhatsApp phone! Companion link accepted.',
-          });
+    this.initPromise = (async () => {
+      try {
+        if (this.sock) {
+          try {
+            this.sock.end(undefined);
+          } catch {}
+          this.sock = null;
         }
-      }
-    });
 
-    sock.ev.on('connection.update', async (update) => {
-      const { connection, lastDisconnect, qr } = update;
+        this.ensureAuthDir();
+        this.currentStatus.state = 'connecting';
+        this.isConnecting = true;
 
-      // Detect WhatsApp handshake stage
-      if (
-        (update.isNewLogin || (update as any).isOnline || update.receivedPendingNotifications) &&
-        this.currentStatus.pairingStage !== 'connected'
-      ) {
-        if (this.currentStatus.pairingStage !== 'pairing_handshake') {
-          this.currentStatus.pairingStage = 'pairing_handshake';
-          this.currentStatus.state = 'pairing_handshake';
-          this.currentStatus.latestHandshakeTime = new Date().toLocaleTimeString();
-          this.addNotification({
-            type: 'pairing',
-            title: 'WhatsApp Handshake Confirmed',
-            body: 'Handshake received from WhatsApp phone! Companion link accepted.',
-          });
-        }
-      }
+        const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
 
-      if (qr) {
+        let version: [number, number, number] = [2, 3000, 1015901307];
         try {
-          const qrDataUrl = await QRCode.toDataURL(qr);
-          this.currentStatus.qrCodeUrl = qrDataUrl;
-          this.addNotification({
-            type: 'system',
-            title: 'New QR Code Ready',
-            body: 'QR code updated for WhatsApp web scanning.',
-          });
-        } catch (e) {
-          console.error('QR code generation error:', e);
-        }
-      }
-
-      if (connection === 'close') {
-        const statusCode = (lastDisconnect?.error as any)?.output?.statusCode;
-        const reason = (lastDisconnect?.error as any)?.data?.reason;
-        const shouldReconnect = statusCode !== DisconnectReason.loggedOut && statusCode !== 401 && reason !== '401';
-        
-        this.currentStatus.state = 'disconnected';
-        this.currentStatus.isConnected = false;
-        this.isConnecting = false;
-        if (!shouldReconnect) {
-          this.currentStatus.pairingStage = 'idle';
+          const v = await fetchLatestBaileysVersion();
+          if (v?.version) version = v.version;
+        } catch {
+          // Fallback
         }
 
-        this.addNotification({
-          type: 'connection',
-          title: 'WhatsApp Disconnected',
-          body: !shouldReconnect
-            ? 'The device was unlinked or logged out. Session reset for fresh pairing.'
-            : `Connection lost (${statusCode || 'network'}). Reconnecting automatically...`,
+        const pinoLogger = pino({ level: 'silent' });
+        const sock = makeWASocket({
+          version,
+          auth: {
+            creds: state.creds,
+            keys: makeCacheableSignalKeyStore(state.keys, pinoLogger),
+          },
+          logger: pinoLogger,
+          printQRInTerminal: false,
+          browser: Browsers.ubuntu('Chrome'),
+          connectTimeoutMs: 60000,
+          defaultQueryTimeoutMs: 60000,
+          keepAliveIntervalMs: 30000,
+          generateHighQualityLinkPreview: true,
+          getUrlInfo: (text: string) => getUrlInfo(text),
+          syncFullHistory: false,
+          markOnlineOnConnect: true,
+        } as any);
+
+        this.sock = sock;
+
+        sock.ev.on('creds.update', (creds) => {
+          saveCreds();
+          // Detect genuine WhatsApp companion confirmation when WhatsApp server approves registration
+          if (
+            (this.currentStatus.pairingStage === 'code_generated' || this.currentStatus.state === 'awaiting_pairing') &&
+            (creds.registered || Boolean(creds.account))
+          ) {
+            if (this.currentStatus.pairingStage !== 'pairing_handshake' && this.currentStatus.pairingStage !== 'connected') {
+              this.currentStatus.pairingStage = 'pairing_handshake';
+              this.currentStatus.state = 'pairing_handshake';
+              this.currentStatus.latestHandshakeTime = new Date().toLocaleTimeString();
+              this.addNotification({
+                type: 'pairing',
+                title: 'WhatsApp Handshake Confirmed',
+                body: 'Handshake received from WhatsApp phone! Companion link accepted.',
+              });
+            }
+          }
         });
 
-        if (!shouldReconnect) {
-          await this.logout();
-        } else {
-          // Automatic reconnect with backoff
-          setTimeout(() => {
-            this.initSocket().catch((err) => {
-              console.error('Auto-reconnect error:', err);
-            });
-          }, 3000);
-        }
-      } else if (connection === 'open') {
+        sock.ev.on('connection.update', async (update) => {
+          const { connection, lastDisconnect, qr } = update;
+
+          // Detect WhatsApp handshake stage
+          if (
+            (update.isNewLogin || (update as any).isOnline || update.receivedPendingNotifications) &&
+            this.currentStatus.pairingStage !== 'connected'
+          ) {
+            if (this.currentStatus.pairingStage !== 'pairing_handshake') {
+              this.currentStatus.pairingStage = 'pairing_handshake';
+              this.currentStatus.state = 'pairing_handshake';
+              this.currentStatus.latestHandshakeTime = new Date().toLocaleTimeString();
+              this.addNotification({
+                type: 'pairing',
+                title: 'WhatsApp Handshake Confirmed',
+                body: 'Handshake received from WhatsApp phone! Companion link accepted.',
+              });
+            }
+          }
+
+          if (qr) {
+            try {
+              const qrDataUrl = await QRCode.toDataURL(qr);
+              this.currentStatus.qrCodeUrl = qrDataUrl;
+              this.addNotification({
+                type: 'system',
+                title: 'New QR Code Ready',
+                body: 'QR code updated for WhatsApp web scanning.',
+              });
+            } catch (e) {
+              console.error('QR code generation error:', e);
+            }
+          }
+
+          if (connection === 'close') {
+            const statusCode = (lastDisconnect?.error as any)?.output?.statusCode;
+            const reason = (lastDisconnect?.error as any)?.data?.reason;
+            const isAwaitingPairing =
+              this.currentStatus.pairingStage === 'code_generated' ||
+              this.currentStatus.pairingStage === 'pairing_handshake' ||
+              this.currentStatus.state === 'awaiting_pairing';
+            const wasEverConnected = this.currentStatus.isConnected || this.connectedAt !== null;
+
+            this.currentStatus.isConnected = false;
+            this.isConnecting = false;
+            this.sock = null;
+
+            // Never wipe session credentials or clear pairing code while user is entering pairing code!
+            // Only trigger logout if the user was previously connected and WhatsApp explicitly logged them out.
+            const shouldLogout = !isAwaitingPairing && wasEverConnected && (statusCode === DisconnectReason.loggedOut || statusCode === 401 || reason === '401');
+
+            if (shouldLogout) {
+              this.currentStatus.state = 'disconnected';
+              this.currentStatus.pairingStage = 'idle';
+              this.currentStatus.pairingCode = undefined;
+              this.addNotification({
+                type: 'connection',
+                title: 'WhatsApp Disconnected',
+                body: 'The device was unlinked or logged out from your phone. Ready for fresh pairing.',
+              });
+              await this.logout();
+            } else {
+              // NEVER clear session, credentials, or pairing code during pairing or normal reconnects!
+              if (statusCode === 515 || statusCode === DisconnectReason.restartRequired) {
+                console.log('[Baileys Connection] Connection closed (code: 515 restartRequired). Device pairing accepted, restarting connection immediately...');
+                if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+                this.reconnectTimer = setTimeout(() => {
+                  this.initSocket().catch((err) => {
+                    console.warn('Auto-restart note:', err);
+                  });
+                }, 1500);
+              } else {
+                if (!isAwaitingPairing) {
+                  this.currentStatus.state = 'disconnected';
+                }
+                console.log(`[Baileys Connection] Connection closed (code: ${statusCode || 'unknown'}). Keeping session and pairing code intact, auto-reconnecting...`);
+                if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+                this.reconnectTimer = setTimeout(() => {
+                  this.initSocket().catch((err) => {
+                    console.warn('Auto-reconnect note:', err);
+                  });
+                }, 3000);
+              }
+            }
+          } else if (connection === 'open') {
         this.connectedAt = Date.now();
         this.currentStatus.state = 'connected';
         this.currentStatus.isConnected = true;
@@ -604,6 +774,18 @@ class WhatsAppManager {
           const rawMsg = msg.message;
           const unwrappedMsg = unwrapMessage(rawMsg);
 
+          // 1. Detect and process WhatsApp "Delete for Everyone" / Revoke events
+          if (unwrappedMsg?.protocolMessage) {
+            const protoMsg = unwrappedMsg.protocolMessage;
+            if (protoMsg.type === 0 || protoMsg.type === proto.Message.ProtocolMessage.Type.REVOKE) {
+              if (protoMsg.key) {
+                const revokerNum = (msg.key.participant || msg.key.remoteJid || '').split('@')[0].split(':')[0].replace(/\D/g, '');
+                await this.handleMessageRevoke(protoMsg.key, revokerNum);
+                continue;
+              }
+            }
+          }
+
           const text =
             unwrappedMsg?.conversation ||
             unwrappedMsg?.extendedTextMessage?.text ||
@@ -613,16 +795,34 @@ class WhatsAppManager {
             '';
 
           // Cache message for Anti-Delete recovery and .del commands
-          if (msg.key.id && text) {
-            this.messageCache.set(msg.key.id, {
+          if (msg.key.id) {
+            const media = extractMediaFromMessage(rawMsg);
+            const cachedEntry = {
               key: msg.key,
               sender: senderNum,
+              senderJid,
+              senderName: msg.pushName || undefined,
               text,
               timestamp: Date.now(),
               isGroup,
               group: isGroup ? remoteJid : undefined,
-            });
-            if (this.messageCache.size > 500) {
+              groupName: isGroup ? this.groupSubjectCache.get(remoteJid) : undefined,
+              mediaType: media?.type,
+              mimetype: media?.target?.mimetype,
+              fileName: media?.target?.fileName,
+            };
+
+            // Download media buffer asynchronously for instant DM recovery if deleted
+            if (media && (media.type === 'image' || media.type === 'video' || media.type === 'audio' || media.type === 'sticker' || media.type === 'document')) {
+              downloadMediaBuffer(media.target, media.type)
+                .then((buf) => {
+                  (cachedEntry as any).mediaBuffer = buf;
+                })
+                .catch(() => {});
+            }
+
+            this.messageCache.set(msg.key.id, cachedEntry);
+            if (this.messageCache.size > 1000) {
               const firstKey = this.messageCache.keys().next().value;
               if (firstKey) this.messageCache.delete(firstKey);
             }
@@ -978,8 +1178,14 @@ class WhatsAppManager {
           // Command handling: Prefix '.'
           if (text.startsWith('.')) {
             const parts = text.slice(1).trim().split(/\s+/);
-            const command = parts[0]?.toLowerCase();
-            const args = parts.slice(1);
+            let command = parts[0]?.toLowerCase();
+            let args = parts.slice(1);
+
+            // Support .gc status with space as equivalent to .gcstatus
+            if (command === 'gc' && args[0]?.toLowerCase() === 'status') {
+              command = 'gcstatus';
+              args = args.slice(1);
+            }
 
             // STRICT RULE: All commands are strictly for bot users only — ignore any other person
             if (!isOwner) {
@@ -1306,28 +1512,44 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                 }
               }
 
-              // Collect all participants across target groups for status@broadcast
-              const participantJidSet = new Set<string>();
-              for (const gid of targetGroups) {
-                participantJidSet.add(gid);
-                try {
-                  const meta = await sock.groupMetadata(gid);
-                  for (const p of meta.participants) {
-                    participantJidSet.add(p.id);
-                  }
-                } catch {}
-              }
-              const statusJidList = Array.from(participantJidSet);
+              // Audience list for WhatsApp Status (connected bot account so WhatsApp accepts status without device query timeout)
+              const myNormalizedJid = jidNormalizedUser(sock.user?.id || (sock as any).authState?.creds?.me?.id || '');
+              const statusJidList = myNormalizedJid ? [myNormalizedJid] : [];
 
               const fullCaption = captionText
-                ? `${captionText}\n\n> ⚡ *Group Status Broadcast* • _SOLVATECH BOT_`
-                : '> ⚡ *Group Status Broadcast* • _SOLVATECH BOT_';
+                ? `${captionText}\n\n> 📢 *Group Status Story (24h)* • _SOLVATECH BOT_`
+                : '> 📢 *Group Status Story (24h)* • _SOLVATECH BOT_';
 
               if (media && (media.type === 'image' || media.type === 'video' || media.type === 'audio')) {
                 try {
                   const buf = await downloadMediaBuffer(media.target, media.type);
 
-                  // 1. Post real media to target groups in parallel
+                  // 1. Post to WhatsApp 24h status (status@broadcast)
+                  try {
+                    if (media.type === 'video') {
+                      await sock.sendMessage(
+                        'status@broadcast',
+                        { video: buf, caption: fullCaption },
+                        { broadcast: true, statusJidList } as any
+                      );
+                    } else if (media.type === 'image') {
+                      await sock.sendMessage(
+                        'status@broadcast',
+                        { image: buf, caption: fullCaption },
+                        { broadcast: true, statusJidList } as any
+                      );
+                    } else {
+                      await sock.sendMessage(
+                        'status@broadcast',
+                        { audio: buf, mimetype: 'audio/mp4', ptt: true },
+                        { broadcast: true, statusJidList } as any
+                      );
+                    }
+                  } catch (statusErr) {
+                    console.error('[gcstatus] Status broadcast upload note:', statusErr);
+                  }
+
+                  // 2. Post real media to target group chats
                   await Promise.allSettled(
                     targetGroups.map((gid) => {
                       if (media.type === 'video') {
@@ -1340,49 +1562,62 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                     })
                   );
 
-                  // 2. Also post directly to 24h WhatsApp status (status@broadcast) with group audience
-                  if (media.type === 'video') {
-                    sock.sendMessage('status@broadcast', { video: buf, caption: fullCaption }, { statusJidList } as any).catch(() => {});
-                  } else if (media.type === 'image') {
-                    sock.sendMessage('status@broadcast', { image: buf, caption: fullCaption }, { statusJidList } as any).catch(() => {});
-                  }
-
                   reactDone();
                   await sock.sendMessage(remoteJid, {
                     text: isEveryone
-                      ? `📢 *[GROUP STATUS BROADCAST]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n✅ Media successfully posted to *all ${targetGroups.length} groups* and Group Status!\n${captionText ? `📝 *Caption:* "${captionText}"\n` : ''}━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _Broadcasted live via SOLVATECH_`
-                      : `📢 *[GROUP STATUS BROADCAST]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n✅ Media successfully posted to *Group Status* and group chat!\n${captionText ? `📝 *Caption:* "${captionText}"\n` : ''}━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _Posted live via SOLVATECH_`,
+                      ? `📢 *[GROUP STATUS STORY UPLOADED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n✅ 24h Story successfully uploaded to *all ${targetGroups.length} groups* and WhatsApp Status!\n${captionText ? `📝 *Caption:* "${captionText}"\n` : ''}━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _Broadcasted live via SOLVATECH_`
+                      : `📢 *[GROUP STATUS STORY UPLOADED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n✅ 24h Story successfully uploaded to this *Group Story* and WhatsApp Status!\n${captionText ? `📝 *Caption:* "${captionText}"\n` : ''}━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _Posted live via SOLVATECH_`,
                   }, { quoted: msg });
                   return;
                 } catch (e: any) {
                   console.error('Error broadcasting media in gcstatus:', e);
                   reactError();
                   await sock.sendMessage(remoteJid, {
-                    text: `⚠️ *[GCSTATUS ERROR]*\nFailed to broadcast media: ${e.message}`,
+                    text: `⚠️ *[GCSTATUS ERROR]*\nFailed to upload group story: ${e.message}`,
                   }, { quoted: msg });
                   return;
                 }
               }
 
-              // Text / link status post
+              // Text / announcement story post
               const broadcastBody = captionText || '📢 Group status announcement updated.';
-              const formattedBroadcast = `${broadcastBody}\n\n> ⚡ *Group Status Broadcast* • _SOLVATECH BOT_`;
+              const storyCard =
+                `╭━━━〔 📢 *GROUP 24-HOUR STORY UPDATE* 〕━━━╮\n` +
+                `┃\n` +
+                `┃ 📌 *Story:* "${broadcastBody}"\n` +
+                `┃ 🕒 *Duration:* 24 Hours\n` +
+                `┃ 👥 *Audience:* All Group Members\n` +
+                `┃\n` +
+                `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n` +
+                `> ⚡ _Posted via SOLVATECH Story Engine_`;
 
-              // Post real text/links to target groups in parallel with rich link preview
+              // Post text to 24h WhatsApp status (status@broadcast)
+              try {
+                await sock.sendMessage(
+                  'status@broadcast',
+                  {
+                    text: `${broadcastBody}\n\n> 📢 *Group Status Story (24h)* • _SOLVATECH_`,
+                    backgroundColor: '#1E3A8A',
+                    font: 2,
+                  } as any,
+                  { broadcast: true, statusJidList } as any
+                );
+              } catch (stErr) {
+                console.error('[gcstatus] Error posting text to status@broadcast:', stErr);
+              }
+
+              // Post real story card to target group chats
               await Promise.allSettled(
                 targetGroups.map((gid) => {
-                  return sock.sendMessage(gid, { text: formattedBroadcast });
+                  return sock.sendMessage(gid, { text: storyCard });
                 })
               );
-
-              // Also post text to 24h WhatsApp status (status@broadcast)
-              sock.sendMessage('status@broadcast', { text: formattedBroadcast }, { statusJidList } as any).catch(() => {});
 
               reactDone();
               await sock.sendMessage(remoteJid, {
                 text: isEveryone
-                  ? `📢 *[GROUP STATUS BROADCAST]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n✅ Announcement posted to *all ${targetGroups.length} groups* and Group Status!\n📝 *Content:* "${broadcastBody}"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _Broadcasted live via SOLVATECH_`
-                  : `📢 *[GROUP STATUS BROADCAST]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n✅ Announcement posted to *Group Status* and group chat!\n📝 *Content:* "${broadcastBody}"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _Posted live via SOLVATECH_`,
+                  ? `📢 *[GROUP STATUS STORY UPLOADED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n✅ Announcement posted to *all ${targetGroups.length} groups* and WhatsApp Status!\n📝 *Content:* "${broadcastBody}"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _Broadcasted live via SOLVATECH_`
+                  : `📢 *[GROUP STATUS STORY UPLOADED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n✅ Announcement posted to this *Group Story* and WhatsApp Status!\n📝 *Content:* "${broadcastBody}"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _Posted live via SOLVATECH_`,
               }, { quoted: msg });
               return;
             }
@@ -2373,6 +2608,120 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
               }
             }
 
+            // 9. .spam (Fast burst repeated broadcast: owner/controller only; supports .spam <msg> <count> or .spam <count> <msg>)
+            if (command === 'spam') {
+              if (!isOwner) {
+                reactError();
+                await sock.sendMessage(remoteJid, {
+                  text: `⛔ *[ACCESS DENIED]*\nThe *.spam* command is strictly restricted to the Bot Owner / Controller.`,
+                }, { quoted: msg });
+                return;
+              }
+
+              // 1. Automatically delete the .spam trigger command message so only the spam content remains
+              try {
+                await sock.sendMessage(remoteJid, { delete: msg.key });
+              } catch (delErr) {
+                console.warn('[Spam] Could not auto-delete trigger message:', delErr);
+              }
+
+              // Abort any previous running spam session
+              if (this.activeSpamSession) {
+                this.activeSpamSession.abort = true;
+              }
+
+              const { text: spamText, count: spamCount } = parseSpamArgs(args);
+              const currentSession = { remoteJid, abort: false };
+              this.activeSpamSession = currentSession;
+              commandHandler.setSpamActive(true);
+
+              // 2. High-speed burst spam loop: fires rapidly without stalling on network round-trip ACKs
+              (async () => {
+                let sentCount = 0;
+                for (let i = 1; i <= spamCount; i++) {
+                  if (currentSession.abort || !this.activeSpamSession || this.activeSpamSession !== currentSession) {
+                    break;
+                  }
+                  try {
+                    sock.sendMessage(remoteJid, { text: spamText }).catch((sendErr) => {
+                      console.warn(`[Spam] Message ${i} send note:`, sendErr);
+                    });
+                    sentCount++;
+                  } catch (sendErr) {
+                    console.warn(`[Spam] Dispatch error on message ${i}:`, sendErr);
+                  }
+
+                  // Rapid interval (35ms): lightning fast spamming without blocking socket thread
+                  if (i < spamCount) {
+                    await new Promise((resolve) => setTimeout(resolve, 35));
+                  }
+                }
+
+                // 3. Mark session complete or aborted
+                const wasAborted = currentSession.abort;
+                if (this.activeSpamSession === currentSession) {
+                  this.activeSpamSession = null;
+                  commandHandler.setSpamActive(false);
+                }
+
+                // 4. Show result for 5 seconds before automatically deleting it
+                try {
+                  const resultText = wasAborted
+                    ? `🛑 *[SPAM STOPPED]*\nAborted by user at *${sentCount}* message(s).\n_Self-destructing in 5s..._`
+                    : `⚡ *[SPAM COMPLETE]*\nFinished sending *${sentCount}/${spamCount}* message(s).\n_Self-destructing in 5s..._`;
+
+                  const confMsg = await sock.sendMessage(remoteJid, { text: resultText });
+                  if (confMsg?.key) {
+                    setTimeout(async () => {
+                      try {
+                        await sock.sendMessage(remoteJid, { delete: confMsg.key });
+                      } catch {}
+                    }, 5000);
+                  }
+                } catch (confErr) {
+                  console.error('[Spam] Result message error:', confErr);
+                }
+              })().catch((err) => {
+                console.error('[Spam] Background loop error:', err);
+              });
+              return;
+            }
+
+            // 10. .stop (Emergency stop running spam loop immediately)
+            if (command === 'stop') {
+              // 1. Automatically delete the .stop trigger message
+              try {
+                await sock.sendMessage(remoteJid, { delete: msg.key });
+              } catch {}
+
+              const wasRunning = (this.activeSpamSession && !this.activeSpamSession.abort) || commandHandler.getSpamActive();
+              if (this.activeSpamSession) {
+                this.activeSpamSession.abort = true;
+                this.activeSpamSession = null;
+              }
+              commandHandler.setSpamActive(false);
+
+              if (wasRunning) {
+                // The running spam loop's completion block will display the 5-second disappearing result
+                return;
+              }
+
+              // If no spam was active, show quick notice and delete in 5s
+              try {
+                const idleMsg = await sock.sendMessage(remoteJid, {
+                  text: `🛑 *[STOP]*\nNo active spam operation was running.\n_Self-destructing in 5s..._`,
+                });
+                if (idleMsg?.key) {
+                  setTimeout(async () => {
+                    try {
+                      await sock.sendMessage(remoteJid, { delete: idleMsg.key });
+                    } catch {}
+                  }, 5000);
+                }
+              } catch {}
+              return;
+            }
+
             const res = await commandHandler.handle({
               command,
               args,
@@ -2431,34 +2780,22 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
       }
     });
 
-    // Anti-Delete Recovery Handler
+    // Anti-Delete Recovery Handlers: listens for message revokes / deletions
     sock.ev.on('messages.update', async (updates) => {
-      // Check if anti-delete forwarding to DM is enabled by the user
-      if (!commandHandler.getAntiDeleteEnabled()) {
-        return; // When off: nothing is forwarded to private chat
-      }
-
+      if (!commandHandler.getAntiDeleteEnabled()) return;
       for (const update of updates) {
-        if (update.update?.message === null && update.key?.id) {
-          const cached = this.messageCache.get(update.key.id);
-          if (cached) {
-            const alertBody = `🚨 *[SOLVATECH ANTI-DELETE RECOVERY]*\n\n👤 Sender: +${cached.sender}\n📍 Location: ${cached.isGroup ? 'Group Chat' : 'Direct Message'}\n💬 Deleted Text: "${cached.text}"\n⏰ Time: ${new Date(cached.timestamp).toLocaleTimeString()}`;
+        if (update.key?.id && (update.update?.message === null || (update.update as any)?.messageStubType === 1)) {
+          await this.handleMessageRevoke(update.key);
+        }
+      }
+    });
 
-            this.addNotification({
-              type: 'system',
-              title: '🛡️ Deleted Message Recovered!',
-              body: `From +${cached.sender}: "${cached.text}"`,
-              sender: `+${cached.sender}`,
-            });
-
-            if (sock && this.currentStatus.user?.id) {
-              try {
-                await sock.sendMessage(this.currentStatus.user.id, { text: alertBody });
-              } catch (e) {
-                console.error('Error sending anti-delete alert to owner:', e);
-              }
-            }
-          }
+    sock.ev.on('messages.delete', async (item: any) => {
+      if (!commandHandler.getAntiDeleteEnabled()) return;
+      const keys = item?.keys || (item?.key ? [item.key] : []);
+      for (const k of keys) {
+        if (k?.id) {
+          await this.handleMessageRevoke(k);
         }
       }
     });
@@ -2691,7 +3028,13 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
       }
     });
 
-    return sock;
+        return sock;
+      } finally {
+        this.initPromise = null;
+      }
+    })();
+
+    return this.initPromise;
   }
 
   public async requestPairingCode(rawPhoneNumber: string): Promise<string> {
@@ -2700,138 +3043,106 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
       throw new Error('Please provide a valid phone number with country code (e.g., 2348012345678)');
     }
 
-    this.currentStatus.targetPhone = `+${cleanPhone}`;
-    this.currentStatus.state = 'awaiting_pairing';
-
     if (this.sock && this.currentStatus.isConnected) {
       return 'ALREADY_PAIRED';
     }
 
-    let lastError: any;
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        return await this.executePairingCodeRequest(cleanPhone);
-      } catch (err: any) {
-        lastError = err;
-        console.warn(`Pairing code attempt ${attempt} failed: ${err.message}`);
-        if (attempt < 2) {
-          // Teardown and pause before retry
-          try {
-            if (this.sock) {
-              this.sock.end(undefined);
-              this.sock = null;
-            }
-          } catch {
-            // Ignore
-          }
-          await new Promise((r) => setTimeout(r, 1500));
-        }
-      }
+    // If a valid pairing code already exists for THIS phone number, return it without clearing!
+    if (
+      this.currentStatus.pairingCode &&
+      this.currentStatus.targetPhone === `+${cleanPhone}` &&
+      (this.currentStatus.state === 'awaiting_pairing' || this.currentStatus.pairingStage === 'code_generated')
+    ) {
+      console.log(`[Baileys Pairing] Reusing active pairing code ${this.currentStatus.pairingCode} for +${cleanPhone}`);
+      return this.currentStatus.pairingCode;
     }
 
-    this.currentStatus.state = 'disconnected';
-    this.currentStatus.lastError = lastError?.message || 'Failed to request WhatsApp pairing code.';
-    this.addNotification({
-      type: 'error',
-      title: 'Pairing Attempt Failed',
-      body: lastError?.message || 'Failed to request WhatsApp pairing code.',
-    });
-    throw lastError;
+    this.currentStatus.targetPhone = `+${cleanPhone}`;
+    this.currentStatus.state = 'awaiting_pairing';
+    this.currentStatus.pairingStage = 'code_generated';
+
+    try {
+      return await this.executePairingCodeRequest(cleanPhone);
+    } catch (err: any) {
+      console.warn(`Pairing code error: ${err?.message || err}`);
+      if (!this.currentStatus.isConnected) {
+        this.currentStatus.state = 'disconnected';
+      }
+      this.currentStatus.lastError = err?.message || 'Failed to request WhatsApp pairing code.';
+      this.addNotification({
+        type: 'error',
+        title: 'Pairing Attempt Failed',
+        body: err?.message || 'Failed to request WhatsApp pairing code.',
+      });
+      throw err;
+    }
   }
 
   private async executePairingCodeRequest(cleanPhone: string): Promise<string> {
-    // Clean up any stale unlinked socket safely
+    // 1. Clean up old socket cleanly
     if (this.sock) {
       try {
         this.sock.end(undefined);
-      } catch {
-        // Ignore
-      }
+      } catch {}
       this.sock = null;
       await new Promise((r) => setTimeout(r, 500));
     }
 
-    // Always reset auth directory when pairing a new/unlinked session
+    // 2. Prepare clean auth directory for fresh pairing credentials
     if (!this.currentStatus.isConnected) {
       try {
         if (fs.existsSync(this.authDir)) {
           fs.rmSync(this.authDir, { recursive: true, force: true });
         }
+        this.ensureAuthDir();
       } catch (e) {
-        console.error('Error clearing stale auth dir:', e);
+        console.error('Error preparing fresh auth dir:', e);
       }
     }
 
-    // Re-initialize fresh socket
+    // 3. Initialize fresh socket
     const sock = await this.initSocket();
 
-    // Wait for socket to be ready to accept pairing code (QR or open signal or readiness)
-    const code = await new Promise<string>((resolve, reject) => {
-      let isDone = false;
+    // 4. Relax and wait for socket and WhatsApp server to be ready for pairing code!
+    console.log(`[Baileys Pairing] Waiting for WebSocket connection to establish for +${cleanPhone}...`);
 
-      const finish = (result: string) => {
-        if (!isDone) {
-          isDone = true;
-          clearTimeout(timeout);
-          resolve(result);
+    let pairingCodeResult: string | null = null;
+    let lastErr: any = null;
+
+    // Patiently attempt to request pairing code up to 10 times across ~40 seconds
+    // Never abort early, never clear session while waiting, relax until the real code arrives!
+    for (let attempt = 1; attempt <= 10; attempt++) {
+      // First wait gives the WS time to open; subsequent waits give WhatsApp time to respond
+      const waitTime = attempt === 1 ? 4000 : 3500;
+      await new Promise((r) => setTimeout(r, waitTime));
+
+      if (this.currentStatus.isConnected) {
+        return 'ALREADY_PAIRED';
+      }
+
+      try {
+        console.log(`[Baileys Pairing] Requesting pairing code from WhatsApp server (attempt ${attempt}/10)...`);
+        const raw = await sock.requestPairingCode(cleanPhone);
+        if (raw && typeof raw === 'string') {
+          pairingCodeResult = raw;
+          console.log(`[Baileys Pairing] Received genuine pairing code: ${raw}`);
+          break;
         }
-      };
-
-      const fail = (err: any) => {
-        if (!isDone) {
-          isDone = true;
-          clearTimeout(timeout);
-          reject(err);
+      } catch (err: any) {
+        lastErr = err;
+        const msg = err?.message || String(err);
+        console.log(`[Baileys Pairing] Attempt ${attempt} note: ${msg}`);
+        if (msg.includes('already') || this.currentStatus.isConnected) {
+          return 'ALREADY_PAIRED';
         }
-      };
+      }
+    }
 
-      const timeout = setTimeout(async () => {
-        if (!isDone) {
-          try {
-            const rawCode = await sock.requestPairingCode(cleanPhone);
-            finish(rawCode);
-          } catch {
-            fail(new Error('Timeout waiting for WhatsApp server handshake. Please try again.'));
-          }
-        }
-      }, 20000);
+    if (!pairingCodeResult) {
+      throw lastErr || new Error('Timed out waiting for WhatsApp pairing response. Please check your phone number and try again.');
+    }
 
-      const handleUpdate = async (update: any) => {
-        if (update.qr && !isDone) {
-          try {
-            const rawCode = await sock.requestPairingCode(cleanPhone);
-            finish(rawCode);
-          } catch (err) {
-            fail(err);
-          }
-        } else if (update.connection === 'open' && !isDone) {
-          finish('ALREADY_PAIRED');
-        } else if (update.connection === 'close' && !isDone) {
-          const reason = (update.lastDisconnect?.error as any)?.data?.reason;
-          if (reason !== 'restart') {
-            fail(update.lastDisconnect?.error || new Error('Connection closed by WhatsApp'));
-          }
-        }
-      };
-
-      sock.ev.on('connection.update', handleUpdate);
-
-      // Also trigger requestPairingCode after 2 seconds in case connection is open without QR
-      setTimeout(async () => {
-        if (!isDone) {
-          try {
-            const rawCode = await sock.requestPairingCode(cleanPhone);
-            finish(rawCode);
-          } catch {
-            // Socket still establishing connection, will be handled by handleUpdate or timeout
-          }
-        }
-      }, 2000);
-    });
-
-    const formattedCode = code === 'ALREADY_PAIRED'
-      ? code
-      : code?.match(/.{1,4}/g)?.join('-') || code;
+    const formattedCode = pairingCodeResult.match(/.{1,4}/g)?.join('-') || pairingCodeResult;
 
     this.currentStatus.pairingCode = formattedCode;
     this.currentStatus.pairingStage = 'code_generated';
@@ -2840,20 +3151,20 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
     this.addNotification({
       type: 'pairing',
       title: 'Pairing Code Generated',
-      body: `Pairing Code: ${formattedCode} generated for +${cleanPhone}. Link in WhatsApp > Linked Devices > Link with phone number.`,
+      body: `Pairing Code: ${formattedCode} generated for +${cleanPhone}. Enter this in WhatsApp > Linked Devices > Link with phone number.`,
     });
 
     if (this.pairingCodeTimer) clearTimeout(this.pairingCodeTimer);
     this.pairingCodeTimer = setTimeout(() => {
-      if (this.currentStatus.pairingCode === formattedCode) {
+      if (this.currentStatus.pairingCode === formattedCode && !this.currentStatus.isConnected) {
         this.currentStatus.pairingCode = undefined;
         this.addNotification({
           type: 'system',
           title: 'Pairing Code Expired',
-          body: 'The 2-minute pairing code expired. You can request a fresh code anytime.',
+          body: 'The 5-minute pairing code expired. You can request a fresh code anytime.',
         });
       }
-    }, 120000);
+    }, 300000); // 5 minutes relaxed duration
 
     return formattedCode;
   }

@@ -80,7 +80,7 @@ export const CommandDirectory: React.FC<CommandDirectoryProps> = ({ onRunCommand
       icon: Flame,
       color: 'text-rose-400',
       commands: [
-        { cmd: '.spam <message>', desc: 'Send controlled repeated broadcast (Owner only)' },
+        { cmd: '.spam [msg] [count]', desc: 'Fast burst spam e.g. .spam okay wassup 30 (Owner only)' },
         { cmd: '.stop', desc: 'Terminate active repeated operation immediately' },
       ],
     },
