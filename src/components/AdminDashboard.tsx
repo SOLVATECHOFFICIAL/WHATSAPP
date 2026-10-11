@@ -615,7 +615,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
     return users.map((u) => {
       const isOwnerAccount = u.email?.toLowerCase() === OWNER_EMAIL.toLowerCase();
       // awoyinfasolomon1@gmail.com is strictly and permanently unlimited
-      const isUnlimited = isOwnerAccount ? true : !!u.isUnlimited;
+      // Non-owners with an explicit licenseExpiresAt are strictly timed (NOT unlimited)
+      const hasFiniteExpiry = Boolean(u.licenseExpiresAt);
+      const isUnlimited = isOwnerAccount ? true : (!hasFiniteExpiry && !!u.isUnlimited);
       const remaining = calculateRemainingTime(u.licenseExpiresAt, isUnlimited);
 
       // Online check: active Baileys socket linked to WhatsApp AND strictly unexpired license!
@@ -623,9 +625,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
         !remaining.isExpired &&
         Boolean(
           u.whatsappConnected ||
-          (whatsappStatus.isConnected &&
-            (isOwnerAccount ||
-              (u.linkedPhone && whatsappStatus.user?.phone?.includes(u.linkedPhone))))
+          (isOwnerAccount && whatsappStatus.isConnected)
         );
 
       const isTrial =
@@ -1185,22 +1185,49 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
                               ) : user.isExpired ? (
                                 <div className="space-y-0.5">
                                   <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-rose-950/60 text-rose-300 text-[10px] border border-rose-500/40 font-semibold">
-                                    <span>🔴 License Elapsed (Bot Disconnected)</span>
+                                    <span>🔴 License Elapsed (Bot Paused)</span>
                                   </span>
-                                  <p className="text-[9px] text-rose-400/80 pl-1">Plan completed</p>
+                                  {user.linkedPhone ? (
+                                    <p className="text-[9px] text-amber-400/90 pl-1 font-mono">
+                                      Linked: +{user.linkedPhone} (Awaiting key renewal)
+                                    </p>
+                                  ) : (
+                                    <p className="text-[9px] text-rose-400/80 pl-1">Plan completed (Not linked)</p>
+                                  )}
                                 </div>
                               ) : user.isLicensedOffline ? (
                                 <div className="space-y-0.5">
-                                  <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-teal-950/60 text-teal-300 text-[10px] border border-teal-500/30">
-                                    <Key className="w-3 h-3 text-teal-400" />
-                                    <span>Active License (Offline WhatsApp)</span>
-                                  </span>
-                                  <p className="text-[9px] text-slate-500 pl-1">Not linked yet</p>
+                                  {user.linkedPhone || user.isPaired ? (
+                                    <>
+                                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-950/60 text-amber-300 text-[10px] border border-amber-500/30 font-medium">
+                                        <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                                        <span>LINKED (Reconnecting 24/7)</span>
+                                      </span>
+                                      <p className="text-[9px] text-amber-300/90 pl-1 font-mono">
+                                        +{user.linkedPhone || 'Companion Saved'}
+                                      </p>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-teal-950/60 text-teal-300 text-[10px] border border-teal-500/30">
+                                        <Key className="w-3 h-3 text-teal-400" />
+                                        <span>Active License (Ready to Pair)</span>
+                                      </span>
+                                      <p className="text-[9px] text-slate-500 pl-1">Not linked yet</p>
+                                    </>
+                                  )}
                                 </div>
                               ) : (
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-950 text-slate-500 text-[10px] border border-slate-800">
-                                  <span>⚪ Disconnected (No Key)</span>
-                                </span>
+                                <div className="space-y-0.5">
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-950 text-slate-500 text-[10px] border border-slate-800">
+                                    <span>⚪ Disconnected (No Key)</span>
+                                  </span>
+                                  {user.linkedPhone && (
+                                    <p className="text-[9px] text-slate-500 pl-1 font-mono">
+                                      +{user.linkedPhone}
+                                    </p>
+                                  )}
+                                </div>
                               )}
                             </td>
 

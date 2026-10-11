@@ -635,16 +635,22 @@ export async function fetchAllUsers(): Promise<any[]> {
     snap.forEach((d) => {
       const data = d.data() || {};
       const uid = d.id;
-      const isUnlimited = Boolean(data.isUnlimited || (data.email && data.email.toLowerCase() === OWNER_EMAIL.toLowerCase()));
+      const isOwner = Boolean(data.email && data.email.toLowerCase() === OWNER_EMAIL.toLowerCase());
       const rawExpiresAt = data.licenseExpiresAt || null;
       const expMs = rawExpiresAt ? new Date(rawExpiresAt).getTime() : 0;
-      const isDateExpired = !isUnlimited && (!rawExpiresAt || (expMs > 0 && expMs <= now));
+      // Strict countdown: if user has a finite expiration timestamp and is not owner, evaluate exact expiration
+      const isDateExpired = !isOwner && (
+        (rawExpiresAt && expMs > 0 && expMs <= now) ||
+        (!rawExpiresAt && !data.isUnlimited)
+      );
+      const isUnlimited = isOwner || (!rawExpiresAt && Boolean(data.isUnlimited));
       const isExpired = isDateExpired || data.licenseStatus === 'expired';
 
       const liveStatus = serverStatuses[uid] || {};
       // Strict rule: only show connected if live socket is actually connected AND license is not expired
       const isActuallyConnected = !isExpired && Boolean(liveStatus.isConnected);
-      const isPaired = Boolean(liveStatus.isPaired || liveStatus.phone || data.linkedPhone || data.phone);
+      const linkedPhone = liveStatus.phone || data.linkedPhone || data.phone || null;
+      const isPaired = Boolean(liveStatus.isPaired || linkedPhone);
 
       usersMap.set(uid, {
         uid,
@@ -657,7 +663,7 @@ export async function fetchAllUsers(): Promise<any[]> {
         licenseStatus: isUnlimited ? 'unlimited' : (isExpired ? 'expired' : 'active'),
         licenseKey: data.licenseKey || null,
         licenseExpiresAt: rawExpiresAt,
-        linkedPhone: liveStatus.phone || data.linkedPhone || data.phone || null,
+        linkedPhone,
         isPaired,
         whatsappConnected: isActuallyConnected,
         hasUsedTrial: Boolean(data.hasUsedTrial),

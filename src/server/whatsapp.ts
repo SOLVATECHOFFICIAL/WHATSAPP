@@ -472,7 +472,12 @@ export class WhatsAppManager {
         if (parsed.expiresAt) {
           this.sessionLicenseExpiresAt = parsed.expiresAt;
         }
-        if (typeof parsed.isUnlimited === 'boolean') {
+        // Strict rule: if user is not the owner and has an explicit expiresAt, they are timed (NOT unlimited)
+        if (this.isOwnerEmail()) {
+          this.isSessionUnlimited = true;
+        } else if (parsed.expiresAt) {
+          this.isSessionUnlimited = false;
+        } else if (typeof parsed.isUnlimited === 'boolean') {
           this.isSessionUnlimited = parsed.isUnlimited;
         }
         console.log('[Baileys Startup] Restored active session license:', {
@@ -491,8 +496,11 @@ export class WhatsAppManager {
         const snap = await getDoc(doc(db, 'users', this.userId));
         if (snap.exists()) {
           const d = snap.data();
-          const isUnlim = Boolean(d?.isUnlimited || (d?.email && d.email.toLowerCase() === 'awoyinfasolomon1@gmail.com'));
-          this.sessionLicenseExpiresAt = d?.licenseExpiresAt || null;
+          const isOwner = this.isOwnerEmail() || Boolean(d?.email && d.email.toLowerCase() === 'awoyinfasolomon1@gmail.com');
+          const expAt = d?.licenseExpiresAt || null;
+          // If account has an expiration timestamp (e.g. 30m trial or 1-day key), it is NOT unlimited
+          const isUnlim = isOwner || (!expAt && Boolean(d?.isUnlimited));
+          this.sessionLicenseExpiresAt = expAt;
           this.isSessionUnlimited = isUnlim;
           this.saveSessionLicense();
           console.log(`[License Sync (${this.userId})] Synced from Firestore: expiresAt=${this.sessionLicenseExpiresAt}, isUnlimited=${this.isSessionUnlimited}`);
@@ -515,7 +523,8 @@ export class WhatsAppManager {
 
   public setSessionLicense(expiresAt: string | null, isUnlimited: boolean) {
     this.sessionLicenseExpiresAt = expiresAt;
-    this.isSessionUnlimited = Boolean(isUnlimited);
+    // Strict finite countdown enforcement: an account with an expiration timestamp cannot be marked unlimited unless owner!
+    this.isSessionUnlimited = this.isOwnerEmail() || (!expiresAt && Boolean(isUnlimited));
     this.saveSessionLicense();
     // If user was previously expired and now has valid license, wake up connection immediately
     if (!this.isLicenseExpired() && !this.sock && !this.isConnecting) {
@@ -528,15 +537,20 @@ export class WhatsAppManager {
   }
 
   public isLicenseExpired(): boolean {
-    if (this.isOwnerEmail() || this.isSessionUnlimited) return false;
-    if (!this.sessionLicenseExpiresAt) {
-      // Unlicensed non-owner/non-unlimited accounts cannot run bot
-      return true;
-    }
-    const expMs = new Date(this.sessionLicenseExpiresAt).getTime();
-    if (isNaN(expMs)) return true;
+    if (this.isOwnerEmail()) return false;
     // Strict countdown down to the exact millisecond and minute!
-    return Date.now() >= expMs;
+    if (this.sessionLicenseExpiresAt) {
+      const expMs = new Date(this.sessionLicenseExpiresAt).getTime();
+      if (!isNaN(expMs)) {
+        return Date.now() >= expMs;
+      }
+    }
+    // Only if there is NO expiration date and the session is marked unlimited (VIP grant)
+    if (this.isSessionUnlimited && !this.sessionLicenseExpiresAt) {
+      return false;
+    }
+    // Unlicensed non-owner/non-unlimited accounts cannot run bot
+    return true;
   }
 
   // Gracefully pause socket without wiping credentials (preserves pairing for life)
@@ -799,10 +813,14 @@ export class WhatsAppManager {
     } else if (!this.isConnecting && this.currentStatus.state !== 'awaiting_pairing') {
       this.currentStatus.isConnected = false;
       this.currentStatus.state = 'disconnected';
-      this.currentStatus.pairingStage = 'idle';
-      this.currentStatus.user = undefined;
-      this.connectedAt = null;
-      this.currentStatus.connectedAt = undefined;
+      if (!isPaired) {
+        this.currentStatus.pairingStage = 'idle';
+        this.currentStatus.user = undefined;
+        this.connectedAt = null;
+        this.currentStatus.connectedAt = undefined;
+      } else {
+        this.currentStatus.pairingStage = 'connected';
+      }
     }
     this.currentStatus.connectedAt = this.connectedAt || undefined;
     return this.currentStatus;
@@ -896,54 +914,111 @@ export class WhatsAppManager {
     }
   }
 
+  private restorePromise: Promise<boolean> | null = null;
+
+  public async ensureRestored(): Promise<boolean> {
+    const credsPath = path.join(this.authDir, 'creds.json');
+    if (fs.existsSync(credsPath)) {
+      return true;
+    }
+    if (!this.restorePromise) {
+      this.restorePromise = this.restoreAuthFromFirebaseIfMissing();
+    }
+    const res = await this.restorePromise;
+    this.restorePromise = null;
+    return res;
+  }
+
   // Restore session credentials from Firebase Firestore if local container disk was wiped/restarted
-  private async restoreAuthFromFirebaseIfMissing() {
+  private async restoreAuthFromFirebaseIfMissing(): Promise<boolean> {
     try {
       this.ensureAuthDir();
       const credsPath = path.join(this.authDir, 'creds.json');
-      if (!fs.existsSync(credsPath)) {
-        const sessionDocId = `session_${this.sanitizedUserId}`;
-        let fullSnap = await getDoc(doc(db, 'whatsapp_sessions', sessionDocId));
-        if (!fullSnap.exists() && this.sanitizedUserId === 'default') {
-          fullSnap = await getDoc(doc(db, 'whatsapp_sessions', 'current_session'));
+      if (fs.existsSync(credsPath)) {
+        return true;
+      }
+
+      let restoredAny = false;
+      const sessionDocId = `session_${this.sanitizedUserId}`;
+      let fullSnap = await getDoc(doc(db, 'whatsapp_sessions', sessionDocId));
+      if (!fullSnap.exists() && this.sanitizedUserId === 'default') {
+        fullSnap = await getDoc(doc(db, 'whatsapp_sessions', 'current_session'));
+      }
+
+      if (fullSnap.exists()) {
+        const data = fullSnap.data();
+
+        // 1. Direct creds restoration (100% reliable, never exceeds 1MB Firestore limit)
+        if (data?.credsData && typeof data.credsData === 'string') {
+          fs.writeFileSync(credsPath, data.credsData, 'utf-8');
+          console.log(`[WhatsApp Auth (${this.userId})] Restored core creds.json directly from Firebase!`);
+          restoredAny = true;
         }
 
-        if (fullSnap.exists()) {
-          const data = fullSnap.data();
-          let sessionFiles: Record<string, string> | null = null;
-          if (data?.rawSessionData && typeof data.rawSessionData === 'string') {
-            try {
-              sessionFiles = JSON.parse(data.rawSessionData);
-            } catch {}
-          } else if (data?.files && typeof data.files === 'object') {
-            sessionFiles = data.files;
-          }
-
-          if (sessionFiles && Object.keys(sessionFiles).length > 0) {
-            for (const [filename, content] of Object.entries(sessionFiles)) {
-              if (typeof content === 'string' && filename) {
-                fs.writeFileSync(path.join(this.authDir, filename), content, 'utf-8');
-              }
-            }
-            console.log(`[WhatsApp Auth (${this.userId})] Restored ${Object.keys(sessionFiles).length} session files from Firebase Firestore!`);
-            return;
-          }
+        // 2. Multi-file companion session keys restoration
+        let sessionFiles: Record<string, string> | null = null;
+        if (data?.rawSessionData && typeof data.rawSessionData === 'string') {
+          try {
+            sessionFiles = JSON.parse(data.rawSessionData);
+          } catch {}
+        } else if (data?.files && typeof data.files === 'object') {
+          sessionFiles = data.files;
         }
 
-        // Fallback to legacy single creds document
-        if (this.sanitizedUserId === 'default') {
-          const snap = await getDoc(doc(db, 'whatsapp_sessions', 'current_creds'));
-          if (snap.exists()) {
-            const credsData = snap.data();
-            if (credsData?.rawCreds) {
-              fs.writeFileSync(credsPath, credsData.rawCreds, 'utf-8');
-              console.log('[WhatsApp Auth] Restored authentication session from Firebase Firestore!');
+        if (sessionFiles && Object.keys(sessionFiles).length > 0) {
+          for (const [filename, content] of Object.entries(sessionFiles)) {
+            if (typeof content === 'string' && filename) {
+              fs.writeFileSync(path.join(this.authDir, filename), content, 'utf-8');
             }
+          }
+          console.log(`[WhatsApp Auth (${this.userId})] Restored ${Object.keys(sessionFiles).length} session files from Firebase Firestore!`);
+          restoredAny = true;
+        }
+      }
+
+      // Fallback to legacy single creds document
+      if (!restoredAny && this.sanitizedUserId === 'default') {
+        const snap = await getDoc(doc(db, 'whatsapp_sessions', 'current_creds'));
+        if (snap.exists()) {
+          const credsData = snap.data();
+          if (credsData?.rawCreds) {
+            fs.writeFileSync(credsPath, credsData.rawCreds, 'utf-8');
+            console.log('[WhatsApp Auth] Restored authentication session from Firebase Firestore!');
+            restoredAny = true;
           }
         }
       }
+
+      if (restoredAny && fs.existsSync(credsPath)) {
+        try {
+          const raw = fs.readFileSync(credsPath, 'utf-8');
+          const creds = JSON.parse(raw);
+          if (creds.registered && (creds.me?.id || (creds as any).account?.details)) {
+            const registeredUserJid = creds.me?.id || '';
+            const registeredPhone = registeredUserJid
+              ? (registeredUserJid.split(':')[0] || registeredUserJid.split('@')[0])
+              : this.currentStatus.targetPhone?.replace(/\D/g, '') || '';
+            this.currentStatus.isPaired = true;
+            this.currentStatus.user = {
+              id: registeredUserJid || `${registeredPhone}@s.whatsapp.net`,
+              name: creds.me?.name || 'SOLVATECH Linked Phone',
+              phone: `+${registeredPhone}`,
+            };
+            this.currentStatus.pairingStage = 'connected';
+            console.log(`[WhatsApp Auth (${this.userId})] Registered linked companion: +${registeredPhone}`);
+          }
+        } catch {}
+
+        if (!this.isLicenseExpired() && !this.sock && !this.isConnecting) {
+          console.log(`[WhatsApp Auth (${this.userId})] Valid license detected! Reconnecting socket immediately...`);
+          this.initSocket().catch((err) => console.warn('Auto-reconnect note after restore:', err));
+        }
+        return true;
+      }
+      return false;
     } catch (e) {
       console.warn(`[WhatsApp Auth (${this.userId})] Firebase creds check note:`, e);
+      return false;
     }
   }
 
@@ -951,49 +1026,76 @@ export class WhatsAppManager {
   private async syncCredsToFirebase() {
     try {
       if (!fs.existsSync(this.authDir)) return;
+      const credsPath = path.join(this.authDir, 'creds.json');
+      if (!fs.existsSync(credsPath)) return;
+
+      const credsContent = fs.readFileSync(credsPath, 'utf-8');
       const fileNames = fs.readdirSync(this.authDir);
-      const sessionFiles: Record<string, string> = {};
-      let hasCreds = false;
+      const sessionFiles: Record<string, string> = {
+        'creds.json': credsContent,
+      };
+
+      // Firestore 1MB Guard: Prioritize essential keys and skip bloated app-state caches
+      let currentPayloadSize = credsContent.length;
+      const MAX_FIREBASE_PAYLOAD = 750000; // Stay safely below 1,048,487 bytes limit
+
+      // Priority 1: session-*, app-state-sync-key-*, identity-key-*, lid-mapping-*
       for (const f of fileNames) {
-        if (f.endsWith('.json') || f.endsWith('.tmp')) {
-          const content = fs.readFileSync(path.join(this.authDir, f), 'utf-8');
-          sessionFiles[f] = content;
-          if (f === 'creds.json') hasCreds = true;
+        if (f === 'creds.json' || !f.endsWith('.json') || f.endsWith('.tmp')) continue;
+        if (
+          f.startsWith('app-state-sync-version-') ||
+          f.startsWith('sender-key-status@')
+        ) {
+          // Skip giant version caches: Baileys re-fetches them automatically without losing credentials
+          continue;
         }
+
+        try {
+          const content = fs.readFileSync(path.join(this.authDir, f), 'utf-8');
+          if (currentPayloadSize + content.length < MAX_FIREBASE_PAYLOAD) {
+            sessionFiles[f] = content;
+            currentPayloadSize += content.length;
+          }
+        } catch {}
       }
-      if (hasCreds) {
-        const sessionDocId = `session_${this.sanitizedUserId}`;
-        // Store session as stringified JSON to prevent Firestore dot-in-key errors
+
+      const sessionDocId = `session_${this.sanitizedUserId}`;
+      // Save credsData directly + session files safely under 1MB
+      await setDoc(
+        doc(db, 'whatsapp_sessions', sessionDocId),
+        {
+          userId: this.userId,
+          userEmail: this.userEmail,
+          credsData: credsContent, // Always preserved independently
+          rawSessionData: JSON.stringify(sessionFiles),
+          updatedAt: new Date().toISOString()
+        },
+        { merge: true }
+      );
+
+      if (this.sanitizedUserId === 'default') {
         await setDoc(
-          doc(db, 'whatsapp_sessions', sessionDocId),
+          doc(db, 'whatsapp_sessions', 'current_session'),
           {
-            userId: this.userId,
-            userEmail: this.userEmail,
+            credsData: credsContent,
             rawSessionData: JSON.stringify(sessionFiles),
             updatedAt: new Date().toISOString()
           },
           { merge: true }
         );
-        if (this.sanitizedUserId === 'default') {
-          await setDoc(
-            doc(db, 'whatsapp_sessions', 'current_session'),
-            { rawSessionData: JSON.stringify(sessionFiles), updatedAt: new Date().toISOString() },
-            { merge: true }
-          );
-        }
+      }
 
-        // Also persist connected status to users collection
-        if (this.userId && this.userId !== 'default') {
-          await setDoc(
-            doc(db, 'users', this.userId),
-            {
-              linkedPhone: this.currentStatus.user?.phone || this.currentStatus.targetPhone || null,
-              botConnected: this.currentStatus.isConnected,
-              updatedAt: new Date().toISOString(),
-            },
-            { merge: true }
-          );
-        }
+      // Also persist connected status to users collection
+      if (this.userId && this.userId !== 'default') {
+        await setDoc(
+          doc(db, 'users', this.userId),
+          {
+            linkedPhone: this.currentStatus.user?.phone || this.currentStatus.targetPhone || null,
+            botConnected: this.currentStatus.isConnected,
+            updatedAt: new Date().toISOString(),
+          },
+          { merge: true }
+        );
       }
     } catch (e) {
       console.warn('[WhatsApp Auth] Firebase sync creds note:', e);
@@ -1128,115 +1230,116 @@ export class WhatsAppManager {
         });
 
         sock.ev.on('connection.update', async (update) => {
-          const { connection, lastDisconnect, qr } = update;
+          try {
+            const { connection, lastDisconnect, qr } = update;
 
-          // Detect companion link confirmation on explicit new login event
-          if (update.isNewLogin) {
-            this.currentStatus.pairingStage = 'connected';
-            this.currentStatus.state = 'connected';
-            this.currentStatus.isConnected = true;
-            this.currentStatus.pairingCode = undefined;
-            this.currentStatus.latestHandshakeTime = new Date().toLocaleTimeString();
-            this.addNotification({
-              type: 'pairing',
-              title: 'WhatsApp Handshake Confirmed',
-              body: 'Handshake received from WhatsApp phone! Companion link accepted.',
-            });
-          }
-
-          if (qr) {
-            try {
-              const qrDataUrl = await QRCode.toDataURL(qr);
-              this.currentStatus.qrCodeUrl = qrDataUrl;
-              this.addNotification({
-                type: 'system',
-                title: 'New QR Code Ready',
-                body: 'QR code updated for WhatsApp web scanning.',
-              });
-            } catch (e) {
-              console.error('QR code generation error:', e);
-            }
-          }
-
-          if (connection === 'close') {
-            if ((sock as any)._isIntentionalClose || this.isIntentionalClosure) {
-              this.isIntentionalClosure = false;
-              console.log('[Baileys Connection] Closed intentionally for fresh connection setup or logout.');
-              return;
-            }
-
-            const statusCode = (lastDisconnect?.error as any)?.output?.statusCode;
-            const reason = (lastDisconnect?.error as any)?.data?.reason;
-            const isAwaitingPairing =
-              this.currentStatus.pairingStage === 'code_generated' ||
-              this.currentStatus.pairingStage === 'pairing_handshake' ||
-              this.currentStatus.state === 'awaiting_pairing';
-            const credsFile = path.join(this.authDir, 'creds.json');
-            const hasLocalCreds = fs.existsSync(credsFile);
-
-            this.isConnecting = false;
-            this.sock = null;
-
-            // Never wipe session credentials or clear pairing code while user is entering pairing code!
-            // Only trigger logout if the user was previously connected and WhatsApp explicitly logged them out (401 / loggedOut).
-            const wasEverConnected = Boolean(this.connectedAt || this.currentStatus.isConnected);
-            const shouldLogout = !isAwaitingPairing && wasEverConnected && (statusCode === DisconnectReason.loggedOut || statusCode === 401 || reason === '401');
-
-            if (shouldLogout) {
-              this.currentStatus.isConnected = false;
-              this.currentStatus.state = 'disconnected';
-              this.currentStatus.pairingStage = 'idle';
+            // Detect companion link confirmation on explicit new login event
+            if (update.isNewLogin) {
+              this.currentStatus.pairingStage = 'connected';
+              this.currentStatus.state = 'connected';
+              this.currentStatus.isConnected = true;
               this.currentStatus.pairingCode = undefined;
+              this.currentStatus.latestHandshakeTime = new Date().toLocaleTimeString();
               this.addNotification({
-                type: 'connection',
-                title: 'WhatsApp Disconnected',
-                body: 'The device was unlinked or logged out from your phone. Ready for fresh pairing.',
+                type: 'pairing',
+                title: 'WhatsApp Handshake Confirmed',
+                body: 'Handshake received from WhatsApp phone! Companion link accepted.',
               });
-              await this.logout();
-            } else {
-              // Transient network drop (408, 428, 515 restartRequired, cloud network blip):
-              // STRICT RULE: If account has paired credentials and license is unexpired, IT STAYS LINKED FOR LIFE!
-              if (hasLocalCreds && !this.isLicenseExpired()) {
-                this.currentStatus.isConnected = true;
-                this.currentStatus.state = 'connected';
-                this.currentStatus.pairingStage = 'connected';
-              } else {
+            }
+
+            if (qr) {
+              try {
+                const qrDataUrl = await QRCode.toDataURL(qr);
+                this.currentStatus.qrCodeUrl = qrDataUrl;
+                this.addNotification({
+                  type: 'system',
+                  title: 'New QR Code Ready',
+                  body: 'QR code updated for WhatsApp web scanning.',
+                });
+              } catch (e) {
+                console.error('QR code generation error:', e);
+              }
+            }
+
+            if (connection === 'close') {
+              if ((sock as any)._isIntentionalClose || this.isIntentionalClosure) {
+                this.isIntentionalClosure = false;
+                console.log('[Baileys Connection] Closed intentionally for fresh connection setup, pause, or logout.');
+                return;
+              }
+
+              const statusCode = (lastDisconnect?.error as any)?.output?.statusCode;
+              const reason = (lastDisconnect?.error as any)?.data?.reason;
+              const isAwaitingPairing =
+                this.currentStatus.pairingStage === 'code_generated' ||
+                this.currentStatus.pairingStage === 'pairing_handshake' ||
+                this.currentStatus.state === 'awaiting_pairing';
+              const credsFile = path.join(this.authDir, 'creds.json');
+              const hasLocalCreds = fs.existsSync(credsFile);
+
+              this.isConnecting = false;
+              this.sock = null;
+
+              // Never wipe session credentials or clear pairing code while user is entering pairing code!
+              // Only trigger logout if the user was previously connected and WhatsApp explicitly logged them out (401 / loggedOut).
+              const wasEverConnected = Boolean(this.connectedAt || this.currentStatus.isConnected);
+              const shouldLogout = !isAwaitingPairing && wasEverConnected && (statusCode === DisconnectReason.loggedOut || statusCode === 401 || reason === '401');
+
+              if (shouldLogout) {
                 this.currentStatus.isConnected = false;
-                if (!isAwaitingPairing) {
-                  this.currentStatus.state = 'disconnected';
+                this.currentStatus.state = 'disconnected';
+                this.currentStatus.pairingStage = 'idle';
+                this.currentStatus.pairingCode = undefined;
+                this.addNotification({
+                  type: 'connection',
+                  title: 'WhatsApp Disconnected',
+                  body: 'The device was unlinked or logged out from your phone. Ready for fresh pairing.',
+                });
+                await this.logout(true);
+              } else {
+                // Transient network drop (408, 428, 515 restartRequired, cloud network blip):
+                // STRICT RULE: If account has paired credentials and license is unexpired, IT STAYS LINKED FOR LIFE!
+                if (hasLocalCreds && !this.isLicenseExpired()) {
+                  this.currentStatus.isConnected = true;
+                  this.currentStatus.state = 'connected';
+                  this.currentStatus.pairingStage = 'connected';
+                } else {
+                  this.currentStatus.isConnected = false;
+                  if (!isAwaitingPairing) {
+                    this.currentStatus.state = 'disconnected';
+                  }
+                }
+
+                if (statusCode === 515 || statusCode === DisconnectReason.restartRequired) {
+                  console.log('[Baileys Connection] Connection closed (code: 515 restartRequired). Device pairing accepted by phone, restarting connection immediately...');
+                  this.currentStatus.pairingStage = 'connected';
+                  this.currentStatus.state = 'connected';
+                  this.currentStatus.isConnected = true;
+                  this.currentStatus.pairingCode = undefined;
+                  this.currentStatus.latestHandshakeTime = new Date().toLocaleTimeString();
+                  this.addNotification({
+                    type: 'pairing',
+                    title: 'WhatsApp Handshake Confirmed',
+                    body: 'Handshake received from WhatsApp phone! Companion link accepted. Finalizing connection...',
+                  });
+                  if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+                  this.reconnectTimer = setTimeout(() => {
+                    this.initSocket().catch((err) => {
+                      console.warn('Auto-restart note:', err);
+                    });
+                  }, 800);
+                } else {
+                  console.log(`[Baileys Connection] Connection closed (code: ${statusCode || 'unknown'}). Keeping session and credentials intact, auto-reconnecting 24/7 in background...`);
+                  if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+                  this.reconnectTimer = setTimeout(() => {
+                    this.initSocket().catch((err) => {
+                      console.warn('Auto-reconnect note:', err);
+                    });
+                  }, 2000);
                 }
               }
-
-              if (statusCode === 515 || statusCode === DisconnectReason.restartRequired) {
-                console.log('[Baileys Connection] Connection closed (code: 515 restartRequired). Device pairing accepted by phone, restarting connection immediately...');
-                this.currentStatus.pairingStage = 'connected';
-                this.currentStatus.state = 'connected';
-                this.currentStatus.isConnected = true;
-                this.currentStatus.pairingCode = undefined;
-                this.currentStatus.latestHandshakeTime = new Date().toLocaleTimeString();
-                this.addNotification({
-                  type: 'pairing',
-                  title: 'WhatsApp Handshake Confirmed',
-                  body: 'Handshake received from WhatsApp phone! Companion link accepted. Finalizing connection...',
-                });
-                if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-                this.reconnectTimer = setTimeout(() => {
-                  this.initSocket().catch((err) => {
-                    console.warn('Auto-restart note:', err);
-                  });
-                }, 800);
-              } else {
-                console.log(`[Baileys Connection] Connection closed (code: ${statusCode || 'unknown'}). Keeping session and credentials intact, auto-reconnecting 24/7 in background...`);
-                if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-                this.reconnectTimer = setTimeout(() => {
-                  this.initSocket().catch((err) => {
-                    console.warn('Auto-reconnect note:', err);
-                  });
-                }, 2000);
-              }
-            }
-          } else if (connection === 'open') {
-            this.connectedAt = Date.now();
+            } else if (connection === 'open') {
+              this.connectedAt = Date.now();
             this.currentStatus.state = 'connected';
             this.currentStatus.isConnected = true;
             this.currentStatus.connectedAt = this.connectedAt;
@@ -1326,7 +1429,10 @@ export class WhatsAppManager {
               }
             }, 1200);
           }
-    });
+        } catch (connErr) {
+          console.error(`[Baileys Connection Update Error Safeguard (${this.userId})]:`, connErr);
+        }
+      });
 
     // Inbound Messages & SOLVATECH Command Handler
     sock.ev.on('messages.upsert', async (m) => {
@@ -4180,6 +4286,56 @@ export class WhatsAppSessionManager {
 
   public getAllSessions(): Map<string, WhatsAppManager> {
     return this.sessions;
+  }
+
+  public async getAllStatuses(): Promise<Record<string, any>> {
+    const statusMap: Record<string, any> = {};
+
+    // 1. Scan memory sessions
+    for (const [uid, session] of this.sessions.entries()) {
+      const status = session.getStatus();
+      statusMap[uid] = {
+        isConnected: Boolean(status.isConnected),
+        isPaired: Boolean(status.isPaired || status.user?.phone),
+        state: status.state,
+        phone: status.user?.phone || status.targetPhone || null,
+        isExpired: session.isLicenseExpired(),
+        expiresAt: (session as any).sessionLicenseExpiresAt || null,
+        isUnlimited: Boolean((session as any).isSessionUnlimited),
+      };
+    }
+
+    // 2. Scan disk auth folders for any paired sessions not currently in memory
+    if (fs.existsSync(this.baseAuthDir)) {
+      try {
+        const items = fs.readdirSync(this.baseAuthDir, { withFileTypes: true });
+        for (const item of items) {
+          if (item.isDirectory() && item.name.startsWith('session_')) {
+            const rawId = item.name.replace(/^session_/, '');
+            if (!statusMap[rawId]) {
+              const credsPath = path.join(this.baseAuthDir, item.name, 'creds.json');
+              if (fs.existsSync(credsPath)) {
+                try {
+                  const creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
+                  if (creds.registered) {
+                    const phone = creds.me?.id ? creds.me.id.split(':')[0].split('@')[0] : '';
+                    statusMap[rawId] = {
+                      isConnected: false,
+                      isPaired: true,
+                      state: 'disconnected',
+                      phone: phone ? `+${phone}` : null,
+                      isExpired: false,
+                    };
+                  }
+                } catch {}
+              }
+            }
+          }
+        }
+      } catch {}
+    }
+
+    return statusMap;
   }
 }
 

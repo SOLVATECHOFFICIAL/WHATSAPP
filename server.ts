@@ -10,6 +10,14 @@ import { commandHandler, SOLVATECH_MENU } from './src/server/commands.ts';
 
 dotenv.config();
 
+// Production Resilience Safeguards: Prevent uncaught Baileys event errors from crashing the server
+process.on('uncaughtException', (err) => {
+  console.error('[SOLVATECH Process Safeguard] Uncaught exception prevented server crash:', err?.message || err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[SOLVATECH Process Safeguard] Unhandled rejection prevented server crash:', reason);
+});
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -76,20 +84,7 @@ async function startServer() {
   // Admin live multi-user status sync
   app.get('/api/admin/users-status', async (_req, res) => {
     try {
-      const allSessions = sessionManager.getAllSessions();
-      const statusMap: Record<string, any> = {};
-      for (const [uid, session] of allSessions.entries()) {
-        const status = session.getStatus();
-        statusMap[uid] = {
-          isConnected: Boolean(status.isConnected),
-          isPaired: Boolean(status.isPaired || status.user?.phone),
-          state: status.state,
-          phone: status.user?.phone || status.targetPhone || null,
-          isExpired: session.isLicenseExpired(),
-          expiresAt: (session as any).sessionLicenseExpiresAt || null,
-          isUnlimited: Boolean((session as any).isSessionUnlimited),
-        };
-      }
+      const statusMap = await sessionManager.getAllStatuses();
       res.json({ success: true, statuses: statusMap });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
@@ -115,7 +110,7 @@ async function startServer() {
   });
 
   // WhatsApp Baileys API endpoints (per-user session)
-  app.get('/api/whatsapp/status', (req, res) => {
+  app.get('/api/whatsapp/status', async (req, res) => {
     const userId = (req.query.userId as string) || (req.headers['x-user-id'] as string) || '';
     if (!userId) {
       // Unauthenticated / clean slate: do NOT leak previous account's status
@@ -131,6 +126,8 @@ async function startServer() {
       });
     }
     const session = getSessionForReq(req);
+    // Ensure any pending cloud credential restoration is completed before returning status
+    await session.ensureRestored();
     res.json({
       success: true,
       botName: 'SOLVATECH',
