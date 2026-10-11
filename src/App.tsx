@@ -60,15 +60,17 @@ import {
 } from './services/license';
 
 interface WhatsAppStatus {
-  state: 'disconnected' | 'connecting' | 'awaiting_pairing' | 'pairing_handshake' | 'connected';
+  state: 'disconnected' | 'connecting' | 'awaiting_pairing' | 'pairing_handshake' | 'connected' | 'expired';
   isConnected: boolean;
-  pairingStage: 'idle' | 'code_generated' | 'pairing_handshake' | 'connected';
+  isPaired?: boolean;
+  pairingStage: 'idle' | 'code_generated' | 'pairing_handshake' | 'connected' | 'expired';
   pairingCode?: string;
   qrCodeUrl?: string;
   targetPhone?: string;
   uptime?: number;
   lastError?: string;
   latestHandshakeTime?: string;
+  isExpired?: boolean;
   user?: {
     id: string;
     name?: string;
@@ -358,18 +360,18 @@ export default function App() {
         status.isConnected &&
         currentUser?.uid
       ) {
-        console.warn('Active license time elapsed. Disconnecting bot...');
+        console.warn('Active license time elapsed down to the minute. Pausing bot...');
         fetch('/api/whatsapp/disconnect', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ userId: currentUser.uid }),
+          body: JSON.stringify({ userId: currentUser.uid, unlink: false }),
         }).catch(() => {});
-        setStatus((prev) => ({ ...prev, isConnected: false, state: 'disconnected' }));
+        setStatus((prev) => ({ ...prev, isConnected: false, state: 'expired', pairingStage: 'expired' }));
         setToastNotification({
           id: 'lic_exp_' + Date.now(),
           type: 'error',
           title: '⚠️ License Expired',
-          body: 'Your active license duration has elapsed. The bot was automatically disconnected.',
+          body: 'Your active license duration has elapsed. The bot was automatically paused.',
           timestamp: new Date().toLocaleTimeString(),
         });
       }
@@ -1293,6 +1295,53 @@ export default function App() {
                 </div>
               )}
 
+              {/* WhatsApp Paired Device Banner when Paused (License Expired or Offline) */}
+              {!status.isConnected && (status.isPaired || status.user?.phone) && (
+                <div className="p-4 rounded-2xl bg-amber-950/30 border border-amber-500/40 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <div className="w-8 h-8 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center">
+                        <Smartphone className="w-5 h-5 text-amber-400" />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <h3 className="font-bold text-sm text-white">WhatsApp Linked for Life</h3>
+                          <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[9px] font-bold uppercase tracking-wider">
+                            {status.state === 'expired' || !isLicenseActive ? 'PAUSED (EXPIRED)' : 'CONNECTING 24/7'}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-amber-300/80 font-mono">
+                          {status.user?.phone || status.targetPhone || 'Paired Device'}
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={handleLogoutWhatsApp}
+                      disabled={loading}
+                      className="p-2 rounded-xl bg-slate-900 hover:bg-rose-950/40 text-slate-400 hover:text-rose-400 border border-slate-800 transition-colors"
+                      title="Unlink WhatsApp"
+                    >
+                      <LogOut className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-slate-300">
+                    {status.state === 'expired' || !isLicenseActive
+                      ? 'Your WhatsApp companion device is linked. 24/7 automation is currently paused because your active license duration has elapsed. Redeem a license key below to resume immediately.'
+                      : 'Your device is linked. Re-establishing 24/7 cloud connection in background...'}
+                  </p>
+                  {(!isLicenseActive || status.state === 'expired') && (
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('license')}
+                      className="w-full mt-2 py-2 px-3.5 rounded-xl bg-gradient-to-r from-amber-500 to-emerald-400 hover:from-amber-400 hover:to-emerald-300 text-slate-950 font-black text-xs flex items-center justify-center gap-2 shadow-lg shadow-amber-950/40 transition-all cursor-pointer"
+                    >
+                      <Key className="w-4 h-4" />
+                      <span>Enter License Key to Resume Bot 24/7 →</span>
+                    </button>
+                  )}
+                </div>
+              )}
+
               {/* USER DASHBOARD FEATURE: ANTI-DELETE MESSAGE RECOVERY SWITCH */}
               <div className="p-4 sm:p-5 rounded-2xl bg-gradient-to-br from-slate-900 to-slate-950 border border-slate-800 hover:border-slate-700/80 transition-all shadow-xl space-y-3">
                 <div className="flex items-start justify-between gap-4">
@@ -1526,8 +1575,8 @@ export default function App() {
                 </div>
               )}
 
-              {/* Pairing Request Form */}
-              {!status.isConnected && (
+              {/* Pairing Request Form (only shown if not yet paired with any device) */}
+              {!status.isConnected && !status.isPaired && !status.user?.phone && (
                 <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-3">
                   <div className="flex items-center justify-between pb-2 border-b border-slate-800/80">
                     <div className="flex items-center gap-2">

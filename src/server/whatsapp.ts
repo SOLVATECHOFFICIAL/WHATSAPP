@@ -211,6 +211,7 @@ export type PairingStage = 'idle' | 'code_generated' | 'pairing_handshake' | 'co
 export interface WhatsAppStatus {
   state: 'disconnected' | 'connecting' | 'awaiting_pairing' | 'pairing_handshake' | 'connected' | 'expired';
   isConnected: boolean;
+  isPaired?: boolean;
   pairingStage: PairingStage;
   pairingCode?: string;
   qrCodeUrl?: string;
@@ -484,6 +485,24 @@ export class WhatsAppManager {
     }
   }
 
+  public async syncLicenseFromFirestore(): Promise<void> {
+    try {
+      if (this.userId && this.userId !== 'default') {
+        const snap = await getDoc(doc(db, 'users', this.userId));
+        if (snap.exists()) {
+          const d = snap.data();
+          const isUnlim = Boolean(d?.isUnlimited || (d?.email && d.email.toLowerCase() === 'awoyinfasolomon1@gmail.com'));
+          this.sessionLicenseExpiresAt = d?.licenseExpiresAt || null;
+          this.isSessionUnlimited = isUnlim;
+          this.saveSessionLicense();
+          console.log(`[License Sync (${this.userId})] Synced from Firestore: expiresAt=${this.sessionLicenseExpiresAt}, isUnlimited=${this.isSessionUnlimited}`);
+        }
+      }
+    } catch (err) {
+      console.debug(`Firestore license sync note for ${this.userId}:`, err);
+    }
+  }
+
   public isOwnerEmail(): boolean {
     const email = (this.userEmail || '').trim().toLowerCase();
     const id = (this.userId || '').trim().toLowerCase();
@@ -498,6 +517,14 @@ export class WhatsAppManager {
     this.sessionLicenseExpiresAt = expiresAt;
     this.isSessionUnlimited = Boolean(isUnlimited);
     this.saveSessionLicense();
+    // If user was previously expired and now has valid license, wake up connection immediately
+    if (!this.isLicenseExpired() && !this.sock && !this.isConnecting) {
+      const credsFile = path.join(this.authDir, 'creds.json');
+      if (fs.existsSync(credsFile)) {
+        console.log(`[License Sync (${this.userId})] Valid license detected! Resuming WhatsApp connection 24/7...`);
+        this.initSocket().catch((err) => console.warn('Wakeup connection note:', err));
+      }
+    }
   }
 
   public isLicenseExpired(): boolean {
@@ -508,8 +535,35 @@ export class WhatsAppManager {
     }
     const expMs = new Date(this.sessionLicenseExpiresAt).getTime();
     if (isNaN(expMs)) return true;
-    // Strict countdown down to the exact millisecond/minute!
+    // Strict countdown down to the exact millisecond and minute!
     return Date.now() >= expMs;
+  }
+
+  // Gracefully pause socket without wiping credentials (preserves pairing for life)
+  public async pauseSocket(reason = 'License expired or paused'): Promise<void> {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.isIntentionalClosure = true;
+    try {
+      if (this.sock) {
+        try {
+          (this.sock as any)._isIntentionalClose = true;
+          this.sock.end(undefined);
+        } catch {}
+        this.sock = null;
+      }
+    } catch {}
+
+    this.isConnecting = false;
+    this.connectedAt = null;
+    const isExpired = this.isLicenseExpired();
+    this.currentStatus.isConnected = false;
+    this.currentStatus.state = isExpired ? 'expired' : 'disconnected';
+    this.currentStatus.pairingStage = isExpired ? 'expired' : 'idle';
+    this.currentStatus.pairingCode = undefined;
+    console.log(`[Session ${this.userId}] WhatsApp socket paused (${reason}). Companion pairing credentials strictly preserved on disk & Firebase.`);
   }
 
   // 24/7 Active Heartbeat & Self-Healing Connection Watchdog
@@ -517,22 +571,28 @@ export class WhatsAppManager {
     if (this.heartbeatInterval) {
       clearInterval(this.heartbeatInterval);
     }
-    // Audit every 10 seconds: strictly enforce expiration and keep healthy sockets online 24/7
+    // High-precision audit every 5 seconds: strictly enforce expiration down to the exact minute
     this.heartbeatInterval = setInterval(async () => {
-      // 1. Strict automatic disconnect the instant license expires
+      // 1. Strict automatic pause the instant license expires
       if (this.isLicenseExpired()) {
-        if (this.currentStatus.isConnected) {
-          console.log(`[License Watchdog] License for user ${this.userId} has expired! Automatically disconnecting bot...`);
-          this.currentStatus.isConnected = false;
-          this.currentStatus.state = 'expired';
-          this.currentStatus.pairingStage = 'expired';
-          this.currentStatus.isExpired = true;
+        if (this.sock || this.currentStatus.isConnected) {
+          console.log(`[License Watchdog] License for user ${this.userId} has expired down to the minute! Pausing bot (credentials preserved)...`);
+          await this.pauseSocket('License Expired');
           this.addNotification({
             type: 'system',
-            title: '⚠️ License Expired — Bot Disconnected',
-            body: 'Your active license period has ended. The bot has been disconnected automatically. Renew your license on the website to restore 24/7 connection.',
+            title: '⚠️ License Expired — Bot Paused',
+            body: 'Your active license period has ended. The bot has been paused. Enter a new key on the website to resume 24/7 connection instantly.',
           });
-          await this.logout();
+          try {
+            if (this.userId && this.userId !== 'default') {
+              await setDoc(doc(db, 'users', this.userId), {
+                whatsappConnected: false,
+                botConnected: false,
+                licenseStatus: 'expired',
+                updatedAt: new Date().toISOString(),
+              }, { merge: true });
+            }
+          } catch {}
         }
         return;
       }
@@ -544,13 +604,13 @@ export class WhatsAppManager {
 
       // Passive socket check: if socket is live, verify connection is healthy
       if (this.sock && this.currentStatus.isConnected) {
-        // Socket is open and functioning normally. No aggressive timeouts that kill healthy connections!
+        // Socket is open and functioning normally
       } else if (hasCreds && !this.isConnecting && this.currentStatus.state !== 'awaiting_pairing') {
         // Disconnected but has valid paired credentials and unexpired license: auto-reconnect 24/7!
         console.log(`[24/7 Watchdog] Reconnecting WhatsApp session for ${this.userId} to keep bot online 24/7...`);
         this.reconnectSocketSafely();
       }
-    }, 10000);
+    }, 5000);
   }
 
   private reconnectSocketSafely() {
@@ -665,6 +725,38 @@ export class WhatsAppManager {
   }
 
   public getStatus(): WhatsAppStatus {
+    const credsFile = path.join(this.authDir, 'creds.json');
+    let hasLocalCreds = false;
+    let registeredPhone = '';
+    let registeredUserJid = '';
+    let registeredName = '';
+
+    if (fs.existsSync(credsFile)) {
+      try {
+        const raw = fs.readFileSync(credsFile, 'utf-8');
+        const creds = JSON.parse(raw);
+        if (creds.registered && (creds.me?.id || (creds as any).account?.details)) {
+          hasLocalCreds = true;
+          registeredUserJid = creds.me?.id || '';
+          registeredPhone = registeredUserJid
+            ? (registeredUserJid.split(':')[0] || registeredUserJid.split('@')[0])
+            : this.currentStatus.targetPhone?.replace(/\D/g, '') || '';
+          registeredName = creds.me?.name || 'SOLVATECH Linked Phone';
+        }
+      } catch {}
+    }
+
+    // A phone is paired if registered companion credentials exist on disk or user object is set
+    const isPaired = hasLocalCreds || Boolean(this.currentStatus.user?.phone);
+    this.currentStatus.isPaired = isPaired;
+    if (registeredPhone && (!this.currentStatus.user || !this.currentStatus.user.phone)) {
+      this.currentStatus.user = {
+        id: registeredUserJid || `${registeredPhone}@s.whatsapp.net`,
+        name: registeredName,
+        phone: `+${registeredPhone}`,
+      };
+    }
+
     const isExpired = this.isLicenseExpired();
     this.currentStatus.isExpired = isExpired;
     this.currentStatus.licenseExpiresAt = this.sessionLicenseExpiresAt;
@@ -674,49 +766,41 @@ export class WhatsAppManager {
       this.currentStatus.state = 'expired';
       this.currentStatus.pairingStage = 'expired';
       this.currentStatus.pairingCode = undefined;
+      // If socket is running while expired, pause it immediately
+      if (this.sock) {
+        this.pauseSocket('License Expired').catch(() => {});
+      }
       return this.currentStatus;
     }
 
-    const credsFile = path.join(this.authDir, 'creds.json');
-    if (fs.existsSync(credsFile)) {
-      try {
-        const raw = fs.readFileSync(credsFile, 'utf-8');
-        const creds = JSON.parse(raw);
-        if (creds.registered && (creds.me?.id || (creds as any).account?.details)) {
-          const userJid = creds.me?.id || '';
-          const phone = userJid
-            ? (userJid.split(':')[0] || userJid.split('@')[0])
-            : this.currentStatus.targetPhone?.replace(/\D/g, '') || '';
-          this.currentStatus.isConnected = true;
-          this.currentStatus.state = 'connected';
-          this.currentStatus.pairingStage = 'connected';
-          this.currentStatus.pairingCode = undefined;
-          this.currentStatus.qrCodeUrl = undefined;
-          this.currentStatus.lastError = undefined;
-          if (!this.connectedAt) {
-            this.connectedAt = Date.now();
-          }
-          this.currentStatus.connectedAt = this.connectedAt;
-          if (!this.currentStatus.user && phone) {
-            this.currentStatus.user = {
-              id: userJid || `${phone}@s.whatsapp.net`,
-              name: creds.me?.name || 'SOLVATECH Linked Phone',
-              phone: `+${phone}`,
-            };
-          }
-        }
-      } catch {}
-    } else if (this.sock && this.currentStatus.isConnected) {
+    // User is NOT expired: Check genuine live Baileys socket state
+    const isLiveConnected = Boolean(this.sock && this.currentStatus.isConnected);
+    if (isLiveConnected) {
       this.currentStatus.isConnected = true;
       this.currentStatus.state = 'connected';
       this.currentStatus.pairingStage = 'connected';
+      this.currentStatus.pairingCode = undefined;
+      this.currentStatus.qrCodeUrl = undefined;
+      this.currentStatus.lastError = undefined;
+      if (!this.connectedAt) {
+        this.connectedAt = Date.now();
+      }
+      this.currentStatus.connectedAt = this.connectedAt;
+    } else if (hasLocalCreds) {
+      // Credentials are fully registered, but socket dropped or is reconnecting
+      this.currentStatus.isConnected = false;
+      this.currentStatus.state = this.isConnecting ? 'connecting' : 'disconnected';
+      this.currentStatus.pairingStage = 'connected';
+      this.currentStatus.pairingCode = undefined;
+      // Auto-reconnect 24/7 if not currently connecting or paused
+      if (!this.isConnecting && !this.isIntentionalClosure) {
+        this.reconnectSocketSafely();
+      }
     } else if (!this.isConnecting && this.currentStatus.state !== 'awaiting_pairing') {
       this.currentStatus.isConnected = false;
-      if (this.currentStatus.state === 'connected') {
-        this.currentStatus.state = 'disconnected';
-      }
-      this.currentStatus.user = undefined;
+      this.currentStatus.state = 'disconnected';
       this.currentStatus.pairingStage = 'idle';
+      this.currentStatus.user = undefined;
       this.connectedAt = null;
       this.currentStatus.connectedAt = undefined;
     }
@@ -1095,6 +1179,7 @@ export class WhatsAppManager {
 
             // Never wipe session credentials or clear pairing code while user is entering pairing code!
             // Only trigger logout if the user was previously connected and WhatsApp explicitly logged them out (401 / loggedOut).
+            const wasEverConnected = Boolean(this.connectedAt || this.currentStatus.isConnected);
             const shouldLogout = !isAwaitingPairing && wasEverConnected && (statusCode === DisconnectReason.loggedOut || statusCode === 401 || reason === '401');
 
             if (shouldLogout) {
@@ -1246,6 +1331,14 @@ export class WhatsAppManager {
     // Inbound Messages & SOLVATECH Command Handler
     sock.ev.on('messages.upsert', async (m) => {
       if (m.type === 'notify') {
+        // STRICT EXPIRATION ENFORCEMENT DOWN TO THE EXACT MINUTE:
+        // When license or trial ends, the bot ceases all automation and pauses immediately
+        if (this.isLicenseExpired()) {
+          console.log(`[License Watchdog] User ${this.userId} license is expired down to the minute. Halting all WhatsApp automation.`);
+          await this.pauseSocket('License Expired');
+          return;
+        }
+
         for (const msg of m.messages) {
           if (!msg.message) continue;
 
@@ -3423,7 +3516,10 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
     return true;
   }
 
-  public async logout(): Promise<void> {
+  public async logout(unlinkPermanent = true): Promise<void> {
+    if (!unlinkPermanent) {
+      return this.pauseSocket('Socket paused without unlinking');
+    }
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -3457,6 +3553,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
     this.currentStatus = {
       state: 'disconnected',
       isConnected: false,
+      isPaired: false,
       pairingStage: 'idle',
       user: undefined,
       pairingCode: undefined,
@@ -3468,7 +3565,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
     this.addNotification({
       type: 'system',
       title: 'WhatsApp Session Cleared',
-      body: 'All Baileys session credentials have been wiped. Ready to pair a new device.',
+      body: 'Device pairing was unlinked. Ready to pair a new device.',
     });
   }
 
@@ -3797,16 +3894,31 @@ export class WhatsAppSessionManager {
     if (!session) {
       session = new WhatsAppManager(cleanId, userEmail);
       this.sessions.set(cleanId, session);
+      // Asynchronously restore Firebase auth credentials and sync license from Firestore
+      (session as any).restoreAuthFromFirebaseIfMissing().catch(() => {});
+      session.syncLicenseFromFirestore().catch(() => {});
     }
     return session;
   }
 
-  public async logoutSession(userId: string = 'default'): Promise<void> {
+  public async logoutSession(userId: string = 'default', unlinkPermanent = true): Promise<void> {
     const cleanId = (userId && typeof userId === 'string' && userId.trim()) ? userId.trim() : 'default';
     const session = this.sessions.get(cleanId);
     if (session) {
-      await session.logout();
-      this.sessions.delete(cleanId);
+      if (unlinkPermanent) {
+        await session.logout(true);
+        this.sessions.delete(cleanId);
+      } else {
+        await session.pauseSocket('User paused bot');
+      }
+    }
+  }
+
+  public async pauseSession(userId: string = 'default'): Promise<void> {
+    const cleanId = (userId && typeof userId === 'string' && userId.trim()) ? userId.trim() : 'default';
+    const session = this.sessions.get(cleanId);
+    if (session) {
+      await session.pauseSocket('User paused bot');
     }
   }
 
@@ -3829,7 +3941,15 @@ export class WhatsAppSessionManager {
               if (parsed.registered) {
                 console.log(`[Multi-Session] Restoring registered WhatsApp session for user: ${rawId}`);
                 const session = this.getSession(rawId);
-                session.initSocket().catch((err) => console.warn(`Auto-reconnect note for ${rawId}:`, err));
+                session.syncLicenseFromFirestore().then(() => {
+                  if (!session.isLicenseExpired()) {
+                    session.initSocket().catch((err) => console.warn(`Auto-reconnect note for ${rawId}:`, err));
+                  } else {
+                    console.log(`[Multi-Session] User ${rawId} session is paired but license is expired. Keeping pairing preserved, paused.`);
+                  }
+                }).catch(() => {
+                  session.initSocket().catch(() => {});
+                });
               }
             } catch {}
           }
@@ -3858,7 +3978,11 @@ export class WhatsAppSessionManager {
             if (!this.sessions.has(rawId)) {
               console.log(`[Multi-Session] Found cloud WhatsApp session for user: ${rawId}, initializing...`);
               const session = this.getSession(rawId);
-              session.initSocket().catch((err) => console.warn(`Cloud auto-reconnect note for ${rawId}:`, err));
+              session.syncLicenseFromFirestore().then(() => {
+                if (!session.isLicenseExpired()) {
+                  session.initSocket().catch((err) => console.warn(`Cloud auto-reconnect note for ${rawId}:`, err));
+                }
+              }).catch(() => {});
             }
           }
         }
@@ -3976,14 +4100,14 @@ export class WhatsAppSessionManager {
 
           if (isExpired) {
             if (session.getStatus().isConnected) {
-              console.log(`[Global 5-Min Sync] User ${uid} license has expired. Disconnecting bot.`);
+              console.log(`[Global 5-Min Sync] User ${uid} license has expired. Pausing bot (credentials preserved).`);
               expiredDisconnected++;
               session.addNotification({
                 type: 'system',
                 title: '⚠️ License Expired',
-                body: 'Your license duration has elapsed. The bot has been disconnected.',
+                body: 'Your license duration has elapsed. The bot has been paused. Renew key to resume.',
               });
-              await session.logout();
+              await session.pauseSocket('License Expired');
             }
             try {
               await setDoc(doc(db, 'users', uid), {

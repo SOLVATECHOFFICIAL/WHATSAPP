@@ -74,7 +74,7 @@ async function startServer() {
   });
 
   // Admin live multi-user status sync
-  app.get('/api/admin/users-status', (_req, res) => {
+  app.get('/api/admin/users-status', async (_req, res) => {
     try {
       const allSessions = sessionManager.getAllSessions();
       const statusMap: Record<string, any> = {};
@@ -82,6 +82,7 @@ async function startServer() {
         const status = session.getStatus();
         statusMap[uid] = {
           isConnected: Boolean(status.isConnected),
+          isPaired: Boolean(status.isPaired || status.user?.phone),
           state: status.state,
           phone: status.user?.phone || status.targetPhone || null,
           isExpired: session.isLicenseExpired(),
@@ -562,10 +563,10 @@ async function startServer() {
       }
 
       const session = getSessionForReq(req);
-      if (session.isLicenseExpired() && !isOwner) {
+      if (session.isLicenseExpired()) {
         return res.status(403).json({
           success: false,
-          error: 'License expired! Your license duration has elapsed. Please renew your license key on the website to execute commands.',
+          error: 'License expired! Your license duration has elapsed down to the minute. Please renew your license key on the website to execute commands.',
         });
       }
 
@@ -606,10 +607,11 @@ async function startServer() {
     }
   });
 
+  // Explicit user action: unlinks companion device permanently from server & Firebase
   app.post('/api/whatsapp/logout', async (req, res) => {
     try {
       const userId = (req.body?.userId as string) || (req.query?.userId as string) || (req.headers['x-user-id'] as string) || '';
-      await sessionManager.logoutSession(userId);
+      await sessionManager.logoutSession(userId, true);
       res.json({ success: true, message: 'Session logged out and cleared for this user account' });
     } catch (err: any) {
       res.status(500).json({
@@ -619,16 +621,39 @@ async function startServer() {
     }
   });
 
+  // Disconnect/Pause bot (preserves pairing credentials strictly for life unless unlink=true)
   app.post('/api/whatsapp/disconnect', async (req, res) => {
     try {
       const userId = (req.body?.userId as string) || (req.query?.userId as string) || (req.headers['x-user-id'] as string) || '';
-      await sessionManager.logoutSession(userId);
-      res.json({ success: true, message: 'Bot disconnected successfully for this user account' });
+      const unlink = req.body?.unlink === true || req.query?.unlink === 'true';
+      if (unlink) {
+        await sessionManager.logoutSession(userId, true);
+      } else {
+        await sessionManager.pauseSession(userId);
+      }
+      res.json({ success: true, message: unlink ? 'Device unlinked permanently' : 'Bot socket paused (pairing strictly preserved)' });
     } catch (err: any) {
       res.status(500).json({
         success: false,
         error: err.message || 'Failed to disconnect session',
       });
+    }
+  });
+
+  // Reconnect/Resume bot without needing new QR or pairing code
+  app.post('/api/whatsapp/reconnect', async (req, res) => {
+    try {
+      const session = getSessionForReq(req);
+      if (session.isLicenseExpired()) {
+        return res.status(403).json({
+          success: false,
+          error: 'Cannot reconnect: License is expired. Please renew your license key on the website.',
+        });
+      }
+      await session.initSocket();
+      res.json({ success: true, message: 'WhatsApp connection resumed 24/7', status: session.getStatus() });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
     }
   });
 

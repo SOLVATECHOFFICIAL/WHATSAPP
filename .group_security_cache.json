@@ -15,7 +15,7 @@
     "antispam": true,
     "autowelcome": true,
     "autogoodbye": true,
-    "warnLimit": 5
+    "warnLimit": 3
   },
   "default": {
     "antilink": false,
@@ -36,7 +36,7 @@
     "warnLimit": 5
   },
   "120363430711229336@g.us": {
-    "antilink": false,
+    "antilink": true,
     "antibot": true,
     "antistatus": true,
     "antispam": true,

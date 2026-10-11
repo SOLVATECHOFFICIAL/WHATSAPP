@@ -256,6 +256,15 @@ export async function redeemKey(
           isUnlimited: false,
         }),
       });
+      // Resume connection immediately if socket was previously paused
+      await fetch('/api/whatsapp/reconnect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: userUid,
+          userEmail,
+        }),
+      });
     } catch {}
   } catch (e) {
     console.warn('Firestore write warning:', e);
@@ -633,8 +642,9 @@ export async function fetchAllUsers(): Promise<any[]> {
       const isExpired = isDateExpired || data.licenseStatus === 'expired';
 
       const liveStatus = serverStatuses[uid] || {};
-      // Strict rule: if license is expired, it CANNOT be whatsappConnected!
-      const isActuallyConnected = !isExpired && Boolean(liveStatus.isConnected || data.whatsappConnected || data.botConnected);
+      // Strict rule: only show connected if live socket is actually connected AND license is not expired
+      const isActuallyConnected = !isExpired && Boolean(liveStatus.isConnected);
+      const isPaired = Boolean(liveStatus.isPaired || liveStatus.phone || data.linkedPhone || data.phone);
 
       usersMap.set(uid, {
         uid,
@@ -648,6 +658,7 @@ export async function fetchAllUsers(): Promise<any[]> {
         licenseKey: data.licenseKey || null,
         licenseExpiresAt: rawExpiresAt,
         linkedPhone: liveStatus.phone || data.linkedPhone || data.phone || null,
+        isPaired,
         whatsappConnected: isActuallyConnected,
         hasUsedTrial: Boolean(data.hasUsedTrial),
         trialClaimedAt: data.trialClaimedAt || null,
@@ -907,6 +918,8 @@ export async function claim30MinuteTrial(
       {
         licenseExpiresAt: finalExpiresAt,
         licensePlan: '⚡ 30-Minute Test (Active)',
+        licenseStatus: 'active',
+        isUnlimited: false,
         hasUsedTrial: true,
         trialClaimedAt: new Date().toISOString(),
         trialEmail: cleanEmail,
@@ -924,6 +937,29 @@ export async function claim30MinuteTrial(
       expiresAt: finalExpiresAt,
       lifetimeLocked: true,
     });
+
+    // Immediately synchronize server 24/7 watchdog with the exact 30-minute expiry
+    try {
+      await fetch('/api/whatsapp/sync-license', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: userUid,
+          userEmail: cleanEmail,
+          expiresAt: finalExpiresAt,
+          isUnlimited: false,
+        }),
+      });
+      // Resume bot connection if it was paused
+      await fetch('/api/whatsapp/reconnect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: userUid,
+          userEmail: cleanEmail,
+        }),
+      });
+    } catch {}
   } catch (err) {
     console.warn('Error saving 30-minute trial to Firestore:', err);
   }
