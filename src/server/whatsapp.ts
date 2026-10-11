@@ -552,6 +552,21 @@ class WhatsAppManager {
       this.ensureAuthDir();
       const credsPath = path.join(this.authDir, 'creds.json');
       if (!fs.existsSync(credsPath)) {
+        // First try full session files backup
+        const fullSnap = await getDoc(doc(db, 'whatsapp_sessions', 'current_session'));
+        if (fullSnap.exists()) {
+          const data = fullSnap.data();
+          if (data?.files && typeof data.files === 'object') {
+            for (const [filename, content] of Object.entries(data.files)) {
+              if (typeof content === 'string' && filename) {
+                fs.writeFileSync(path.join(this.authDir, filename), content, 'utf-8');
+              }
+            }
+            console.log(`[WhatsApp Auth] Restored ${Object.keys(data.files).length} session files from Firebase Firestore!`);
+            return;
+          }
+        }
+        // Fallback to legacy single creds document
         const snap = await getDoc(doc(db, 'whatsapp_sessions', 'current_creds'));
         if (snap.exists()) {
           const credsData = snap.data();
@@ -569,14 +584,31 @@ class WhatsAppManager {
   // Persist session credentials to Firebase Firestore so restarts/new host deployments retain connection
   private async syncCredsToFirebase() {
     try {
-      const credsPath = path.join(this.authDir, 'creds.json');
-      if (fs.existsSync(credsPath)) {
-        const raw = fs.readFileSync(credsPath, 'utf-8');
+      if (!fs.existsSync(this.authDir)) return;
+      const fileNames = fs.readdirSync(this.authDir);
+      const sessionFiles: Record<string, string> = {};
+      let hasCreds = false;
+      for (const f of fileNames) {
+        if (f.endsWith('.json') || f.endsWith('.tmp')) {
+          const content = fs.readFileSync(path.join(this.authDir, f), 'utf-8');
+          sessionFiles[f] = content;
+          if (f === 'creds.json') hasCreds = true;
+        }
+      }
+      if (hasCreds) {
         await setDoc(
-          doc(db, 'whatsapp_sessions', 'current_creds'),
-          { rawCreds: raw, updatedAt: new Date().toISOString() },
+          doc(db, 'whatsapp_sessions', 'current_session'),
+          { files: sessionFiles, updatedAt: new Date().toISOString() },
           { merge: true }
         );
+        // Also keep legacy single doc updated
+        if (sessionFiles['creds.json']) {
+          await setDoc(
+            doc(db, 'whatsapp_sessions', 'current_creds'),
+            { rawCreds: sessionFiles['creds.json'], updatedAt: new Date().toISOString() },
+            { merge: true }
+          );
+        }
       }
     } catch (e) {
       console.warn('[WhatsApp Auth] Firebase sync creds note:', e);
@@ -585,6 +617,7 @@ class WhatsAppManager {
 
   private async clearCredsFromFirebase() {
     try {
+      await deleteDoc(doc(db, 'whatsapp_sessions', 'current_session'));
       await deleteDoc(doc(db, 'whatsapp_sessions', 'current_creds'));
     } catch {}
   }
@@ -637,10 +670,10 @@ class WhatsAppManager {
           },
           logger: pinoLogger,
           printQRInTerminal: false,
-          browser: Browsers.macOS('Desktop'),
-          connectTimeoutMs: 60000,
-          defaultQueryTimeoutMs: 60000,
-          keepAliveIntervalMs: 30000,
+          browser: Browsers.ubuntu('Chrome'),
+          connectTimeoutMs: 120000,
+          defaultQueryTimeoutMs: 120000,
+          keepAliveIntervalMs: 25000,
           generateHighQualityLinkPreview: true,
           getUrlInfo: (text: string) => getUrlInfo(text),
           syncFullHistory: false,
@@ -2963,7 +2996,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
     return this.initPromise;
   }
 
-  public async requestPairingCode(rawPhoneNumber: string): Promise<string> {
+  public async requestPairingCode(rawPhoneNumber: string, force = false): Promise<string> {
     let cleanPhone = rawPhoneNumber.replace(/\D/g, '');
     if (cleanPhone.startsWith('00')) {
       cleanPhone = cleanPhone.slice(2);
@@ -2985,8 +3018,9 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
       return 'ALREADY_PAIRED';
     }
 
-    // If a valid pairing code already exists for THIS phone number, return it without clearing!
+    // If not forced and a valid pairing code already exists for THIS phone number, return it
     if (
+      !force &&
       this.currentStatus.pairingCode &&
       this.currentStatus.targetPhone === `+${cleanPhone}` &&
       (this.currentStatus.state === 'awaiting_pairing' || this.currentStatus.pairingStage === 'code_generated')

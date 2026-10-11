@@ -380,6 +380,29 @@ export default function App() {
     return () => clearInterval(timer);
   }, [pairingCode, countdown, status.isConnected]);
 
+  // Tab visibility change: auto-refresh status when user switches back from WhatsApp
+  useEffect(() => {
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') {
+        fetch('/api/whatsapp/status')
+          .then((r) => safeParseJson(r))
+          .then((data) => {
+            if (data?.status) {
+              setStatus(data.status);
+              if (data.status.pairingCode) {
+                setPairingCode(data.status.pairingCode);
+              } else if (data.status.isConnected) {
+                setPairingCode(null);
+              }
+            }
+          })
+          .catch(() => {});
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
+  }, []);
+
   // Handle URL hash, query param, keyboard shortcut, and typing 'admin dashboard' (Owner only)
   useEffect(() => {
     if (!isOwner) return;
@@ -493,8 +516,13 @@ export default function App() {
   };
 
   // Handle request pairing code
-  const handleRequestPairingCode = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
+  const handleRequestPairingCode = async (e?: React.FormEvent | boolean, forceParam = false) => {
+    let isForce = forceParam;
+    if (typeof e === 'boolean') {
+      isForce = e;
+    } else if (e && 'preventDefault' in e) {
+      e.preventDefault();
+    }
     if (!phoneNumber) return;
 
     if (!currentUser) {
@@ -539,6 +567,7 @@ export default function App() {
           phoneNumber: fullNumber,
           isExpired: licenseCheck.isExpired,
           isUnlimited: isOwner || userLicenseData.isUnlimited,
+          force: isForce,
         }),
       });
 
@@ -1294,18 +1323,30 @@ export default function App() {
                       </div>
 
                       {pairingCode && (
-                        <div className="mt-2.5 pt-2 border-t border-slate-800/80 flex items-center justify-between bg-slate-950/80 px-3 py-2 rounded-lg">
+                        <div className="mt-2.5 pt-2 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2 bg-slate-950/80 px-3 py-2 rounded-lg">
                           <span className="font-mono text-xl font-extrabold tracking-widest text-emerald-400 select-all">
                             {pairingCode}
                           </span>
-                          <button
-                            type="button"
-                            onClick={handleCopyCode}
-                            className="p-1.5 rounded-lg bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 transition-colors flex items-center gap-1 text-[11px] font-bold"
-                          >
-                            {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                            <span>{copied ? 'Copied' : 'Copy'}</span>
-                          </button>
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => handleRequestPairingCode(true)}
+                              disabled={loading}
+                              title="Generate a brand new fresh code if this one didn't work"
+                              className="p-1.5 rounded-lg bg-slate-800 text-slate-300 hover:text-white hover:bg-slate-700 transition-colors flex items-center gap-1 text-[11px] font-bold"
+                            >
+                              <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+                              <span>{loading ? 'Generating...' : 'New Code'}</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleCopyCode}
+                              className="p-1.5 rounded-lg bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 transition-colors flex items-center gap-1 text-[11px] font-bold"
+                            >
+                              {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                              <span>{copied ? 'Copied' : 'Copy'}</span>
+                            </button>
+                          </div>
                         </div>
                       )}
                     </div>

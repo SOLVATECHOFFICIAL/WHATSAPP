@@ -212,12 +212,13 @@ class CommandHandler {
       const warningsSnap = await getDocs(collection(db, 'group_warnings'));
       warningsSnap.forEach((docSnap) => {
         const d = docSnap.data();
-        if (d && docSnap.id) {
+        if (d) {
           const count = typeof d.count === 'number' ? d.count : 0;
+          const key = d.rawKey || (d.cleanGid && d.userPhone ? `${d.cleanGid}:${d.userPhone}` : docSnap.id.replace('__', ':'));
           if (count > 0) {
-            this.warnings[docSnap.id] = count;
+            this.warnings[key] = count;
           } else {
-            delete this.warnings[docSnap.id];
+            delete this.warnings[key];
           }
         }
       });
@@ -340,15 +341,25 @@ class CommandHandler {
     this.syncToFirebase('group_security', gid, this.securitySettings[gid]);
   }
 
+  private getNormalizedWarningKey(gid: string, userJid: string): { key: string; docId: string; cleanGid: string; cleanPhone: string } {
+    const cleanGid = gid.split('@')[0].replace(/\D/g, '') || gid.split('@')[0];
+    const cleanPhone = userJid.split('@')[0].split(':')[0].replace(/\D/g, '') || userJid.replace(/\D/g, '');
+    const key = `${cleanGid}:${cleanPhone}`;
+    const docId = `${cleanGid}__${cleanPhone}`;
+    return { key, docId, cleanGid, cleanPhone };
+  }
+
   public addWarning(gid: string, userJid: string): { count: number; max: number } {
-    const key = `${gid}:${userJid}`;
+    const { key, docId, cleanGid, cleanPhone } = this.getNormalizedWarningKey(gid, userJid);
     this.warnings[key] = (this.warnings[key] || 0) + 1;
     this.saveWarningsToCache();
     const max = this.securitySettings[gid]?.warnLimit || 3;
-    this.syncToFirebase('group_warnings', key, {
+    this.syncToFirebase('group_warnings', docId, {
       count: this.warnings[key],
       groupId: gid,
-      userJid,
+      cleanGid,
+      userPhone: cleanPhone,
+      rawKey: key,
       warnLimit: max,
       lastWarnedAt: new Date().toISOString(),
     });
@@ -356,26 +367,32 @@ class CommandHandler {
   }
 
   public getWarnings(gid: string, userJid: string): number {
-    return this.warnings[`${gid}:${userJid}`] || 0;
+    const { key } = this.getNormalizedWarningKey(gid, userJid);
+    return this.warnings[key] || 0;
   }
 
   public clearWarnings(gid: string, userJid: string) {
-    const key = `${gid}:${userJid}`;
+    const { key, docId, cleanGid, cleanPhone } = this.getNormalizedWarningKey(gid, userJid);
     delete this.warnings[key];
     this.saveWarningsToCache();
-    this.syncToFirebase('group_warnings', key, {
+    this.syncToFirebase('group_warnings', docId, {
       count: 0,
       groupId: gid,
-      userJid,
+      cleanGid,
+      userPhone: cleanPhone,
+      rawKey: key,
       clearedAt: new Date().toISOString(),
     });
   }
 
   public resetAllWarnings(gid: string) {
-    const keysToReset = Object.keys(this.warnings).filter((k) => k.startsWith(`${gid}:`));
+    const cleanGid = gid.split('@')[0].replace(/\D/g, '') || gid.split('@')[0];
+    const keysToReset = Object.keys(this.warnings).filter((k) => k.startsWith(`${cleanGid}:`) || k.startsWith(`${gid}:`));
     keysToReset.forEach((k) => {
       delete this.warnings[k];
-      this.syncToFirebase('group_warnings', k, {
+      const parts = k.split(':');
+      const docId = `${parts[0]}__${parts[1] || 'all'}`;
+      this.syncToFirebase('group_warnings', docId, {
         count: 0,
         groupId: gid,
         clearedAt: new Date().toISOString(),
@@ -797,7 +814,8 @@ _${groupDesc}_
         }
       }
 
-      const warningsCount = this.warnings[targetPhone] || 0;
+      const cleanGid = ctx.groupJid ? (ctx.groupJid.split('@')[0].replace(/\D/g, '') || ctx.groupJid.split('@')[0]) : '';
+      const warningsCount = cleanGid ? (this.warnings[`${cleanGid}:${targetPhone}`] || 0) : (this.warnings[targetPhone] || 0);
 
       const profilePicDisplay = picUrl
         ? 'Real Profile Photo Attached 📸'

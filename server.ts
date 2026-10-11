@@ -43,7 +43,7 @@ async function startServer() {
 
   app.post('/api/whatsapp/pair-code', async (req, res) => {
     try {
-      const { phoneNumber, isExpired = false, isUnlimited = false } = req.body;
+      const { phoneNumber, isExpired = false, isUnlimited = false, force = false } = req.body;
       if (!phoneNumber) {
         return res.status(400).json({
           success: false,
@@ -59,7 +59,7 @@ async function startServer() {
         });
       }
 
-      const pairingCode = await whatsappManager.requestPairingCode(phoneNumber);
+      const pairingCode = await whatsappManager.requestPairingCode(phoneNumber, Boolean(force));
       res.json({
         success: true,
         pairingCode,
