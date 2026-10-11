@@ -43,6 +43,8 @@ import { AuthModal } from './components/AuthModal';
 import { UserAccountNav } from './components/UserAccountNav';
 import { AdminDashboard } from './components/AdminDashboard';
 import { GroupAdminPanel } from './components/GroupAdminPanel';
+import { PWAInstallButton } from './components/PWAInstallButton';
+import { OfflineIndicator } from './components/OfflineIndicator';
 import {
   NotificationsPanel,
   WhatsAppNotification,
@@ -328,12 +330,38 @@ export default function App() {
         isOwner || userLicenseData.isUnlimited
       );
       setRemainingTimeDisplay(info.formatted);
+
+      // Automatic disconnect if license finishes: bot runs 24/7 for life EXCEPT if license expires
+      if (info.isExpired && !(isOwner || userLicenseData.isUnlimited) && status.isConnected) {
+        console.warn('License has expired. Disconnecting bot automatically...');
+        fetch('/api/whatsapp/disconnect', { method: 'POST' }).catch(() => {});
+        setStatus((prev) => ({ ...prev, isConnected: false, state: 'disconnected' }));
+        setToastNotification({
+          id: 'lic_exp_' + Date.now(),
+          type: 'error',
+          title: '⚠️ License Expired',
+          body: 'Your license time has elapsed. The bot was automatically disconnected.',
+          timestamp: new Date().toLocaleTimeString(),
+        });
+      }
     };
 
     updateTime();
     const interval = setInterval(updateTime, 1000);
     return () => clearInterval(interval);
-  }, [userLicenseData, isOwner]);
+  }, [userLicenseData, isOwner, status.isConnected]);
+
+  // Sync active license state to server 24/7 heartbeat watchdog
+  useEffect(() => {
+    fetch('/api/whatsapp/sync-license', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        expiresAt: userLicenseData.expiresAt,
+        isUnlimited: isOwner || userLicenseData.isUnlimited,
+      }),
+    }).catch(() => {});
+  }, [userLicenseData.expiresAt, userLicenseData.isUnlimited, isOwner]);
 
   // Polling backend status and real-time notifications
   useEffect(() => {
@@ -763,17 +791,26 @@ export default function App() {
       c.desc.toLowerCase().includes(commandSearch.toLowerCase())
   );
 
-  // Loading Screen
+  // Loading / Splash Screen
   if (authLoading) {
     return (
       <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-4">
-        <div className="flex flex-col items-center gap-3">
-          <div className="w-12 h-12 rounded-2xl bg-gradient-to-tr from-emerald-500 to-teal-400 flex items-center justify-center shadow-lg shadow-emerald-950/50">
-            <Smartphone className="w-6 h-6 text-slate-950" />
+        <div className="flex flex-col items-center gap-4 text-center max-w-xs">
+          <div className="relative">
+            <div className="absolute -inset-2 bg-gradient-to-r from-emerald-500 to-teal-500 rounded-3xl blur-xl opacity-40 animate-pulse" />
+            <img
+              src="/solva.webp"
+              alt="SOLVATECH BOT"
+              className="relative w-24 h-24 rounded-2xl object-cover ring-2 ring-emerald-500/50 shadow-2xl shadow-emerald-500/30"
+            />
+          </div>
+          <div>
+            <h1 className="text-base font-extrabold text-white tracking-wide">SOLVATECH BOT</h1>
+            <p className="text-[11px] text-slate-400 mt-0.5">24/7 Multi-Device Automation Engine</p>
           </div>
           <p className="text-xs font-mono text-emerald-400 flex items-center gap-2">
             <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-            Initializing SOLVATECH Engine...
+            Initializing System...
           </p>
         </div>
       </div>
@@ -787,8 +824,13 @@ export default function App() {
         <div className="w-full sm:max-w-md bg-slate-900 sm:border border-slate-800 sm:rounded-[36px] rounded-none shadow-2xl flex flex-col h-screen sm:h-[840px] max-h-screen sm:max-h-[840px] overflow-hidden relative">
           {/* Header */}
           <div className="p-6 text-center border-b border-slate-800 bg-gradient-to-b from-slate-950 to-slate-900 shrink-0">
-            <div className="w-14 h-14 mx-auto rounded-2xl bg-gradient-to-tr from-emerald-500 to-teal-400 flex items-center justify-center shadow-lg shadow-emerald-950/60 mb-3 text-slate-950 font-black text-2xl">
-              <Smartphone className="w-7 h-7 text-slate-950" />
+            <div className="relative inline-block mb-3">
+              <div className="absolute -inset-1.5 bg-gradient-to-r from-emerald-500 to-teal-500 rounded-2xl blur opacity-40" />
+              <img
+                src="/solva.webp"
+                alt="SOLVATECH BOT"
+                className="relative w-16 h-16 rounded-2xl object-cover ring-2 ring-emerald-500/50 shadow-lg shadow-emerald-950/60"
+              />
             </div>
             <h1 className="text-xl font-extrabold text-white tracking-tight">SOLVATECH BOT</h1>
             <p className="text-xs text-slate-400 mt-1">
@@ -981,9 +1023,11 @@ export default function App() {
         <header className="shrink-0 z-40 px-3.5 pt-3 pb-2.5 bg-slate-950/95 backdrop-blur-md border-b border-slate-800/90 flex flex-col gap-2 shadow-md">
           <div className="flex items-center justify-between gap-1 sm:gap-2">
             <div className="flex items-center gap-1.5 sm:gap-2 min-w-0">
-              <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-xl bg-gradient-to-tr from-emerald-500 to-teal-400 flex items-center justify-center shadow-md shadow-emerald-950/60 shrink-0">
-                <Smartphone className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-slate-950 font-bold" />
-              </div>
+              <img
+                src="/solva.webp"
+                alt="SOLVATECH"
+                className="w-7 h-7 sm:w-8 sm:h-8 rounded-xl object-cover ring-1 ring-emerald-500/40 shadow-md shadow-emerald-950/60 shrink-0"
+              />
               <div className="min-w-0">
                 <div className="flex items-center gap-1">
                   <h1 className="font-extrabold text-xs sm:text-sm text-white tracking-tight truncate">SOLVATECH</h1>
@@ -1008,6 +1052,9 @@ export default function App() {
             </div>
 
             <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
+              {/* PWA Install Button (Compact header mode) */}
+              <PWAInstallButton variant="button" />
+
               {/* Force Immediate Refresh WhatsApp Status Button */}
               <button
                 type="button"
@@ -1144,6 +1191,9 @@ export default function App() {
           {/* TAB 1: PAIR WHATSAPP */}
           {activeTab === 'pair' && (
             <div className="space-y-4">
+              {/* Native PWA App Install Banner for Chrome, Android & iOS */}
+              <PWAInstallButton variant="banner" />
+
               {/* WhatsApp Connection Status Banner if Connected */}
               {status.isConnected && (
                 <div className="p-4 rounded-2xl bg-emerald-950/30 border border-emerald-500/40 space-y-3">
@@ -2055,6 +2105,9 @@ export default function App() {
           onClose={() => setIsAdminModalOpen(false)}
         />
       )}
+
+      {/* Offline Mode Indicator */}
+      <OfflineIndicator />
     </div>
   );
 }

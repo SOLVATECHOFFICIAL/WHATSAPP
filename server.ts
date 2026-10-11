@@ -23,6 +23,7 @@ async function startServer() {
   app.get('/solva.webp', (_req, res) => {
     const rootPath = path.resolve(__dirname, 'solva.webp');
     const pubPath = path.resolve(__dirname, 'public', 'solva.webp');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
     if (fs.existsSync(rootPath)) {
       res.setHeader('Content-Type', 'image/webp');
       return res.sendFile(rootPath);
@@ -32,6 +33,17 @@ async function startServer() {
       return res.sendFile(pubPath);
     }
     res.status(404).send('Not found');
+  });
+
+  // Sync user license with 24/7 heartbeat watchdog
+  app.post('/api/whatsapp/sync-license', (req, res) => {
+    try {
+      const { expiresAt, isUnlimited } = req.body;
+      whatsappManager.setSessionLicense(expiresAt || null, Boolean(isUnlimited));
+      res.json({ success: true, message: 'Session license synchronized with 24/7 heartbeat watchdog' });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
   });
 
   // WhatsApp Baileys API endpoints
@@ -73,6 +85,9 @@ async function startServer() {
           error: 'Cannot connect to bot: License key has expired! Please renew your license to connect.',
         });
       }
+
+      // Sync session license with 24/7 watchdog
+      whatsappManager.setSessionLicense(req.body.licenseExpiresAt || null, Boolean(isUnlimited));
 
       const pairingCode = await whatsappManager.requestPairingCode(phoneNumber, Boolean(force));
       res.json({

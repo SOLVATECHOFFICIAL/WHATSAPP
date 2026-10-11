@@ -101,8 +101,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onSuccess, onClose
       <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-md overflow-hidden shadow-2xl animate-in zoom-in-95 duration-200">
         {/* Header */}
         <div className="p-6 text-center border-b border-slate-800 bg-gradient-to-b from-slate-800/40 to-slate-900">
-          <div className="w-14 h-14 mx-auto rounded-2xl bg-gradient-to-tr from-emerald-500 to-teal-400 flex items-center justify-center shadow-lg shadow-emerald-950/50 mb-3 text-slate-950 font-black text-2xl">
-            S
+          <div className="relative inline-block mb-3">
+            <img
+              src="/solva.webp"
+              alt="SOLVATECH"
+              className="w-14 h-14 rounded-2xl object-cover ring-2 ring-emerald-500/50 shadow-lg shadow-emerald-950/50 mx-auto"
+            />
           </div>
           <h2 className="text-xl font-bold text-white tracking-tight">Sign in to SOLVATECH</h2>
           <p className="text-xs text-slate-400 mt-1">

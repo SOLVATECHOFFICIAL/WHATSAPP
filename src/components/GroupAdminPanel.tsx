@@ -486,6 +486,11 @@ export const GroupAdminPanel: React.FC<GroupAdminPanelProps> = ({
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div className="space-y-1.5">
             <div className="flex items-center gap-2 flex-wrap">
+              <img
+                src="/solva.webp"
+                alt="SOLVATECH"
+                className="w-9 h-9 rounded-xl object-cover ring-1 ring-emerald-500/40 shadow-md shrink-0"
+              />
               <span className="p-2 rounded-xl bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">
                 <Crown className="w-5 h-5" />
               </span>

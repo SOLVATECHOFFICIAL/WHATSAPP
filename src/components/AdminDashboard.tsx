@@ -715,9 +715,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
       {/* TOP COMMAND CENTER HEADER */}
       <header className="h-16 px-3 sm:px-6 bg-slate-900 border-b border-slate-800 flex items-center justify-between shrink-0 shadow-xl z-20">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-amber-500 via-emerald-500 to-teal-400 flex items-center justify-center font-black text-slate-950 shadow-lg shadow-emerald-950/60">
-            <Shield className="w-5 h-5 text-slate-950 stroke-[2.5]" />
-          </div>
+          <img
+            src="/solva.webp"
+            alt="SOLVATECH"
+            className="w-10 h-10 rounded-2xl object-cover ring-2 ring-amber-500/40 shadow-lg shadow-emerald-950/60"
+          />
           <div>
             <div className="flex items-center gap-2">
               <h1 className="font-black text-sm sm:text-base text-white tracking-wide">

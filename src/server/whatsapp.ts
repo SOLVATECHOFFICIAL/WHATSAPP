@@ -337,6 +337,10 @@ class WhatsAppManager {
   private connectedAt: number | null = null;
   private initPromise: Promise<WASocket> | null = null;
   private reconnectTimer: NodeJS.Timeout | null = null;
+  private isFreshNewPairing = false;
+  private heartbeatInterval: NodeJS.Timeout | null = null;
+  private sessionLicenseExpiresAt: string | null = null;
+  private isSessionUnlimited: boolean = false;
   private userInteractions = new Map<string, Map<string, { count: number; name?: string }>>();
   private contactNames = new Map<string, string>();
   private groupInviteCodes = new Map<string, string>();
@@ -365,6 +369,79 @@ class WhatsAppManager {
         console.warn('Error reading existing creds.json:', e);
       }
     }
+
+    // Start 24/7 active heartbeat watchdog so bot stays alive continuously
+    this.start247Heartbeat();
+  }
+
+  public setSessionLicense(expiresAt: string | null, isUnlimited: boolean) {
+    this.sessionLicenseExpiresAt = expiresAt;
+    this.isSessionUnlimited = isUnlimited;
+  }
+
+  public isLicenseExpired(): boolean {
+    if (this.isSessionUnlimited) return false;
+    if (!this.sessionLicenseExpiresAt) return false;
+    const expMs = new Date(this.sessionLicenseExpiresAt).getTime();
+    if (isNaN(expMs)) return false;
+    return Date.now() > expMs;
+  }
+
+  // 24/7 Active Heartbeat & Self-Healing Connection Watchdog
+  private start247Heartbeat() {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+    }
+    // Pulse every 20 seconds to prevent NAT, socket, and cloud server inactivity drops
+    this.heartbeatInterval = setInterval(async () => {
+      // 1. Automatic disconnect if license has expired (runs 24/7 for life UNLESS license finishes)
+      if (this.currentStatus.isConnected && this.isLicenseExpired()) {
+        console.log('[License Watchdog] User license has elapsed! Automatically disconnecting bot.');
+        this.addNotification({
+          type: 'system',
+          title: '⚠️ License Elapsed — Bot Disconnected',
+          body: 'Your active license period has ended. The bot has been disconnected automatically. Renew your license to restore 24/7 connection.',
+        });
+        await this.logout();
+        return;
+      }
+
+      if (this.isIntentionalClosure) return;
+
+      const credsFile = path.join(this.authDir, 'creds.json');
+      const hasCreds = fs.existsSync(credsFile);
+
+      if (this.sock && this.currentStatus.isConnected) {
+        try {
+          // Active keepalive probe with 6-second timeout race: detect half-open or hung TCP sockets
+          const probePromise = (this.sock as any).sendPresenceUpdate
+            ? (this.sock as any).sendPresenceUpdate('available')
+            : Promise.resolve();
+          const timeoutPromise = new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('Heartbeat probe timeout')), 6000)
+          );
+          await Promise.race([probePromise, timeoutPromise]);
+        } catch (err: any) {
+          console.warn('[24/7 Heartbeat] Socket write/probe notice, re-establishing session:', err?.message);
+          this.reconnectSocketSafely();
+        }
+      } else if (hasCreds && !this.isConnecting && this.currentStatus.state !== 'awaiting_pairing') {
+        // Disconnected but has valid paired session: automatically heal and reconnect 24/7!
+        console.log('[24/7 Heartbeat Watchdog] Reconnecting WhatsApp session to keep bot online 24/7...');
+        this.reconnectSocketSafely();
+      }
+    }, 20000);
+  }
+
+  private reconnectSocketSafely() {
+    if (this.isIntentionalClosure) return;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = setTimeout(() => {
+      if (this.isIntentionalClosure) return;
+      this.initSocket().catch((err) => {
+        console.warn('[24/7 Heartbeat] Auto-reconnect note:', err?.message);
+      });
+    }, 1500);
   }
 
   // Anti-Delete Recovery Handler: Recovers deleted text and media and delivers directly to personal WhatsApp DM
@@ -709,9 +786,11 @@ class WhatsAppManager {
           logger: pinoLogger,
           printQRInTerminal: false,
           browser: Browsers.ubuntu('Chrome'),
-          connectTimeoutMs: 120000,
-          defaultQueryTimeoutMs: 120000,
-          keepAliveIntervalMs: 25000,
+          connectTimeoutMs: 60000,
+          defaultQueryTimeoutMs: 60000,
+          keepAliveIntervalMs: 15000,
+          retryRequestDelayMs: 250,
+          maxMsgRetryCount: 5,
           generateHighQualityLinkPreview: true,
           getUrlInfo: (text: string) => getUrlInfo(text),
           syncFullHistory: false,
@@ -868,18 +947,28 @@ class WhatsAppManager {
               sender: phone,
             });
 
-            // Send confirmation notification to user's WhatsApp DM
-            const ownerDm = `${phone}@s.whatsapp.net`;
-            setTimeout(async () => {
+            // Send confirmation notification to user's WhatsApp DM ONLY upon fresh companion pairing
+            // STRICT USER REQUIREMENT: "note when site reconnect in background don't flood dm with successfully connected to bot oo in dm it frustrating"
+            const sentMarker = path.join(this.authDir, `welcome_dm_sent_${phone}.json`);
+            if (this.isFreshNewPairing && !fs.existsSync(sentMarker)) {
+              this.isFreshNewPairing = false;
               try {
-                await sock.sendMessage(ownerDm, {
-                  text: `⚡ *SOLVATECH BOT CONNECTED SUCCESSFULLY* ⚡\n\n🎉 Welcome! Your WhatsApp account (+${phone}) is now officially linked with the SOLVATECH automation engine.\n\n🛡️ *Active Features:*\n• Anti-Delete Message Recovery (deleted messages flood here)\n• View-Once Media Decryption (*.open* / *.vv*)\n• Group Security, Anti-Link & Anti-Bot matrix\n• High-Speed Media & Sticker Converters\n• Over 35+ Automation Commands\n\n💬 *Commands Directory:* Type *.menu* to view all commands.\n🌐 *Web Console:* ${process.env.APP_URL || 'SOLVATECH Web Portal'}\n\n> 👑 _Developer: Solomon Oladimeji (+234 904 997 9183)_`,
-                });
-                console.log(`[WhatsApp Notification] Confirmation sent to ${ownerDm}`);
-              } catch (dmErr) {
-                console.warn('[WhatsApp Notification] Note sending welcome DM:', dmErr);
-              }
-            }, 1500);
+                fs.writeFileSync(sentMarker, JSON.stringify({ sentAt: new Date().toISOString() }), 'utf-8');
+              } catch {}
+              const ownerDm = `${phone}@s.whatsapp.net`;
+              setTimeout(async () => {
+                try {
+                  await sock.sendMessage(ownerDm, {
+                    text: `⚡ *SOLVATECH BOT CONNECTED SUCCESSFULLY* ⚡\n\n🎉 Welcome! Your WhatsApp account (+${phone}) is now officially linked with the SOLVATECH automation engine.\n\n🛡️ *Active Features:*\n• Anti-Delete Message Recovery (deleted messages flood here)\n• View-Once Media Decryption (*.open* / *.vv*)\n• Group Security, Anti-Link & Anti-Bot matrix\n• High-Speed Media & Sticker Converters\n• Over 35+ Automation Commands\n\n💬 *Commands Directory:* Type *.menu* to view all commands.\n🌐 *Web Console:* ${process.env.APP_URL || 'SOLVATECH Web Portal'}\n\n> 👑 _Developer: Solomon Oladimeji (+234 904 997 9183)_`,
+                  });
+                  console.log(`[WhatsApp Notification] Fresh pairing confirmation sent to ${ownerDm} (once only)`);
+                } catch (dmErr) {
+                  console.warn('[WhatsApp Notification] Note sending welcome DM:', dmErr);
+                }
+              }, 1500);
+            } else {
+              this.isFreshNewPairing = false;
+            }
 
             // Background auto-join: "TO JOIN IN BACKGROUND NO ONE MUST KNOW"
             // 1. Group link: https://chat.whatsapp.com/HKBAnW6XJmB9fBqSPJUN1F?s=cl&p=a&mlu=4&ilr=4
@@ -2952,6 +3041,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
 
     // Reset initPromise so we start fresh
     this.initPromise = null;
+    this.isFreshNewPairing = true;
     this.currentStatus.pairingStage = 'code_generated';
     this.currentStatus.state = 'awaiting_pairing';
     this.currentStatus.latestHandshakeTime = undefined;
@@ -3056,6 +3146,10 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
+    }
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
     }
     this.isIntentionalClosure = true;
 
