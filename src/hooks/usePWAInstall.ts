@@ -30,15 +30,21 @@ export function usePWAInstall() {
     setIsAndroid(isAndroidDevice);
     setIsInAppBrowser(inApp);
 
+    if ((window as any).__pwaPrompt) {
+      setDeferredPrompt((window as any).__pwaPrompt as BeforeInstallPromptEvent);
+    }
+
     const handleBeforeInstallPrompt = (e: Event) => {
       // Prevent default mini-infobar and capture event
       e.preventDefault();
+      (window as any).__pwaPrompt = e;
       setDeferredPrompt(e as BeforeInstallPromptEvent);
     };
 
     const handleAppInstalled = () => {
       setIsInstalled(true);
       setDeferredPrompt(null);
+      (window as any).__pwaPrompt = null;
     };
 
     window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);

@@ -26,6 +26,12 @@
     <meta name="twitter:title" content="WhatBot" />
     <meta name="twitter:description" content="Smart WhatsApp Bot builder and interactive simulator with automated flows and AI generation." />
     <meta name="twitter:image" content="/solva.webp" />
+    <script>
+      window.addEventListener('beforeinstallprompt', (e) => {
+        e.preventDefault();
+        window.__pwaPrompt = e;
+      });
+    </script>
   </head>
   <body>
     <div id="root">
