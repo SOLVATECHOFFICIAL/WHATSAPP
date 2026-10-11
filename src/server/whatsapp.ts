@@ -206,10 +206,10 @@ export interface WhatsAppNotification {
   data?: any;
 }
 
-export type PairingStage = 'idle' | 'code_generated' | 'pairing_handshake' | 'connected';
+export type PairingStage = 'idle' | 'code_generated' | 'pairing_handshake' | 'connected' | 'expired';
 
 export interface WhatsAppStatus {
-  state: 'disconnected' | 'connecting' | 'awaiting_pairing' | 'pairing_handshake' | 'connected';
+  state: 'disconnected' | 'connecting' | 'awaiting_pairing' | 'pairing_handshake' | 'connected' | 'expired';
   isConnected: boolean;
   pairingStage: PairingStage;
   pairingCode?: string;
@@ -219,6 +219,8 @@ export interface WhatsAppStatus {
   connectedAt?: number;
   lastError?: string;
   latestHandshakeTime?: string;
+  isExpired?: boolean;
+  licenseExpiresAt?: string | null;
   user?: {
     id: string;
     name?: string;
@@ -482,20 +484,32 @@ export class WhatsAppManager {
     }
   }
 
+  public isOwnerEmail(): boolean {
+    const email = (this.userEmail || '').trim().toLowerCase();
+    const id = (this.userId || '').trim().toLowerCase();
+    return (
+      email === 'awoyinfasolomon1@gmail.com' ||
+      id === 'owner_solomon' ||
+      id === 'awoyinfasolomon1_gmail_com'
+    );
+  }
+
   public setSessionLicense(expiresAt: string | null, isUnlimited: boolean) {
-    if (expiresAt || isUnlimited) {
-      this.sessionLicenseExpiresAt = expiresAt;
-      this.isSessionUnlimited = isUnlimited;
-      this.saveSessionLicense();
-    }
+    this.sessionLicenseExpiresAt = expiresAt;
+    this.isSessionUnlimited = Boolean(isUnlimited);
+    this.saveSessionLicense();
   }
 
   public isLicenseExpired(): boolean {
-    if (this.isSessionUnlimited) return false;
-    if (!this.sessionLicenseExpiresAt) return false;
+    if (this.isOwnerEmail() || this.isSessionUnlimited) return false;
+    if (!this.sessionLicenseExpiresAt) {
+      // Unlicensed non-owner/non-unlimited accounts cannot run bot
+      return true;
+    }
     const expMs = new Date(this.sessionLicenseExpiresAt).getTime();
-    if (isNaN(expMs)) return false;
-    return Date.now() > expMs;
+    if (isNaN(expMs)) return true;
+    // Strict countdown down to the exact millisecond/minute!
+    return Date.now() >= expMs;
   }
 
   // 24/7 Active Heartbeat & Self-Healing Connection Watchdog
@@ -503,17 +517,23 @@ export class WhatsAppManager {
     if (this.heartbeatInterval) {
       clearInterval(this.heartbeatInterval);
     }
-    // Pulse every 20 seconds to prevent NAT, socket, and cloud server inactivity drops
+    // Audit every 10 seconds: strictly enforce expiration and keep healthy sockets online 24/7
     this.heartbeatInterval = setInterval(async () => {
-      // 1. Automatic disconnect if license has expired (runs 24/7 for life UNLESS license finishes)
-      if (this.currentStatus.isConnected && this.isLicenseExpired()) {
-        console.log('[License Watchdog] User license has elapsed! Automatically disconnecting bot.');
-        this.addNotification({
-          type: 'system',
-          title: '⚠️ License Elapsed — Bot Disconnected',
-          body: 'Your active license period has ended. The bot has been disconnected automatically. Renew your license to restore 24/7 connection.',
-        });
-        await this.logout();
+      // 1. Strict automatic disconnect the instant license expires
+      if (this.isLicenseExpired()) {
+        if (this.currentStatus.isConnected) {
+          console.log(`[License Watchdog] License for user ${this.userId} has expired! Automatically disconnecting bot...`);
+          this.currentStatus.isConnected = false;
+          this.currentStatus.state = 'expired';
+          this.currentStatus.pairingStage = 'expired';
+          this.currentStatus.isExpired = true;
+          this.addNotification({
+            type: 'system',
+            title: '⚠️ License Expired — Bot Disconnected',
+            body: 'Your active license period has ended. The bot has been disconnected automatically. Renew your license on the website to restore 24/7 connection.',
+          });
+          await this.logout();
+        }
         return;
       }
 
@@ -522,35 +542,24 @@ export class WhatsAppManager {
       const credsFile = path.join(this.authDir, 'creds.json');
       const hasCreds = fs.existsSync(credsFile);
 
+      // Passive socket check: if socket is live, verify connection is healthy
       if (this.sock && this.currentStatus.isConnected) {
-        try {
-          // Active keepalive probe with 6-second timeout race: detect half-open or hung TCP sockets
-          const probePromise = (this.sock as any).sendPresenceUpdate
-            ? (this.sock as any).sendPresenceUpdate('available')
-            : Promise.resolve();
-          const timeoutPromise = new Promise((_, reject) =>
-            setTimeout(() => reject(new Error('Heartbeat probe timeout')), 6000)
-          );
-          await Promise.race([probePromise, timeoutPromise]);
-        } catch (err: any) {
-          console.warn('[24/7 Heartbeat] Socket write/probe notice, re-establishing session:', err?.message);
-          this.reconnectSocketSafely();
-        }
+        // Socket is open and functioning normally. No aggressive timeouts that kill healthy connections!
       } else if (hasCreds && !this.isConnecting && this.currentStatus.state !== 'awaiting_pairing') {
-        // Disconnected but has valid paired session: automatically heal and reconnect 24/7!
-        console.log('[24/7 Heartbeat Watchdog] Reconnecting WhatsApp session to keep bot online 24/7...');
+        // Disconnected but has valid paired credentials and unexpired license: auto-reconnect 24/7!
+        console.log(`[24/7 Watchdog] Reconnecting WhatsApp session for ${this.userId} to keep bot online 24/7...`);
         this.reconnectSocketSafely();
       }
-    }, 20000);
+    }, 10000);
   }
 
   private reconnectSocketSafely() {
-    if (this.isIntentionalClosure) return;
+    if (this.isIntentionalClosure || this.isLicenseExpired()) return;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = setTimeout(() => {
-      if (this.isIntentionalClosure) return;
+      if (this.isIntentionalClosure || this.isLicenseExpired()) return;
       this.initSocket().catch((err) => {
-        console.warn('[24/7 Heartbeat] Auto-reconnect note:', err?.message);
+        console.warn(`[24/7 Watchdog] Auto-reconnect note for ${this.userId}:`, err?.message);
       });
     }, 1500);
   }
@@ -656,6 +665,18 @@ export class WhatsAppManager {
   }
 
   public getStatus(): WhatsAppStatus {
+    const isExpired = this.isLicenseExpired();
+    this.currentStatus.isExpired = isExpired;
+    this.currentStatus.licenseExpiresAt = this.sessionLicenseExpiresAt;
+
+    if (isExpired) {
+      this.currentStatus.isConnected = false;
+      this.currentStatus.state = 'expired';
+      this.currentStatus.pairingStage = 'expired';
+      this.currentStatus.pairingCode = undefined;
+      return this.currentStatus;
+    }
+
     const credsFile = path.join(this.authDir, 'creds.json');
     if (fs.existsSync(credsFile)) {
       try {
@@ -685,6 +706,10 @@ export class WhatsAppManager {
           }
         }
       } catch {}
+    } else if (this.sock && this.currentStatus.isConnected) {
+      this.currentStatus.isConnected = true;
+      this.currentStatus.state = 'connected';
+      this.currentStatus.pairingStage = 'connected';
     } else if (!this.isConnecting && this.currentStatus.state !== 'awaiting_pairing') {
       this.currentStatus.isConnected = false;
       if (this.currentStatus.state === 'connected') {
@@ -1062,17 +1087,18 @@ export class WhatsAppManager {
               this.currentStatus.pairingStage === 'code_generated' ||
               this.currentStatus.pairingStage === 'pairing_handshake' ||
               this.currentStatus.state === 'awaiting_pairing';
-            const wasEverConnected = this.currentStatus.isConnected || this.connectedAt !== null;
+            const credsFile = path.join(this.authDir, 'creds.json');
+            const hasLocalCreds = fs.existsSync(credsFile);
 
-            this.currentStatus.isConnected = false;
             this.isConnecting = false;
             this.sock = null;
 
             // Never wipe session credentials or clear pairing code while user is entering pairing code!
-            // Only trigger logout if the user was previously connected and WhatsApp explicitly logged them out.
+            // Only trigger logout if the user was previously connected and WhatsApp explicitly logged them out (401 / loggedOut).
             const shouldLogout = !isAwaitingPairing && wasEverConnected && (statusCode === DisconnectReason.loggedOut || statusCode === 401 || reason === '401');
 
             if (shouldLogout) {
+              this.currentStatus.isConnected = false;
               this.currentStatus.state = 'disconnected';
               this.currentStatus.pairingStage = 'idle';
               this.currentStatus.pairingCode = undefined;
@@ -1083,7 +1109,19 @@ export class WhatsAppManager {
               });
               await this.logout();
             } else {
-              // NEVER clear session, credentials, or pairing code during pairing or normal reconnects!
+              // Transient network drop (408, 428, 515 restartRequired, cloud network blip):
+              // STRICT RULE: If account has paired credentials and license is unexpired, IT STAYS LINKED FOR LIFE!
+              if (hasLocalCreds && !this.isLicenseExpired()) {
+                this.currentStatus.isConnected = true;
+                this.currentStatus.state = 'connected';
+                this.currentStatus.pairingStage = 'connected';
+              } else {
+                this.currentStatus.isConnected = false;
+                if (!isAwaitingPairing) {
+                  this.currentStatus.state = 'disconnected';
+                }
+              }
+
               if (statusCode === 515 || statusCode === DisconnectReason.restartRequired) {
                 console.log('[Baileys Connection] Connection closed (code: 515 restartRequired). Device pairing accepted by phone, restarting connection immediately...');
                 this.currentStatus.pairingStage = 'connected';
@@ -1103,10 +1141,7 @@ export class WhatsAppManager {
                   });
                 }, 800);
               } else {
-                if (!isAwaitingPairing) {
-                  this.currentStatus.state = 'disconnected';
-                }
-                console.log(`[Baileys Connection] Connection closed (code: ${statusCode || 'unknown'}). Keeping session and pairing code intact, auto-reconnecting...`);
+                console.log(`[Baileys Connection] Connection closed (code: ${statusCode || 'unknown'}). Keeping session and credentials intact, auto-reconnecting 24/7 in background...`);
                 if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
                 this.reconnectTimer = setTimeout(() => {
                   this.initSocket().catch((err) => {
@@ -1640,6 +1675,20 @@ export class WhatsAppManager {
 
           // Command handling: Prefix '.'
           if (text.startsWith('.')) {
+            // STRICT LICENSE DURATION & EXPIRATION CHECK:
+            // Once license or free trial elapses, all commands are strictly blocked
+            if (this.isLicenseExpired()) {
+              console.log(`[License Enforcement] User ${this.userId} license has expired! Blocking command execution.`);
+              if (isOwner) {
+                try {
+                  await sock.sendMessage(remoteJid, {
+                    text: `⛔ *[SOLVATECH LICENSE EXPIRED]* ⛔\n\nYour active bot license duration has finished.\nAll commands and automation have been paused.\n\n👉 Please visit the website to renew your license key or contact Solomon Oladimeji (+234 904 997 9183).`,
+                  }, { quoted: msg });
+                } catch {}
+              }
+              return;
+            }
+
             const parts = text.slice(1).trim().split(/\s+/);
             const command = parts[0]?.toLowerCase();
             const args = parts.slice(1);
@@ -3936,6 +3985,14 @@ export class WhatsAppSessionManager {
               });
               await session.logout();
             }
+            try {
+              await setDoc(doc(db, 'users', uid), {
+                whatsappConnected: false,
+                botConnected: false,
+                licenseStatus: 'expired',
+                updatedAt: new Date().toISOString(),
+              }, { merge: true });
+            } catch {}
             continue;
           }
 
@@ -3946,11 +4003,14 @@ export class WhatsAppSessionManager {
 
           if (status.isConnected) {
             activeOnline++;
-            // Active socket: send presence to ensure connection remains alive and healthy
             try {
-              if ((session as any).sock?.sendPresenceUpdate) {
-                await (session as any).sock.sendPresenceUpdate('available');
-              }
+              await setDoc(doc(db, 'users', uid), {
+                whatsappConnected: true,
+                botConnected: true,
+                linkedPhone: status.user?.phone || status.targetPhone || null,
+                licenseStatus: isUnlimited ? 'unlimited' : 'active',
+                updatedAt: new Date().toISOString(),
+              }, { merge: true });
             } catch {}
           } else if (hasLocalCreds) {
             try {
@@ -3962,6 +4022,14 @@ export class WhatsAppSessionManager {
                 session.initSocket().catch((err) => {
                   console.warn(`[Global 5-Min Sync] Reconnect error for ${uid}:`, err?.message);
                 });
+                try {
+                  await setDoc(doc(db, 'users', uid), {
+                    whatsappConnected: true,
+                    botConnected: true,
+                    licenseStatus: isUnlimited ? 'unlimited' : 'active',
+                    updatedAt: new Date().toISOString(),
+                  }, { merge: true });
+                } catch {}
               }
             } catch {}
           }

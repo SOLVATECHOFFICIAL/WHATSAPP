@@ -244,6 +244,19 @@ export async function redeemKey(
       },
       { merge: true }
     );
+    // Synchronize server license watchdog immediately
+    try {
+      await fetch('/api/whatsapp/sync-license', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: userUid,
+          userEmail,
+          expiresAt: newExpiresAt,
+          isUnlimited: false,
+        }),
+      });
+    } catch {}
   } catch (e) {
     console.warn('Firestore write warning:', e);
   }
@@ -308,6 +321,19 @@ export async function toggleUserUnlimited(
   } catch (err) {
     console.warn('Firestore toggle unlimited:', err);
   }
+
+  try {
+    await fetch('/api/whatsapp/sync-license', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: userUid,
+        userEmail: email,
+        expiresAt: enableUnlimited ? null : new Date().toISOString(),
+        isUnlimited: enableUnlimited,
+      }),
+    });
+  } catch {}
 
   return enableUnlimited;
 }
@@ -378,6 +404,19 @@ export async function grantUserExtraDays(
     console.error('Error granting extra days in Firestore:', e);
   }
 
+  try {
+    await fetch('/api/whatsapp/sync-license', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: userUid,
+        userEmail,
+        expiresAt: newExpiresAt,
+        isUnlimited: false,
+      }),
+    });
+  } catch {}
+
   return {
     success: true,
     expiresAt: newExpiresAt,
@@ -418,6 +457,19 @@ export async function revokeUserAccess(
   } catch (e) {
     console.warn('Error revoking in Firestore:', e);
   }
+
+  try {
+    await fetch('/api/whatsapp/sync-license', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: userUid,
+        userEmail: userEmail || '',
+        expiresAt: nowIso,
+        isUnlimited: false,
+      }),
+    });
+  } catch {}
 
   return {
     success: true,
@@ -547,29 +599,59 @@ export async function deleteSingleLicense(key: string): Promise<{ success: boole
 }
 
 // Fetch all registered users for admin with comprehensive state coverage
+// Fetch all registered users for admin with accurate real-time state coverage
 export async function fetchAllUsers(): Promise<any[]> {
   const usersMap = new Map<string, any>();
+  let serverStatuses: Record<string, any> = {};
 
-  // 1. Fetch from Firestore if available
+  // Query live multi-user WhatsApp sessions from the server
+  try {
+    const res = await fetch('/api/admin/users-status');
+    if (res.ok) {
+      const data = await res.json();
+      if (data?.statuses) {
+        serverStatuses = data.statuses;
+      }
+    }
+  } catch (err) {
+    console.debug('Could not fetch server live user statuses:', err);
+  }
+
+  const now = Date.now();
+
+  // 1. Fetch from Firestore users collection
   try {
     const colRef = collection(db, 'users');
     const snap = await getDocs(colRef);
     snap.forEach((d) => {
       const data = d.data() || {};
-      usersMap.set(d.id, {
-        uid: d.id,
-        email: data.email || `${d.id}@solvatech.com`,
+      const uid = d.id;
+      const isUnlimited = Boolean(data.isUnlimited || (data.email && data.email.toLowerCase() === OWNER_EMAIL.toLowerCase()));
+      const rawExpiresAt = data.licenseExpiresAt || null;
+      const expMs = rawExpiresAt ? new Date(rawExpiresAt).getTime() : 0;
+      const isDateExpired = !isUnlimited && (!rawExpiresAt || (expMs > 0 && expMs <= now));
+      const isExpired = isDateExpired || data.licenseStatus === 'expired';
+
+      const liveStatus = serverStatuses[uid] || {};
+      // Strict rule: if license is expired, it CANNOT be whatsappConnected!
+      const isActuallyConnected = !isExpired && Boolean(liveStatus.isConnected || data.whatsappConnected || data.botConnected);
+
+      usersMap.set(uid, {
+        uid,
+        email: data.email || `${uid}@solvatech.com`,
         displayName: data.displayName || data.email?.split('@')[0] || 'Solvatech User',
-        isUnlimited: !!data.isUnlimited,
-        licensePlan: data.licensePlan || (data.isUnlimited ? '👑 Unlimited Lifetime (Admin Granted)' : 'Expired Plan'),
-        licenseStatus: data.licenseStatus || (data.isUnlimited ? 'unlimited' : 'expired'),
+        isUnlimited,
+        licensePlan: isUnlimited
+          ? '👑 Unlimited Lifetime (Admin Granted)'
+          : (isExpired ? 'Expired Plan' : (data.licensePlan || 'Active Plan')),
+        licenseStatus: isUnlimited ? 'unlimited' : (isExpired ? 'expired' : 'active'),
         licenseKey: data.licenseKey || null,
-        licenseExpiresAt: data.licenseExpiresAt || null,
-        linkedPhone: data.linkedPhone || data.phone || null,
-        whatsappConnected: !!data.whatsappConnected,
-        hasUsedTrial: !!data.hasUsedTrial,
+        licenseExpiresAt: rawExpiresAt,
+        linkedPhone: liveStatus.phone || data.linkedPhone || data.phone || null,
+        whatsappConnected: isActuallyConnected,
+        hasUsedTrial: Boolean(data.hasUsedTrial),
         trialClaimedAt: data.trialClaimedAt || null,
-        commandsRun: data.commandsRun || Math.floor(Math.random() * 45) + 5,
+        commandsRun: data.commandsRun || 0,
         lastLogin: data.lastLogin || data.updatedAt || new Date().toISOString(),
         memberSince: data.createdAt || '2026-10-01',
       });
@@ -578,14 +660,15 @@ export async function fetchAllUsers(): Promise<any[]> {
     console.warn('Firestore fetch users:', err);
   }
 
-  // 2. Ensure full spectrum of realistic user states (Online WhatsApp, License Active Offline, 30-Min Trial, Unlimited, Expired)
-  const defaultSeeds: any[] = [
-    {
+  // 2. Ensure Master Founder Account is always listed
+  if (!usersMap.has('owner_solomon')) {
+    const ownerLive = serverStatuses['owner_solomon'] || serverStatuses['default'] || {};
+    usersMap.set('owner_solomon', {
       uid: 'owner_solomon',
       email: OWNER_EMAIL,
       displayName: 'Solomon Oladimeji (Owner)',
-      linkedPhone: '2349049969242',
-      whatsappConnected: true,
+      linkedPhone: ownerLive.phone || '2349049979183',
+      whatsappConnected: Boolean(ownerLive.isConnected),
       licenseKey: 'SOLVA-OWNER-UNLIMITED-MASTER',
       licensePlan: '👑 Unlimited Lifetime (Owner Master)',
       licenseStatus: 'unlimited',
@@ -595,129 +678,10 @@ export async function fetchAllUsers(): Promise<any[]> {
       commandsRun: 428,
       lastLogin: new Date().toISOString(),
       memberSince: '2026-09-15',
-    },
-    {
-      uid: 'user_active_online_1',
-      email: 'emeka.nwosu@gmail.com',
-      displayName: 'Emeka Nwosu (Online Bot)',
-      linkedPhone: '2348085431290',
-      whatsappConnected: true,
-      licenseKey: 'SOLVA-1M-ACTIVE-9921',
-      licensePlan: '💎 1 Month Pro Bot',
-      licenseStatus: 'active',
-      isUnlimited: false,
-      licenseExpiresAt: new Date(Date.now() + 24 * 24 * 60 * 60 * 1000).toISOString(),
-      hasUsedTrial: true,
-      commandsRun: 182,
-      lastLogin: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
-      memberSince: '2026-09-28',
-    },
-    {
-      uid: 'user_licensed_offline_1',
-      email: 'adebayo.tunde@gmail.com',
-      displayName: 'Tunde Adebayo (License Active, Offline)',
-      linkedPhone: '2347031122334',
-      whatsappConnected: false, // License is active but WhatsApp NOT connected!
-      licenseKey: 'SOLVA-1W-7712-4411',
-      licensePlan: '⚡ 1 Week Active',
-      licenseStatus: 'active',
-      isUnlimited: false,
-      licenseExpiresAt: new Date(Date.now() + 6 * 24 * 60 * 60 * 1000).toISOString(),
-      hasUsedTrial: true,
-      commandsRun: 45,
-      lastLogin: new Date(Date.now() - 3 * 3600 * 1000).toISOString(),
-      memberSince: '2026-10-04',
-    },
-    {
-      uid: 'user_licensed_offline_2',
-      email: 'chinedu.okeke@yahoo.com',
-      displayName: 'Chinedu Okeke (License Active, Offline)',
-      linkedPhone: '2348123456789',
-      whatsappConnected: false, // Has used license, active, not connected to WhatsApp!
-      licenseKey: 'SOLVA-1M-CHIN-8899',
-      licensePlan: '💎 1 Month Pro Bot',
-      licenseStatus: 'active',
-      isUnlimited: false,
-      licenseExpiresAt: new Date(Date.now() + 19 * 24 * 60 * 60 * 1000).toISOString(),
-      hasUsedTrial: true,
-      commandsRun: 94,
-      lastLogin: new Date(Date.now() - 14 * 3600 * 1000).toISOString(),
-      memberSince: '2026-10-01',
-    },
-    {
-      uid: 'user_trial_running_1',
-      email: 'emeka.business@gmail.com',
-      displayName: 'Emeka Nwosu (On 30-Min Test)',
-      linkedPhone: '2349012345678',
-      whatsappConnected: true,
-      licenseKey: 'SOLVA-30MIN-TRIAL-NOW',
-      licensePlan: '⚡ 30-Minute Test (Active Now)',
-      licenseStatus: 'active',
-      isUnlimited: false,
-      licenseExpiresAt: new Date(Date.now() + 18 * 60 * 1000).toISOString(), // 18 minutes remaining!
-      hasUsedTrial: true,
-      trialClaimedAt: new Date(Date.now() - 12 * 60 * 1000).toISOString(),
-      commandsRun: 12,
-      lastLogin: new Date().toISOString(),
-      memberSince: '2026-10-10',
-    },
-    {
-      uid: 'user_trial_used_expired',
-      email: 'fatima.abubakar@gmail.com',
-      displayName: 'Fatima Abubakar (Trial Completed)',
-      linkedPhone: '2348098765432',
-      whatsappConnected: false,
-      licenseKey: 'SOLVA-30MIN-EXPIRED',
-      licensePlan: '⚡ 30-Minute Test (Completed)',
-      licenseStatus: 'expired',
-      isUnlimited: false,
-      licenseExpiresAt: new Date(Date.now() - 2 * 3600 * 1000).toISOString(), // Expired
-      hasUsedTrial: true,
-      commandsRun: 29,
-      lastLogin: new Date(Date.now() - 2 * 3600 * 1000).toISOString(),
-      memberSince: '2026-10-09',
-    },
-    {
-      uid: 'user_unlimited_vip_1',
-      email: 'boma.george@gmail.com',
-      displayName: 'Boma George (VIP Client)',
-      linkedPhone: '2348149876543',
-      whatsappConnected: true,
-      licenseKey: 'SOLVA-VIP-UNLIMITED-LIFETIME',
-      licensePlan: '👑 Unlimited Lifetime (Admin Granted)',
-      licenseStatus: 'unlimited',
-      isUnlimited: true,
-      hasUsedTrial: true,
-      commandsRun: 310,
-      lastLogin: new Date().toISOString(),
-      memberSince: '2026-09-20',
-    },
-    {
-      uid: 'user_new_not_tested',
-      email: 'oluwaseun.k@gmail.com',
-      displayName: 'Oluwaseun Kehinde (New User)',
-      linkedPhone: null,
-      whatsappConnected: false,
-      licenseKey: null,
-      licensePlan: 'New User (No Key)',
-      licenseStatus: 'expired',
-      isUnlimited: false,
-      licenseExpiresAt: null,
-      hasUsedTrial: false, // Has NOT used 30-minute test yet!
-      commandsRun: 0,
-      lastLogin: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
-      memberSince: '2026-10-10',
-    },
-  ];
+    });
+  }
 
-  defaultSeeds.forEach((seed) => {
-    if (!usersMap.has(seed.uid)) {
-      usersMap.set(seed.uid, seed);
-    }
-  });
-
-  const resultList = Array.from(usersMap.values());
-  return resultList;
+  return Array.from(usersMap.values());
 }
 
 // Countdown time calculator down to exact days, hours, minutes, seconds

@@ -164,9 +164,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
 
   const loadLiveStatus = async () => {
     try {
-      const [resStatus, resNotifs] = await Promise.all([
-        fetch('/api/whatsapp/status').catch(() => null),
-        fetch('/api/whatsapp/notifications').catch(() => null),
+      const ownerId = currentUserEmail || 'owner_solomon';
+      const [resStatus, resNotifs, latestUsers] = await Promise.all([
+        fetch(`/api/whatsapp/status?userId=${encodeURIComponent(ownerId)}`).catch(() => null),
+        fetch(`/api/whatsapp/notifications?userId=${encodeURIComponent(ownerId)}`).catch(() => null),
+        fetchAllUsers().catch(() => null),
       ]);
       if (resStatus && resStatus.ok) {
         const text = await resStatus.text();
@@ -181,6 +183,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
           const n = JSON.parse(text);
           if (Array.isArray(n?.notifications)) setWhatsappNotifications(n.notifications);
         }
+      }
+      if (Array.isArray(latestUsers) && latestUsers.length > 0) {
+        setUsers(latestUsers);
       }
     } catch {
       // Ignore background fetch error
@@ -613,12 +618,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
       const isUnlimited = isOwnerAccount ? true : !!u.isUnlimited;
       const remaining = calculateRemainingTime(u.licenseExpiresAt, isUnlimited);
 
-      // Online check: active Baileys socket linked to WhatsApp
+      // Online check: active Baileys socket linked to WhatsApp AND strictly unexpired license!
       const isOnline =
-        u.whatsappConnected ||
-        (whatsappStatus.isConnected &&
-          (isOwnerAccount ||
-            (u.linkedPhone && whatsappStatus.user?.phone?.includes(u.linkedPhone))));
+        !remaining.isExpired &&
+        Boolean(
+          u.whatsappConnected ||
+          (whatsappStatus.isConnected &&
+            (isOwnerAccount ||
+              (u.linkedPhone && whatsappStatus.user?.phone?.includes(u.linkedPhone))))
+        );
 
       const isTrial =
         u.licensePlan?.toLowerCase().includes('30-minute') ||
@@ -1174,6 +1182,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
                                     </p>
                                   )}
                                 </div>
+                              ) : user.isExpired ? (
+                                <div className="space-y-0.5">
+                                  <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-rose-950/60 text-rose-300 text-[10px] border border-rose-500/40 font-semibold">
+                                    <span>🔴 License Elapsed (Bot Disconnected)</span>
+                                  </span>
+                                  <p className="text-[9px] text-rose-400/80 pl-1">Plan completed</p>
+                                </div>
                               ) : user.isLicensedOffline ? (
                                 <div className="space-y-0.5">
                                   <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-teal-950/60 text-teal-300 text-[10px] border border-teal-500/30">
@@ -1184,7 +1199,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
                                 </div>
                               ) : (
                                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-950 text-slate-500 text-[10px] border border-slate-800">
-                                  <span>⚪ Disconnected</span>
+                                  <span>⚪ Disconnected (No Key)</span>
                                 </span>
                               )}
                             </td>

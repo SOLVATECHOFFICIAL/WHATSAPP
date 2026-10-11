@@ -55,10 +55,41 @@ async function startServer() {
   // Sync user license with 24/7 heartbeat watchdog
   app.post('/api/whatsapp/sync-license', (req, res) => {
     try {
-      const { expiresAt, isUnlimited } = req.body;
+      const { expiresAt, isUnlimited, userId, userEmail } = req.body;
       const session = getSessionForReq(req);
       session.setSessionLicense(expiresAt || null, Boolean(isUnlimited));
+
+      const cleanUid = userId || (req.query.userId as string) || (req.headers['x-user-id'] as string) || session.userId;
+      if (cleanUid) {
+        const store = getTrialStore();
+        if (store[cleanUid]) {
+          store[cleanUid].expiresAt = expiresAt || null;
+          saveTrialStore(store);
+        }
+      }
       res.json({ success: true, message: 'Session license synchronized with 24/7 heartbeat watchdog' });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // Admin live multi-user status sync
+  app.get('/api/admin/users-status', (_req, res) => {
+    try {
+      const allSessions = sessionManager.getAllSessions();
+      const statusMap: Record<string, any> = {};
+      for (const [uid, session] of allSessions.entries()) {
+        const status = session.getStatus();
+        statusMap[uid] = {
+          isConnected: Boolean(status.isConnected),
+          state: status.state,
+          phone: status.user?.phone || status.targetPhone || null,
+          isExpired: session.isLicenseExpired(),
+          expiresAt: (session as any).sessionLicenseExpiresAt || null,
+          isUnlimited: Boolean((session as any).isSessionUnlimited),
+        };
+      }
+      res.json({ success: true, statuses: statusMap });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
     }
@@ -490,6 +521,12 @@ async function startServer() {
       if (cleanEmail) store[cleanEmail] = record;
       saveTrialStore(store);
 
+      // Immediately synchronize WhatsApp session with the new 30-minute expiry
+      try {
+        const session = sessionManager.getSession(cleanUid, cleanEmail);
+        session.setSessionLicense(newExpiresAt, false);
+      } catch {}
+
       return res.json({
         success: true,
         message: '🎉 30-minute test activated! Your countdown has begun.',
@@ -524,13 +561,20 @@ async function startServer() {
         return res.status(400).json({ success: false, error: 'Command text is required' });
       }
 
+      const session = getSessionForReq(req);
+      if (session.isLicenseExpired() && !isOwner) {
+        return res.status(403).json({
+          success: false,
+          error: 'License expired! Your license duration has elapsed. Please renew your license key on the website to execute commands.',
+        });
+      }
+
       const cleanText = text.trim();
       const rawCmd = cleanText.startsWith('.') ? cleanText.slice(1) : cleanText;
       const parts = rawCmd.split(/\s+/);
       const command = parts[0]?.toLowerCase();
       const args = parts.slice(1);
 
-      const session = getSessionForReq(req);
       const status = session.getStatus();
       const isSimulatedGroup =
         req.body.isGroup ??
