@@ -31,7 +31,7 @@ const getEnvKey = () => {
   if (typeof process !== 'undefined' && process.env?.VITE_FIREBASE_API_KEY) {
     return process.env.VITE_FIREBASE_API_KEY;
   }
-  return "AIzaSyDCVp_T6gO6HeTDeevls9MSb9quEzU5YiM";
+  return (typeof process !== 'undefined' && process.env?.FIREBASE_API_KEY) || "";
 };
 
 export const firebaseConfig = {
