@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { db } from '../services/firebase.ts';
-import { collection, doc, setDoc, getDoc, getDocs, updateDoc } from 'firebase/firestore';
+import { collection, doc, setDoc, getDoc, getDocs, updateDoc, onSnapshot } from 'firebase/firestore';
 
 export interface CommandContext {
   command: string;
@@ -181,6 +181,41 @@ class CommandHandler {
     this.loadWarningsFromCache();
     // Asynchronously load all data from Firebase Firestore (group security, user warnings, bot settings)
     this.loadAllDataFromFirebase().catch(() => {});
+    // Real-time synchronization across all admin devices: each group has exactly one document in Firebase
+    this.setupRealtimeSecuritySync();
+  }
+
+  // Real-time synchronization: When any admin toggles an anti or welcome setting in Firebase,
+  // it immediately syncs to all other admin bots so they stay 100% in lockstep.
+  private setupRealtimeSecuritySync() {
+    try {
+      onSnapshot(
+        collection(db, 'group_security'),
+        (snapshot) => {
+          snapshot.docChanges().forEach((change) => {
+            const d = change.doc.data();
+            const gid = change.doc.id;
+            if (d && gid) {
+              this.securitySettings[gid] = {
+                antilink: d.antilink !== false,
+                antibot: d.antibot !== false,
+                antistatus: d.antistatus !== false,
+                antispam: d.antispam !== false,
+                autowelcome: d.autowelcome !== false,
+                autogoodbye: d.autogoodbye !== false,
+                warnLimit: typeof d.warnLimit === 'number' ? d.warnLimit : 3,
+              };
+            }
+          });
+          this.saveSettingsToCache();
+        },
+        (err) => {
+          console.warn('Real-time group_security snapshot listener note:', err);
+        }
+      );
+    } catch (err) {
+      console.warn('Real-time security sync listener setup note:', err);
+    }
   }
 
   private saveSettingsToCache() {
@@ -1136,6 +1171,9 @@ Message successfully pinned for 7 days by Group Admin!
       if (!ctx.isGroup) {
         return { reply: `⚠️ *[GROUP ONLY]*\nThe *.antilink* command can only be used inside a WhatsApp group.` };
       }
+      if (!ctx.isOwner && !ctx.isGroupAdmin) {
+        return { reply: `⛔ *[ACCESS DENIED]*\nOnly Group Administrators connected to the bot can configure group protection.` };
+      }
       const val = ctx.args[0]?.toLowerCase() === 'off' ? false : true;
       const gid = ctx.groupJid || 'default';
       this.setSecuritySetting(gid, 'antilink', val);
@@ -1147,6 +1185,9 @@ Message successfully pinned for 7 days by Group Admin!
     if (cmd === 'antibot') {
       if (!ctx.isGroup) {
         return { reply: `⚠️ *[GROUP ONLY]*\nThe *.antibot* command can only be used inside a WhatsApp group.` };
+      }
+      if (!ctx.isOwner && !ctx.isGroupAdmin) {
+        return { reply: `⛔ *[ACCESS DENIED]*\nOnly Group Administrators connected to the bot can configure group protection.` };
       }
       const val = ctx.args[0]?.toLowerCase() === 'off' ? false : true;
       const gid = ctx.groupJid || 'default';
@@ -1160,6 +1201,9 @@ Message successfully pinned for 7 days by Group Admin!
       if (!ctx.isGroup) {
         return { reply: `⚠️ *[GROUP ONLY]*\nThe *.antistatus* command can only be used inside a WhatsApp group.` };
       }
+      if (!ctx.isOwner && !ctx.isGroupAdmin) {
+        return { reply: `⛔ *[ACCESS DENIED]*\nOnly Group Administrators connected to the bot can configure group protection.` };
+      }
       const val = ctx.args[0]?.toLowerCase() === 'off' ? false : true;
       const gid = ctx.groupJid || 'default';
       this.setSecuritySetting(gid, 'antistatus', val);
@@ -1172,6 +1216,9 @@ Message successfully pinned for 7 days by Group Admin!
       if (!ctx.isGroup) {
         return { reply: `⚠️ *[GROUP ONLY]*\nThe *.antispam* command can only be used inside a WhatsApp group.` };
       }
+      if (!ctx.isOwner && !ctx.isGroupAdmin) {
+        return { reply: `⛔ *[ACCESS DENIED]*\nOnly Group Administrators connected to the bot can configure group protection.` };
+      }
       const val = ctx.args[0]?.toLowerCase() === 'off' ? false : true;
       const gid = ctx.groupJid || 'default';
       this.setSecuritySetting(gid, 'antispam', val);
@@ -1181,6 +1228,12 @@ Message successfully pinned for 7 days by Group Admin!
     }
 
     if (cmd === 'autowelcome' || cmd === 'welcome') {
+      if (!ctx.isGroup) {
+        return { reply: `⚠️ *[GROUP ONLY]*\nThe *.autowelcome* command can only be used inside a WhatsApp group.` };
+      }
+      if (!ctx.isOwner && !ctx.isGroupAdmin) {
+        return { reply: `⛔ *[ACCESS DENIED]*\nOnly Group Administrators connected to the bot can configure welcome greetings.` };
+      }
       const gid = ctx.groupJid || 'default';
       const val = ctx.args[0]?.toLowerCase() === 'off' ? false : true;
       this.setSecuritySetting(gid, 'autowelcome', val);
@@ -1190,6 +1243,12 @@ Message successfully pinned for 7 days by Group Admin!
     }
 
     if (cmd === 'autogoodbye' || cmd === 'goodbye') {
+      if (!ctx.isGroup) {
+        return { reply: `⚠️ *[GROUP ONLY]*\nThe *.autogoodbye* command can only be used inside a WhatsApp group.` };
+      }
+      if (!ctx.isOwner && !ctx.isGroupAdmin) {
+        return { reply: `⛔ *[ACCESS DENIED]*\nOnly Group Administrators connected to the bot can configure goodbye messages.` };
+      }
       const gid = ctx.groupJid || 'default';
       const val = ctx.args[0]?.toLowerCase() === 'off' ? false : true;
       this.setSecuritySetting(gid, 'autogoodbye', val);
@@ -1199,6 +1258,12 @@ Message successfully pinned for 7 days by Group Admin!
     }
 
     if (cmd === 'warn' || cmd === 'warnlimit') {
+      if (!ctx.isGroup) {
+        return { reply: `⚠️ *[GROUP ONLY]*\nThe *.warn* command can only be used inside a WhatsApp group.` };
+      }
+      if (!ctx.isOwner && !ctx.isGroupAdmin) {
+        return { reply: `⛔ *[ACCESS DENIED]*\nOnly Group Administrators connected to the bot can issue warnings or change warning limits.` };
+      }
       const gid = ctx.groupJid || 'default';
       const firstArg = ctx.args[0]?.toLowerCase();
       if (cmd === 'warnlimit' || firstArg === 'limit' || firstArg === 'max' || firstArg === 'set') {
@@ -1230,6 +1295,12 @@ Message successfully pinned for 7 days by Group Admin!
     }
 
     if (cmd === 'warns') {
+      if (!ctx.isGroup) {
+        return { reply: `⚠️ *[GROUP ONLY]*\nThe *.warns* command can only be used inside a WhatsApp group.` };
+      }
+      if (!ctx.isOwner && !ctx.isGroupAdmin) {
+        return { reply: `⛔ *[ACCESS DENIED]*\nOnly Group Administrators connected to the bot can inspect group warnings.` };
+      }
       const gid = ctx.groupJid || 'default';
       const targetUser = ctx.mentionedJids?.[0] || ctx.quotedParticipant || ctx.args[0] || ctx.senderNumber;
       const targetClean = targetUser.replace(/\D/g, '') || targetUser;
@@ -1242,6 +1313,12 @@ Message successfully pinned for 7 days by Group Admin!
     }
 
     if (cmd === 'clearwarns' || cmd === 'unwarn') {
+      if (!ctx.isGroup) {
+        return { reply: `⚠️ *[GROUP ONLY]*\nThe *.unwarn* command can only be used inside a WhatsApp group.` };
+      }
+      if (!ctx.isOwner && !ctx.isGroupAdmin) {
+        return { reply: `⛔ *[ACCESS DENIED]*\nOnly Group Administrators connected to the bot can reset warnings.` };
+      }
       const gid = ctx.groupJid || 'default';
       const targetUser = ctx.mentionedJids?.[0] || ctx.quotedParticipant || ctx.args[0] || ctx.senderNumber;
       const targetClean = targetUser.replace(/\D/g, '') || targetUser;
@@ -1251,6 +1328,12 @@ Message successfully pinned for 7 days by Group Admin!
     }
 
     if (cmd === 'resetwarns') {
+      if (!ctx.isGroup) {
+        return { reply: `⚠️ *[GROUP ONLY]*\nThe *.resetwarns* command can only be used inside a WhatsApp group.` };
+      }
+      if (!ctx.isOwner && !ctx.isGroupAdmin) {
+        return { reply: `⛔ *[ACCESS DENIED]*\nOnly Group Administrators connected to the bot can reset all warnings.` };
+      }
       const gid = ctx.groupJid || 'default';
       this.resetAllWarnings(gid);
       return { reply: `🔄 *[ALL WARNINGS CLEARED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nAll group member warnings have been reset to 0 for this group.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n> 🛡️ _SOLVATECH Group Defense_` };

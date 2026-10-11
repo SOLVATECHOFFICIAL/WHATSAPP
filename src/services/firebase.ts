@@ -34,8 +34,8 @@ const getEnvKey = () => {
   if (typeof process !== 'undefined' && process.env?.FIREBASE_API_KEY) {
     return process.env.FIREBASE_API_KEY;
   }
-  // Fallback to validly formatted key so Firebase Auth initializes without throwing auth/invalid-api-key
-  return "AIzaSyD-solvatech-firebase-default-key-2026";
+  // Official Firebase API Key provided for solvatechbot
+  return "AIzaSyDCVp_T6gO6HeTDeevls9MSb9quEzU5YiM";
 };
 
 export const firebaseConfig = {

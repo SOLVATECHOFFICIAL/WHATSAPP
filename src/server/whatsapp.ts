@@ -1151,9 +1151,15 @@ class WhatsAppManager {
           const isAuthorizedAdmin = isOwner || isSenderAdmin;
 
           // Group Security Enforcement (Anti-Bot, Anti-Link, Anti-Status, Anti-Spam)
-          // STRICT RULE: Only applies to regular members ("only applies to member oo")! Never applies to admins or bot owner!
+          // STRICT RULE: Only applies to regular members!
+          // AND CRITICAL RULE: On NO occasion should a regular member bot send warn messages to any group!
+          // ONLY an administrator account connected to the bot can enforce security or send warnings in that group!
           if (isGroup && !isOwner && !isSenderAdmin) {
-            const sec = commandHandler.getSecuritySettings(remoteJid);
+            const isBotAdmin = await this.isBotAdminInGroupById(remoteJid);
+            if (!isBotAdmin) {
+              // Bot account is not an admin in this group: DO NOT SEND ANY WARNING MESSAGES!
+            } else {
+              const sec = commandHandler.getSecuritySettings(remoteJid);
 
             // 1. Anti-Bot: Detect any member message starting with '.' or containing words like .at, .with, or replying to/with bot interactions
             const isWordStartingWithDot =
@@ -1337,6 +1343,7 @@ class WhatsAppManager {
               this.userMessageHistory.set(spamUserKey, recentHistory.slice(-12));
             }
           }
+        }
 
           // Command handling: Prefix '.'
           if (text.startsWith('.')) {
@@ -1355,6 +1362,10 @@ class WhatsAppManager {
             if (isGroup && isGroupCmd) {
               if (!isAuthorizedAdmin) {
                 return; // Non-admin members in group get no response
+              }
+              const isBotAdmin = await this.isBotAdminInGroupById(remoteJid);
+              if (!isBotAdmin) {
+                return; // Bot account is not an admin: on NO occasion should a member bot send admin/warn responses to groups!
               }
             }
 
@@ -2664,22 +2675,30 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
         if (action === 'add' && sec.autowelcome === false) return;
         if (action === 'remove' && sec.autogoodbye === false) return;
 
-        // Fetch group metadata with safe fallback so it NEVER blocks greeting if metadata throws
+        // Fetch group metadata
         let groupMeta: any = null;
         try {
-          groupMeta = await sock.groupMetadata(groupId);
+          groupMeta = await this.getCachedGroupMetadata(sock, groupId);
           if (groupMeta?.subject) {
             this.groupSubjectCache.set(groupId, groupMeta.subject);
           }
         } catch (fetchErr) {
-          console.warn(`[Auto-Greeting] Could not fetch live groupMetadata for ${groupId}, using cached subject:`, fetchErr);
+          console.warn(`[Auto-Greeting] Could not fetch live groupMetadata for ${groupId}:`, fetchErr);
+        }
+
+        // STRICT REQUIREMENT:
+        // "on no occasion should member send welcome or goodbye message if no admin then no message sent when new join or no warns note that"
+        // If metadata is unavailable or the bot is NOT confirmed as an admin, NEVER send welcome or goodbye!
+        if (!groupMeta || !this.isBotAdminInGroup(groupMeta)) {
+          console.log(`[Auto-Greeting] Bot account is not an admin in ${groupId}. Suppressing welcome/goodbye.`);
+          return;
         }
 
         const groupSubject =
-          groupMeta?.subject ||
+          groupMeta.subject ||
           this.groupSubjectCache.get(groupId) ||
           'WhatsApp Group';
-        const groupDesc = groupMeta?.desc || undefined;
+        const groupDesc = groupMeta.desc || undefined;
 
         // Identify connected bot phone, LID, and target credentials
         const botUserJid = sock.user?.id || (sock as any).user?.jid || sock.authState?.creds?.me?.id || '';
@@ -2688,37 +2707,8 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
         const botLidNum = (botLid.split(':')[0] || botLid.split('@')[0]).replace(/\D/g, '');
         const linkedPhoneClean = (this.currentStatus.user?.phone || this.currentStatus.targetPhone || '').replace(/\D/g, '');
 
-        // Verify connected bot has admin rights in this group (checking phone, LID, JID, and phoneNumber)
-        let isBotAdmin = true;
-        if (groupMeta?.participants && Array.isArray(groupMeta.participants) && groupMeta.participants.length > 0) {
-          const botParticipant = groupMeta.participants.find((p: any) => {
-            const pId = p.id || p.jid || '';
-            const pNum = pId.split('@')[0].split(':')[0].replace(/\D/g, '');
-            const pPhone = (p.phoneNumber || '').replace(/\D/g, '');
-            const pLid = (p.lid || '').split('@')[0].split(':')[0].replace(/\D/g, '');
-
-            return (
-              (botPhone && pNum === botPhone) ||
-              (botPhone && pPhone === botPhone) ||
-              (linkedPhoneClean && pNum === linkedPhoneClean) ||
-              (linkedPhoneClean && pPhone === linkedPhoneClean) ||
-              (botLidNum && pNum === botLidNum) ||
-              (botLidNum && pLid === botLidNum) ||
-              pId === botUserJid ||
-              (botLid && pId === botLid) ||
-              (botPhone && pId.startsWith(botPhone))
-            );
-          });
-
-          if (botParticipant) {
-            isBotAdmin = botParticipant.admin === 'admin' || botParticipant.admin === 'superadmin';
-          } else {
-            // Bot wasn't explicitly found in participant list (common with LIDs / partial metadata)
-            // Do NOT block, because the bot account is run by the group admin
-            isBotAdmin = true;
-          }
-
-          // Rule 3: If multiple admin bots are connected in this group, elect ONLY ONE to avoid duplicate messages
+        // Rule: If multiple admin bots are connected in this group, elect ONLY ONE to avoid duplicate messages
+        if (groupMeta.participants && Array.isArray(groupMeta.participants)) {
           const adminBots = groupMeta.participants.filter((p: any) => {
             const isAdmin = p.admin === 'admin' || p.admin === 'superadmin';
             if (!isAdmin) return false;
@@ -2735,12 +2725,6 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
               return;
             }
           }
-        }
-
-        // STRICT RULE: Only admin bot sends auto-welcome or auto-goodbye
-        if (!isBotAdmin) {
-          console.log(`[Auto-Greeting] Bot is confirmed not an admin in ${groupId}. Skipping greeting.`);
-          return;
         }
 
         // Filter out bot's own number so it doesn't welcome or farewell itself
@@ -3178,7 +3162,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
   }
 
   public isBotAdminInGroup(groupMeta: any): boolean {
-    if (!groupMeta || !this.sock) return true; // optimistic default
+    if (!groupMeta || !this.sock) return false;
 
     const credsMe = (this.sock as any).authState?.creds?.me || (this.sock as any).user || {};
     const botUserJid: string = credsMe.id || this.sock.user?.id || (this.sock as any).user?.jid || '';
@@ -3225,7 +3209,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
       return true;
     }
 
-    // 2. Check participants list
+    // 2. Check participants list strictly for explicit admin or superadmin role
     if (Array.isArray(groupMeta.participants)) {
       for (const p of groupMeta.participants) {
         const isAdmin = p.admin === 'admin' || p.admin === 'superadmin';
@@ -3241,24 +3225,14 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
       }
     }
 
-    // If announce mode is off, all participants can send messages anyway
-    if (!groupMeta.announce) {
-      return true;
-    }
-
+    // STRICT: Under NO circumstance is a regular member an admin!
     return false;
   }
 
   public async isBotAdminInGroupById(groupId: string): Promise<boolean> {
     if (!groupId || !this.sock || !this.currentStatus.isConnected) return false;
     try {
-      let meta: any = this.groupMetadataCache.get(groupId)?.meta;
-      if (!meta) {
-        meta = await this.sock.groupMetadata(groupId).catch(() => null);
-        if (meta) {
-          this.groupMetadataCache.set(groupId, { meta, timestamp: Date.now() });
-        }
-      }
+      const meta = await this.getCachedGroupMetadata(this.sock, groupId);
       if (!meta) return false;
       return this.isBotAdminInGroup(meta);
     } catch {
