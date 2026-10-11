@@ -1160,13 +1160,44 @@ export async function claim30MinuteTrial(
     };
   }
 
+  // Retrieve user's current expiry so we STACK instead of reset!
+  let currentExpiryTime = 0;
+  try {
+    const userRef = doc(db, 'users', userUid);
+    const userSnap = await getDoc(userRef);
+    if (userSnap.exists()) {
+      const userData = userSnap.data();
+      if (userData.licenseExpiresAt) {
+        const parsed = new Date(userData.licenseExpiresAt).getTime();
+        if (parsed > Date.now()) {
+          currentExpiryTime = parsed;
+        }
+      }
+    }
+  } catch {
+    const localUser = JSON.parse(localStorage.getItem(`solvatech_user_${userUid}`) || '{}');
+    if (localUser.licenseExpiresAt) {
+      const parsed = new Date(localUser.licenseExpiresAt).getTime();
+      if (parsed > Date.now()) currentExpiryTime = parsed;
+    }
+  }
+
+  const now = Date.now();
+  const TRIAL_DURATION_MS = 30 * 60 * 1000; // 30 Minutes
+  const baseTime = currentExpiryTime > now ? currentExpiryTime : now;
+  const newExpiresAt = new Date(baseTime + TRIAL_DURATION_MS).toISOString();
+
   let serverExpiresAt: string | null = null;
   // 1. Claim on backend persistent trial store
   try {
     const res = await fetch('/api/trial/claim', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ uid: userUid, email: userEmail }),
+      body: JSON.stringify({
+        uid: userUid,
+        email: userEmail,
+        currentExpiresAt: currentExpiryTime > now ? new Date(currentExpiryTime).toISOString() : undefined,
+      }),
     });
     const data = await res.json();
     if (!res.ok || !data.success) {
@@ -1180,9 +1211,7 @@ export async function claim30MinuteTrial(
     console.debug('Backend trial claim network note:', apiErr);
   }
 
-  const now = Date.now();
-  const TRIAL_DURATION_MS = 30 * 60 * 1000; // 30 Minutes
-  const newExpiresAt = serverExpiresAt || new Date(now + TRIAL_DURATION_MS).toISOString();
+  const finalExpiresAt = serverExpiresAt || newExpiresAt;
   const cleanEmailKey = userEmail.toLowerCase().replace(/[^a-z0-9]/g, '_');
 
   // 2. Persist to Firestore: users collection and claimed_trials collection
@@ -1191,8 +1220,8 @@ export async function claim30MinuteTrial(
     await setDoc(
       userRef,
       {
-        licenseExpiresAt: newExpiresAt,
-        licensePlan: '⚡ 30-Minute Test (Active)',
+        licenseExpiresAt: finalExpiresAt,
+        licensePlan: '⚡ 30-Minute Test (Added)',
         hasUsedTrial: true,
         trialClaimedAt: new Date().toISOString(),
         trialEmail: userEmail,
@@ -1206,7 +1235,7 @@ export async function claim30MinuteTrial(
       userUid,
       userEmail,
       claimedAt: new Date().toISOString(),
-      expiresAt: newExpiresAt,
+      expiresAt: finalExpiresAt,
     });
   } catch (err) {
     console.warn('Error saving 30-minute trial to Firestore:', err);

@@ -371,7 +371,7 @@ async function startServer() {
   // 2. Claim 30-Minute Trial
   app.post('/api/trial/claim', (req, res) => {
     try {
-      const { uid, email } = req.body;
+      const { uid, email, currentExpiresAt } = req.body;
       if (!uid && !email) {
         return res.status(400).json({ success: false, message: 'User ID or Email is required.' });
       }
@@ -389,7 +389,9 @@ async function startServer() {
       }
 
       const now = Date.now();
-      const newExpiryMs = now + 30 * 60 * 1000;
+      const existingExpiryMs = currentExpiresAt ? new Date(currentExpiresAt).getTime() : 0;
+      const baseTime = existingExpiryMs > now ? existingExpiryMs : now;
+      const newExpiryMs = baseTime + 30 * 60 * 1000;
       const newExpiresAt = new Date(newExpiryMs).toISOString();
 
       const record = {

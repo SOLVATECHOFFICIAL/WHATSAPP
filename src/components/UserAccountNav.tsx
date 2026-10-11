@@ -58,14 +58,14 @@ export const UserAccountNav: React.FC<UserAccountNavProps> = ({ user, onOpenAuth
     <div className="relative" ref={dropdownRef}>
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className="flex items-center gap-2 p-1 pl-2.5 rounded-xl bg-slate-800/80 hover:bg-slate-800 border border-slate-700/80 transition-all text-xs"
+        className="flex items-center gap-1.5 p-1 pl-2 sm:pl-2.5 rounded-xl bg-slate-800/80 hover:bg-slate-800 border border-slate-700/80 transition-all text-xs shrink-0 cursor-pointer"
       >
-        <div className="text-left hidden sm:block">
-          <p className="font-bold text-white text-[11px] leading-tight truncate max-w-[120px]">
+        <div className="text-left hidden md:block">
+          <p className="font-bold text-white text-[11px] leading-tight truncate max-w-[100px]">
             {user.displayName || 'User'}
           </p>
-          <p className="text-[10px] text-emerald-400 font-mono leading-tight">
-            Personal Account
+          <p className="text-[9px] text-emerald-400 font-mono leading-tight">
+            Personal
           </p>
         </div>
 
@@ -73,43 +73,43 @@ export const UserAccountNav: React.FC<UserAccountNavProps> = ({ user, onOpenAuth
           <img
             src={user.photoURL}
             alt="User avatar"
-            className="w-7 h-7 rounded-lg object-cover ring-1 ring-emerald-500/50"
+            className="w-6 h-6 sm:w-7 sm:h-7 rounded-lg object-cover ring-1 ring-emerald-500/50"
           />
         ) : (
-          <div className="w-7 h-7 rounded-lg bg-emerald-600 text-white font-bold flex items-center justify-center text-xs">
+          <div className="w-6 h-6 sm:w-7 sm:h-7 rounded-lg bg-emerald-600 text-white font-bold flex items-center justify-center text-xs">
             {user.displayName?.charAt(0) || 'U'}
           </div>
         )}
-        <ChevronDown className="w-3.5 h-3.5 text-slate-400" />
+        <ChevronDown className="w-3 h-3 text-slate-400 shrink-0" />
       </button>
 
       {isOpen && (
-        <div className="absolute right-0 mt-2 w-64 bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl p-3 z-50 animate-in fade-in zoom-in-95 duration-100 space-y-3">
-          <div className="pb-2.5 border-b border-slate-800 flex items-center gap-2.5">
+        <div className="absolute right-0 mt-2 w-60 sm:w-64 max-w-[calc(100vw-2rem)] bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl p-3 z-50 animate-in fade-in zoom-in-95 duration-100 space-y-3">
+          <div className="pb-2.5 border-b border-slate-800 flex items-center gap-2.5 min-w-0">
             {user.photoURL ? (
               <img
                 src={user.photoURL}
                 alt="User avatar"
-                className="w-9 h-9 rounded-xl object-cover ring-1 ring-emerald-500/50"
+                className="w-8 h-8 rounded-xl object-cover ring-1 ring-emerald-500/50 shrink-0"
               />
             ) : (
-              <div className="w-9 h-9 rounded-xl bg-emerald-600 text-white font-bold flex items-center justify-center text-sm">
+              <div className="w-8 h-8 rounded-xl bg-emerald-600 text-white font-bold flex items-center justify-center text-xs shrink-0">
                 {user.displayName?.charAt(0) || 'U'}
               </div>
             )}
-            <div className="min-w-0">
+            <div className="min-w-0 flex-1">
               <p className="font-bold text-white text-xs truncate">{user.displayName || 'Personal Account'}</p>
-              <p className="text-[11px] text-slate-400 truncate">{user.email}</p>
+              <p className="text-[10px] text-slate-400 truncate">{user.email}</p>
             </div>
           </div>
 
           {/* License Details */}
           <div className="p-2.5 rounded-xl bg-slate-950 border border-slate-800/80 space-y-1">
-            <div className="flex items-center justify-between text-[11px]">
-              <span className="text-slate-400 flex items-center gap-1">
+            <div className="flex items-center justify-between text-[11px] gap-2">
+              <span className="text-slate-400 flex items-center gap-1 shrink-0">
                 <Key className="w-3 h-3 text-amber-400" /> License:
               </span>
-              <span className="font-mono text-emerald-400 font-bold">{licenseKey}</span>
+              <span className="font-mono text-emerald-400 font-bold truncate text-[10px]">{licenseKey}</span>
             </div>
             <div className="flex items-center justify-between text-[10px] text-slate-500">
               <span>Firebase Cloud:</span>
@@ -122,10 +122,10 @@ export const UserAccountNav: React.FC<UserAccountNavProps> = ({ user, onOpenAuth
               setIsOpen(false);
               await signOutUser();
             }}
-            className="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-rose-300 hover:bg-rose-950/30 text-xs font-semibold transition-colors"
+            className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-rose-950/40 hover:bg-rose-950/60 border border-rose-500/30 text-rose-300 text-xs font-bold transition-colors cursor-pointer active:scale-98"
           >
             <LogOut className="w-3.5 h-3.5" />
-            <span>Sign Out</span>
+            <span>Sign Out / Logout</span>
           </button>
         </div>
       )}

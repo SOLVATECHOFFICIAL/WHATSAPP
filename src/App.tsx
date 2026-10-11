@@ -194,13 +194,6 @@ export default function App() {
     }
   };
 
-  const isStudioEnv =
-    typeof window !== 'undefined' &&
-    (window.location.hostname.includes('.run.app') ||
-      window.location.hostname.includes('railway.app') ||
-      window.location.hostname === 'localhost' ||
-      window.location.hostname.includes('127.0.0.1'));
-
   // STRICT RULE: Only awoyinfasolomon1@gmail.com is authorized owner/admin!
   const isOwner = Boolean(
     currentUser?.email &&
@@ -254,6 +247,11 @@ export default function App() {
       setAuthLoading(false);
 
       if (user) {
+        // Reset pairing input on switching to another user account
+        setPairingCode(null);
+        setPhoneNumber('');
+        setPairingError(null);
+
         const saved = localStorage.getItem(`solvatech_user_${user.uid}`);
         if (saved) {
           try {
@@ -306,6 +304,17 @@ export default function App() {
         } catch (e) {
           console.debug('Firestore user listener note:', e);
         }
+      } else {
+        // Clean account reset on logout
+        setPairingCode(null);
+        setPhoneNumber('');
+        setPairingError(null);
+        setUserLicenseData({
+          expiresAt: null,
+          isUnlimited: false,
+          plan: 'Trial',
+          key: null,
+        });
       }
     });
     return () => unsubscribe();
@@ -496,20 +505,6 @@ export default function App() {
       } else {
         setAuthError(err.message || 'Authentication error.');
       }
-    } finally {
-      setAuthSubmitting(false);
-    }
-  };
-
-  // Studio developer preview (Strictly for Google AI Studio environment)
-  const handleStudioDeveloperPreview = async () => {
-    setAuthSubmitting(true);
-    setAuthError(null);
-    try {
-      const user = await signInFastTrack('preview.user@solvatech.com', 'Studio Preview User');
-      setCurrentUser(user);
-    } catch (err: any) {
-      setAuthError(err.message || 'Studio preview login error');
     } finally {
       setAuthSubmitting(false);
     }
@@ -936,21 +931,6 @@ export default function App() {
                   <span>{authError}</span>
                 </div>
               )}
-
-              {/* Developer Studio Preview Mode strictly for Google AI Studio environment */}
-              {isStudioEnv && (
-                <div className="pt-2 text-center border-t border-slate-800/80">
-                  <button
-                    type="button"
-                    onClick={handleStudioDeveloperPreview}
-                    disabled={authSubmitting}
-                    className="text-[10px] text-emerald-400/80 hover:text-emerald-300 underline font-mono flex items-center justify-center gap-1 mx-auto"
-                  >
-                    <span>Developer Studio Preview Mode</span>
-                    <ArrowRight className="w-3 h-3" />
-                  </button>
-                </div>
-              )}
             </div>
 
             {/* Feature Highlights */}
@@ -971,7 +951,7 @@ export default function App() {
 
   // AUTHENTICATED DASHBOARD VIEW
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-0 sm:p-4 font-sans select-none sm:select-auto">
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex justify-center p-0 sm:py-4 font-sans select-none sm:select-auto overflow-x-hidden">
       {/* Toast Notification Banner */}
       {toastNotification && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 max-w-sm w-full px-4 animate-in slide-in-from-top duration-200">
@@ -987,7 +967,7 @@ export default function App() {
             </div>
             <button
               onClick={() => setToastNotification(null)}
-              className="text-slate-500 hover:text-white p-1 text-xs"
+              className="text-slate-500 hover:text-white p-1 text-xs cursor-pointer"
             >
               ✕
             </button>
@@ -996,19 +976,19 @@ export default function App() {
       )}
 
       {/* Main Container */}
-      <div className="w-full sm:max-w-md bg-slate-900 sm:border border-slate-800 sm:rounded-[36px] rounded-none shadow-2xl flex flex-col h-screen sm:h-[840px] max-h-screen sm:max-h-[840px] overflow-hidden relative">
-        {/* Top Header */}
-        <header className="px-4 pt-3 pb-2.5 bg-slate-950 border-b border-slate-800/80 flex flex-col gap-2 shrink-0">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-emerald-500 to-teal-400 flex items-center justify-center shadow-md shadow-emerald-950/60">
-                <Smartphone className="w-4 h-4 text-slate-950 font-bold" />
+      <div className="w-full max-w-lg mx-auto bg-slate-900 border-x sm:border border-slate-800 sm:rounded-3xl shadow-2xl flex flex-col min-h-screen relative overflow-x-hidden">
+        {/* Top Header - Stagnant Floating Bar */}
+        <header className="sticky top-0 z-40 px-3.5 pt-3 pb-2.5 bg-slate-950/95 backdrop-blur-md border-b border-slate-800/90 flex flex-col gap-2 shrink-0 shadow-md">
+          <div className="flex items-center justify-between gap-1 sm:gap-2">
+            <div className="flex items-center gap-1.5 sm:gap-2 min-w-0">
+              <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-xl bg-gradient-to-tr from-emerald-500 to-teal-400 flex items-center justify-center shadow-md shadow-emerald-950/60 shrink-0">
+                <Smartphone className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-slate-950 font-bold" />
               </div>
-              <div>
-                <div className="flex items-center gap-1.5">
-                  <h1 className="font-extrabold text-sm text-white tracking-tight">SOLVATECH</h1>
+              <div className="min-w-0">
+                <div className="flex items-center gap-1">
+                  <h1 className="font-extrabold text-xs sm:text-sm text-white tracking-tight truncate">SOLVATECH</h1>
                   <span
-                    className={`w-2 h-2 rounded-full ${
+                    className={`w-2 h-2 rounded-full shrink-0 ${
                       status.isConnected
                         ? 'bg-emerald-400 animate-pulse'
                         : status.pairingStage === 'pairing_handshake'
@@ -1017,7 +997,7 @@ export default function App() {
                     }`}
                   />
                 </div>
-                <p className="text-[10px] text-slate-400 font-mono">
+                <p className="text-[9px] sm:text-[10px] text-slate-400 font-mono truncate">
                   {status.isConnected
                     ? 'WhatsApp Linked'
                     : status.pairingStage === 'pairing_handshake'
@@ -1027,27 +1007,27 @@ export default function App() {
               </div>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
               {/* Force Immediate Refresh WhatsApp Status Button */}
               <button
                 type="button"
                 onClick={handleRefreshStatus}
                 disabled={isRefreshingStatus}
-                className="p-1.5 rounded-xl bg-slate-800/80 hover:bg-slate-800 text-slate-300 hover:text-emerald-400 border border-slate-700/80 transition-colors"
+                className="p-1 sm:p-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-800 text-slate-300 hover:text-emerald-400 border border-slate-700/80 transition-colors cursor-pointer"
                 title="Refresh WhatsApp Status Immediately"
               >
-                <RefreshCw className={`w-4 h-4 ${isRefreshingStatus ? 'animate-spin text-emerald-400' : ''}`} />
+                <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingStatus ? 'animate-spin text-emerald-400' : ''}`} />
               </button>
 
               {/* WhatsApp Live Notifications Button */}
               <button
                 onClick={() => setIsNotificationsOpen(true)}
-                className="relative p-1.5 rounded-xl bg-slate-800/80 hover:bg-slate-800 text-slate-300 hover:text-emerald-400 border border-slate-700/80 transition-colors"
+                className="relative p-1 sm:p-1.5 rounded-lg bg-slate-800/80 hover:bg-slate-800 text-slate-300 hover:text-emerald-400 border border-slate-700/80 transition-colors cursor-pointer"
                 title="Open WhatsApp Notifications Stream"
               >
-                <Bell className="w-4 h-4" />
+                <Bell className="w-3.5 h-3.5" />
                 {notifications.length > 0 && (
-                  <span className="absolute -top-1 -right-1 px-1.5 py-0.2 rounded-full bg-emerald-500 text-slate-950 font-bold text-[9px] min-w-4 text-center">
+                  <span className="absolute -top-1 -right-1 px-1 rounded-full bg-emerald-500 text-slate-950 font-bold text-[8px] min-w-3 text-center">
                     {notifications.length}
                   </span>
                 )}
@@ -1057,14 +1037,11 @@ export default function App() {
               {isOwner && (
                 <button
                   onClick={() => setIsAdminModalOpen(true)}
-                  className="px-2.5 py-1 rounded-xl bg-gradient-to-r from-amber-500/20 via-emerald-500/20 to-teal-500/20 hover:from-amber-500/30 hover:to-teal-500/30 text-amber-300 border border-amber-500/40 text-[11px] font-bold flex items-center gap-1.5 transition-all shadow-xs active:scale-95"
+                  className="px-2 py-1 rounded-lg bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[10px] font-bold flex items-center gap-1 transition-all cursor-pointer"
                   title="Open Admin Dashboard Application"
                 >
-                  <Zap className="w-3.5 h-3.5 text-amber-400 fill-amber-400" />
-                  <span>Admin App</span>
-                  <span className="px-1 py-0.2 rounded bg-amber-400/20 text-[9px] text-amber-300 font-mono">
-                    OS
-                  </span>
+                  <Zap className="w-3 h-3 text-amber-400 fill-amber-400 shrink-0" />
+                  <span className="hidden xs:inline">Admin</span>
                 </button>
               )}
 
@@ -1079,7 +1056,7 @@ export default function App() {
           {/* Real-time License Countdown Banner */}
           <button
             onClick={() => setActiveTab('license')}
-            className={`w-full px-3 py-1.5 rounded-xl border flex items-center justify-between text-left transition-all ${
+            className={`w-full px-2.5 py-1.5 rounded-xl border flex items-center justify-between text-left transition-all cursor-pointer ${
               isLicenseActive
                 ? 'bg-emerald-950/30 border-emerald-500/40 hover:bg-emerald-950/40'
                 : 'bg-rose-950/30 border-rose-500/40 hover:bg-rose-950/40'
@@ -1092,7 +1069,7 @@ export default function App() {
                 }`}
               />
               <div className="truncate">
-                <span className="text-[10px] text-slate-400 block leading-tight">License Time:</span>
+                <span className="text-[9px] text-slate-400 block leading-tight">License Time:</span>
                 <span
                   className={`text-xs font-bold font-mono ${
                     isLicenseActive ? 'text-emerald-300' : 'text-rose-300'
@@ -1107,6 +1084,61 @@ export default function App() {
               <Zap className="w-2.5 h-2.5 text-amber-400" />
             </div>
           </button>
+
+          {/* STAGNANT FLOATING TABS BAR: Always pinned at the top, never goes down when scrolling! */}
+          <div className="grid grid-cols-4 gap-1 p-1 bg-slate-900/90 rounded-xl border border-slate-800/90 text-[11px] font-bold">
+            <button
+              type="button"
+              onClick={() => setActiveTab('pair')}
+              className={`py-1.5 px-1 rounded-lg transition-all flex items-center justify-center gap-1 cursor-pointer ${
+                activeTab === 'pair'
+                  ? 'bg-emerald-500 text-slate-950 shadow-xs font-black'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <KeyRound className="w-3.5 h-3.5 shrink-0" />
+              <span>Link</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('groups')}
+              className={`py-1.5 px-1 rounded-lg transition-all flex items-center justify-center gap-1 relative cursor-pointer ${
+                activeTab === 'groups'
+                  ? 'bg-emerald-500 text-slate-950 shadow-xs font-black'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <Crown className="w-3.5 h-3.5 shrink-0" />
+              <span>Groups</span>
+              {status.isConnected && (
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('license')}
+              className={`py-1.5 px-1 rounded-lg transition-all flex items-center justify-center gap-1 cursor-pointer ${
+                activeTab === 'license'
+                  ? 'bg-emerald-500 text-slate-950 shadow-xs font-black'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <Key className="w-3.5 h-3.5 shrink-0" />
+              <span>License</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('commands')}
+              className={`py-1.5 px-1 rounded-lg transition-all flex items-center justify-center gap-1 cursor-pointer ${
+                activeTab === 'commands'
+                  ? 'bg-emerald-500 text-slate-950 shadow-xs font-black'
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <Terminal className="w-3.5 h-3.5 shrink-0" />
+              <span>Commands</span>
+            </button>
+          </div>
         </header>
 
         {/* Content Body */}
@@ -1978,8 +2010,8 @@ export default function App() {
           )}
         </div>
 
-        {/* Bottom Nav */}
-        <nav className="px-2 py-2 bg-slate-950 border-t border-slate-800/80 flex items-center justify-around shrink-0">
+        {/* Bottom Nav - Sticky Pinned */}
+        <nav className="sticky bottom-0 z-40 px-2 py-2 bg-slate-950/95 backdrop-blur-md border-t border-slate-800/80 flex items-center justify-around shrink-0 shadow-lg">
           <button
             onClick={() => setActiveTab('pair')}
             className={`flex flex-col items-center gap-1 py-1 px-2.5 rounded-xl transition-all ${

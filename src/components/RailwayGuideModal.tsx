@@ -73,9 +73,9 @@ GEMINI_API_KEY=YOUR_GEMINI_API_KEY`;
           <div className="p-3.5 rounded-2xl bg-purple-950/20 border border-purple-800/40 text-purple-300 flex items-start gap-3">
             <Shield className="w-5 h-5 shrink-0 mt-0.5 text-purple-400" />
             <div>
-              <span className="font-bold">Current Status: Running on Google AI Studio</span>
+              <span className="font-bold">Production Domain: https://solvatech.up.railway.app</span>
               <p className="text-purple-300/80 mt-0.5 text-[11px]">
-                SOLVATECH is currently executing live in Google AI Studio. When you are ready for 24/7 round-the-clock hosting, use the steps below to connect directly to Railway.
+                SOLVATECH is configured for 24/7 round-the-clock hosting with multi-device Baileys and persistent Firebase Cloud sync.
               </p>
             </div>
           </div>

@@ -124,21 +124,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onSuccess, onClose
                 </div>
               </div>
 
-              {/* Only shown in Google Studio Dev Environment */}
-              {isStudioEnv && (
-                <div className="pt-1">
-                  <button
-                    type="button"
-                    onClick={() => handleFastTrack('taletroveanimation@gmail.com', 'Studio Developer')}
-                    disabled={loading}
-                    className="w-full flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-emerald-500/30 font-bold text-xs shadow-md transition-all active:scale-[0.98]"
-                  >
-                    <ArrowRight className="w-4 h-4" />
-                    <span>Studio Developer Preview (Google Studio)</span>
-                  </button>
-                </div>
-              )}
-
               {/* Whitelist Domain helper */}
               <div className="pt-1 border-t border-amber-500/20 text-[11px] text-amber-300/80 flex items-center justify-between">
                 <span className="font-mono truncate max-w-[200px]">{currentHost}</span>
@@ -209,19 +194,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onSuccess, onClose
                   <span>Sign In</span>
                 </button>
               </div>
-
-              {/* Discreet Studio developer option strictly for Google AI Studio testing */}
-              {isStudioEnv && !domainError && (
-                <div className="pt-2 text-center">
-                  <button
-                    type="button"
-                    onClick={() => handleFastTrack('taletroveanimation@gmail.com', 'Studio Developer')}
-                    className="text-[10px] text-slate-500 hover:text-slate-400 underline font-mono"
-                  >
-                    Studio Developer Preview Mode
-                  </button>
-                </div>
-              )}
             </div>
           )}
 
