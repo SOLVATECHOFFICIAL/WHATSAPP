@@ -533,10 +533,20 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.resolve(__dirname, 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (_req, res) => {
-      res.sendFile(path.resolve(distPath, 'index.html'));
-    });
+    const indexHtmlPath = path.resolve(distPath, 'index.html');
+    if (fs.existsSync(indexHtmlPath)) {
+      app.use(express.static(distPath));
+      app.get('*', (_req, res) => {
+        res.sendFile(indexHtmlPath);
+      });
+    } else {
+      console.warn('[SOLVATECH] dist/index.html not found, falling back to Vite middleware');
+      const vite = await createViteServer({
+        server: { middlewareMode: true, allowedHosts: true },
+        appType: 'spa',
+      });
+      app.use(vite.middlewares);
+    }
   }
 
   app.listen(PORT, '0.0.0.0', () => {

@@ -25,14 +25,15 @@ import {
 } from 'firebase/auth';
 
 const getEnvKey = () => {
-  if (typeof import.meta !== 'undefined' && (import.meta as any)?.env?.VITE_FIREBASE_API_KEY) {
-    return (import.meta as any).env.VITE_FIREBASE_API_KEY;
-  }
-  if (typeof process !== 'undefined' && process.env?.VITE_FIREBASE_API_KEY) {
-    return process.env.VITE_FIREBASE_API_KEY;
-  }
-  if (typeof process !== 'undefined' && process.env?.FIREBASE_API_KEY) {
-    return process.env.FIREBASE_API_KEY;
+  const candidates = [
+    typeof import.meta !== 'undefined' ? (import.meta as any)?.env?.VITE_FIREBASE_API_KEY : undefined,
+    typeof process !== 'undefined' ? process.env?.VITE_FIREBASE_API_KEY : undefined,
+    typeof process !== 'undefined' ? process.env?.FIREBASE_API_KEY : undefined,
+  ];
+  for (const k of candidates) {
+    if (k && typeof k === 'string' && k.trim().length > 15 && !k.includes('default-key')) {
+      return k.trim();
+    }
   }
   // Official Firebase API Key provided for solvatechbot
   return "AIzaSyDCVp_T6gO6HeTDeevls9MSb9quEzU5YiM";
