@@ -1961,6 +1961,7 @@ export default function App() {
         notifications={notifications}
         onClose={() => setIsNotificationsOpen(false)}
         onClear={handleClearNotifications}
+        isConnected={status.isConnected}
       />
 
       {/* Auth Modal */}

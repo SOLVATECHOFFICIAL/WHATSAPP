@@ -95,6 +95,40 @@ async function startServer() {
     }
   });
 
+  app.post('/api/whatsapp/test-dm', async (_req, res) => {
+    try {
+      const status = whatsappManager.getStatus();
+      if (!status.isConnected) {
+        return res.status(400).json({
+          success: false,
+          error: 'WhatsApp is not currently connected. Please pair your WhatsApp account first.',
+        });
+      }
+      const rawPhone = status.user?.phone || status.targetPhone || '';
+      const cleanPhone = rawPhone.replace(/\D/g, '');
+      if (!cleanPhone) {
+        return res.status(400).json({
+          success: false,
+          error: 'Could not determine connected WhatsApp number.',
+        });
+      }
+      await whatsappManager.sendMessage(
+        cleanPhone,
+        `🔔 *[SOLVATECH NOTIFICATION TEST]* 🔔\n\n✅ Your WhatsApp connection and notification engine are LIVE and healthy!\n⏰ Time: *${new Date().toLocaleTimeString()}*\n\n🛡️ *Status:* Connected & Listening\n📱 *Number:* +${cleanPhone}\n\n💬 All Anti-Delete DM recovery, View-Once decryption, and 35+ commands are actively functioning on your account.\n\n> ⚡ _SOLVATECH Multi-Device Engine_`
+      );
+      res.json({
+        success: true,
+        message: `Test notification sent successfully to your WhatsApp DM (+${cleanPhone})!`,
+      });
+    } catch (err: any) {
+      console.error('Test DM error:', err);
+      res.status(500).json({
+        success: false,
+        error: err.message || 'Failed to send notification to WhatsApp',
+      });
+    }
+  });
+
   // Groups Management & Security Settings (Auto-Welcome & Auto-Goodbye UI Switches)
   app.get('/api/groups', async (req, res) => {
     try {

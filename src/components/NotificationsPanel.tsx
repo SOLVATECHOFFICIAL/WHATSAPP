@@ -1,9 +1,9 @@
 import React, { useState } from 'react';
-import { Bell, MessageSquare, Link2, AlertCircle, Info, Trash2, CheckCircle2, Send } from 'lucide-react';
+import { Bell, MessageSquare, Link2, AlertCircle, Info, Trash2, CheckCircle2, Send, Terminal, RefreshCw } from 'lucide-react';
 
 export interface WhatsAppNotification {
   id: string;
-  type: 'pairing' | 'connection' | 'message_received' | 'message_sent' | 'system' | 'error';
+  type: 'pairing' | 'connection' | 'message_received' | 'message_sent' | 'system' | 'error' | 'command';
   title: string;
   body: string;
   timestamp: string;
@@ -16,6 +16,7 @@ interface NotificationsPanelProps {
   onClear: () => void;
   isOpen: boolean;
   onClose: () => void;
+  isConnected?: boolean;
 }
 
 export const NotificationsPanel: React.FC<NotificationsPanelProps> = ({
@@ -23,10 +24,32 @@ export const NotificationsPanel: React.FC<NotificationsPanelProps> = ({
   onClear,
   isOpen,
   onClose,
+  isConnected = false,
 }) => {
   const [filter, setFilter] = useState<'all' | 'messages' | 'pairing'>('all');
+  const [sendingTest, setSendingTest] = useState(false);
+  const [testStatus, setTestStatus] = useState<string | null>(null);
 
   if (!isOpen) return null;
+
+  const handleSendTestDM = async () => {
+    setSendingTest(true);
+    setTestStatus(null);
+    try {
+      const res = await fetch('/api/whatsapp/test-dm', { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        setTestStatus('Notification sent to your WhatsApp DM!');
+      } else {
+        setTestStatus(data.error || 'Failed to send');
+      }
+    } catch {
+      setTestStatus('Network error sending test DM');
+    } finally {
+      setSendingTest(false);
+      setTimeout(() => setTestStatus(null), 4000);
+    }
+  };
 
   const filteredNotifications = notifications.filter((n) => {
     if (filter === 'messages') return n.type === 'message_received' || n.type === 'message_sent';
@@ -44,6 +67,8 @@ export const NotificationsPanel: React.FC<NotificationsPanelProps> = ({
         return <MessageSquare className="w-4 h-4 text-emerald-600" />;
       case 'message_sent':
         return <Send className="w-4 h-4 text-blue-500" />;
+      case 'command':
+        return <Terminal className="w-4 h-4 text-amber-500" />;
       case 'error':
         return <AlertCircle className="w-4 h-4 text-rose-500" />;
       default:
@@ -166,6 +191,33 @@ export const NotificationsPanel: React.FC<NotificationsPanelProps> = ({
               </div>
             </div>
           ))
+        )}
+      </div>
+
+      {/* Footer / Quick Actions */}
+      <div className="p-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/80 shrink-0">
+        <button
+          onClick={handleSendTestDM}
+          disabled={sendingTest || !isConnected}
+          className="w-full py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold text-xs flex items-center justify-center gap-2 transition-all shadow-sm active:scale-95 cursor-pointer disabled:cursor-not-allowed"
+          title={isConnected ? 'Send a test notification to your personal WhatsApp DM' : 'Link WhatsApp first to test notifications'}
+        >
+          {sendingTest ? (
+            <>
+              <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+              <span>Sending Test to WhatsApp...</span>
+            </>
+          ) : (
+            <>
+              <Send className="w-3.5 h-3.5" />
+              <span>Send Test Notification to WhatsApp DM</span>
+            </>
+          )}
+        </button>
+        {testStatus && (
+          <p className="text-[10px] text-center mt-1.5 font-medium text-emerald-600 dark:text-emerald-400 animate-in fade-in">
+            {testStatus}
+          </p>
         )}
       </div>
     </div>
