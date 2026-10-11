@@ -1,4 +1,5 @@
 import express from 'express';
+import http from 'http';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import fs from 'fs';
@@ -14,6 +15,7 @@ const __dirname = path.dirname(__filename);
 
 async function startServer() {
   const app = express();
+  const server = http.createServer(app);
   const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
   const isProd = process.env.NODE_ENV === 'production';
 
@@ -60,6 +62,24 @@ async function startServer() {
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
     }
+  });
+
+  // Global 5-minute worldwide synchronization endpoints
+  app.post('/api/whatsapp/sync-all', async (_req, res) => {
+    try {
+      const stats = await sessionManager.runGlobal5MinSync();
+      res.json({ success: true, message: 'Worldwide 5-minute synchronization completed', stats });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  app.get('/api/whatsapp/sync-all/status', (_req, res) => {
+    res.json({
+      success: true,
+      stats: sessionManager.getSyncStats(),
+      serverTime: new Date().toISOString(),
+    });
   });
 
   // WhatsApp Baileys API endpoints (per-user session)
@@ -580,7 +600,11 @@ async function startServer() {
 
   if (!isProd) {
     const vite = await createViteServer({
-      server: { middlewareMode: true, allowedHosts: true },
+      server: {
+        middlewareMode: true,
+        allowedHosts: true,
+        ws: { server },
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -595,14 +619,18 @@ async function startServer() {
     } else {
       console.warn('[SOLVATECH] dist/index.html not found, falling back to Vite middleware');
       const vite = await createViteServer({
-        server: { middlewareMode: true, allowedHosts: true },
+        server: {
+          middlewareMode: true,
+          allowedHosts: true,
+          ws: { server },
+        },
         appType: 'spa',
       });
       app.use(vite.middlewares);
     }
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  server.listen(PORT, '0.0.0.0', () => {
     console.log(`[SOLVATECH] Server listening on port ${PORT}`);
   });
 }

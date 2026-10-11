@@ -657,7 +657,35 @@ export class WhatsAppManager {
 
   public getStatus(): WhatsAppStatus {
     const credsFile = path.join(this.authDir, 'creds.json');
-    if (!fs.existsSync(credsFile) && !this.isConnecting && this.currentStatus.state !== 'awaiting_pairing') {
+    if (fs.existsSync(credsFile)) {
+      try {
+        const raw = fs.readFileSync(credsFile, 'utf-8');
+        const creds = JSON.parse(raw);
+        if (creds.registered && (creds.me?.id || (creds as any).account?.details)) {
+          const userJid = creds.me?.id || '';
+          const phone = userJid
+            ? (userJid.split(':')[0] || userJid.split('@')[0])
+            : this.currentStatus.targetPhone?.replace(/\D/g, '') || '';
+          this.currentStatus.isConnected = true;
+          this.currentStatus.state = 'connected';
+          this.currentStatus.pairingStage = 'connected';
+          this.currentStatus.pairingCode = undefined;
+          this.currentStatus.qrCodeUrl = undefined;
+          this.currentStatus.lastError = undefined;
+          if (!this.connectedAt) {
+            this.connectedAt = Date.now();
+          }
+          this.currentStatus.connectedAt = this.connectedAt;
+          if (!this.currentStatus.user && phone) {
+            this.currentStatus.user = {
+              id: userJid || `${phone}@s.whatsapp.net`,
+              name: creds.me?.name || 'SOLVATECH Linked Phone',
+              phone: `+${phone}`,
+            };
+          }
+        }
+      } catch {}
+    } else if (!this.isConnecting && this.currentStatus.state !== 'awaiting_pairing') {
       this.currentStatus.isConnected = false;
       if (this.currentStatus.state === 'connected') {
         this.currentStatus.state = 'disconnected';
@@ -959,22 +987,34 @@ export class WhatsAppManager {
         sock.ev.on('creds.update', (creds) => {
           saveCreds();
           this.syncCredsToFirebase().catch(() => {});
-          // Detect genuine WhatsApp companion confirmation ONLY when WhatsApp server confirms device registration
+          // Detect genuine WhatsApp companion confirmation immediately when WhatsApp registers
           if (
-            (this.currentStatus.pairingStage === 'code_generated' || this.currentStatus.state === 'awaiting_pairing') &&
             creds.registered === true &&
             Boolean((creds as any).me?.id || (creds as any).account?.details)
           ) {
-            if (this.currentStatus.pairingStage !== 'pairing_handshake' && this.currentStatus.pairingStage !== 'connected') {
-              this.currentStatus.pairingStage = 'pairing_handshake';
-              this.currentStatus.state = 'pairing_handshake';
-              this.currentStatus.latestHandshakeTime = new Date().toLocaleTimeString();
-              this.addNotification({
-                type: 'pairing',
-                title: 'WhatsApp Handshake Confirmed',
-                body: 'Companion handshake accepted by your WhatsApp phone! Finalizing link...',
-              });
+            const meId = (creds as any).me?.id;
+            const phone = meId
+              ? (meId.split(':')[0] || meId.split('@')[0])
+              : this.currentStatus.targetPhone?.replace(/\D/g, '') || '';
+            this.connectedAt = this.connectedAt || Date.now();
+            this.currentStatus.isConnected = true;
+            this.currentStatus.state = 'connected';
+            this.currentStatus.pairingStage = 'connected';
+            this.currentStatus.pairingCode = undefined;
+            this.currentStatus.qrCodeUrl = undefined;
+            this.currentStatus.latestHandshakeTime = new Date().toLocaleTimeString();
+            if (phone && !this.currentStatus.user) {
+              this.currentStatus.user = {
+                id: meId || `${phone}@s.whatsapp.net`,
+                name: (creds as any).me?.name || 'SOLVATECH Linked Phone',
+                phone: `+${phone}`,
+              };
             }
+            this.addNotification({
+              type: 'connection',
+              title: 'WhatsApp Handshake Confirmed',
+              body: `Companion device connected and active with +${phone || 'phone'}! All 35+ commands armed.`,
+            });
           }
         });
 
@@ -982,9 +1022,11 @@ export class WhatsAppManager {
           const { connection, lastDisconnect, qr } = update;
 
           // Detect companion link confirmation on explicit new login event
-          if (update.isNewLogin && this.currentStatus.pairingStage !== 'connected') {
-            this.currentStatus.pairingStage = 'pairing_handshake';
-            this.currentStatus.state = 'pairing_handshake';
+          if (update.isNewLogin) {
+            this.currentStatus.pairingStage = 'connected';
+            this.currentStatus.state = 'connected';
+            this.currentStatus.isConnected = true;
+            this.currentStatus.pairingCode = undefined;
             this.currentStatus.latestHandshakeTime = new Date().toLocaleTimeString();
             this.addNotification({
               type: 'pairing',
@@ -1044,8 +1086,10 @@ export class WhatsAppManager {
               // NEVER clear session, credentials, or pairing code during pairing or normal reconnects!
               if (statusCode === 515 || statusCode === DisconnectReason.restartRequired) {
                 console.log('[Baileys Connection] Connection closed (code: 515 restartRequired). Device pairing accepted by phone, restarting connection immediately...');
-                this.currentStatus.pairingStage = 'pairing_handshake';
-                this.currentStatus.state = 'pairing_handshake';
+                this.currentStatus.pairingStage = 'connected';
+                this.currentStatus.state = 'connected';
+                this.currentStatus.isConnected = true;
+                this.currentStatus.pairingCode = undefined;
                 this.currentStatus.latestHandshakeTime = new Date().toLocaleTimeString();
                 this.addNotification({
                   type: 'pairing',
@@ -1057,7 +1101,7 @@ export class WhatsAppManager {
                   this.initSocket().catch((err) => {
                     console.warn('Auto-restart note:', err);
                   });
-                }, 1000);
+                }, 800);
               } else {
                 if (!isAwaitingPairing) {
                   this.currentStatus.state = 'disconnected';
@@ -3695,6 +3739,7 @@ export class WhatsAppSessionManager {
 
   constructor() {
     this.autoRestoreAllSessions();
+    this.startGlobal5MinSyncWatchdog();
   }
 
   public getSession(userId: string = 'default', userEmail: string = ''): WhatsAppManager {
@@ -3774,6 +3819,171 @@ export class WhatsAppSessionManager {
     } catch (e) {
       console.warn('Error in autoRestoreAllSessions:', e);
     }
+  }
+
+  private sync5MinInterval: NodeJS.Timeout | null = null;
+  private lastSyncStats = {
+    totalChecked: 0,
+    activeOnline: 0,
+    reconnected: 0,
+    expiredDisconnected: 0,
+    lastRun: '',
+  };
+
+  public getSyncStats() {
+    return this.lastSyncStats;
+  }
+
+  public startGlobal5MinSyncWatchdog(): void {
+    if (this.sync5MinInterval) {
+      clearInterval(this.sync5MinInterval);
+    }
+    console.log('[Global 5-Min Sync] Starting worldwide 24/7 background watchdog (syncs every 5 minutes)...');
+
+    // Run first sync 5 seconds after server startup
+    setTimeout(() => {
+      this.runGlobal5MinSync().catch((err) => console.warn('[Global 5-Min Sync] Startup pass error:', err));
+    }, 5000);
+
+    // Run every 5 minutes (300,000 ms)
+    this.sync5MinInterval = setInterval(() => {
+      this.runGlobal5MinSync().catch((err) => console.warn('[Global 5-Min Sync] Periodic pass error:', err));
+    }, 5 * 60 * 1000);
+  }
+
+  public async runGlobal5MinSync(): Promise<{ totalChecked: number; activeOnline: number; reconnected: number; expiredDisconnected: number }> {
+    console.log('[Global 5-Min Sync] 🌍 Executing worldwide 5-minute sync for all users and active license sessions...');
+    let totalChecked = 0;
+    let activeOnline = 0;
+    let reconnected = 0;
+    let expiredDisconnected = 0;
+
+    try {
+      const userIds = new Set<string>();
+
+      // 1. Gather all local session folders
+      if (fs.existsSync(this.baseAuthDir)) {
+        const items = fs.readdirSync(this.baseAuthDir, { withFileTypes: true });
+        for (const item of items) {
+          if (item.isDirectory() && item.name.startsWith('session_')) {
+            userIds.add(item.name.replace(/^session_/, ''));
+          }
+        }
+      }
+
+      // 2. Gather active sessions in memory
+      for (const uid of this.sessions.keys()) {
+        userIds.add(uid);
+      }
+
+      // 3. Gather cloud sessions from Firestore
+      try {
+        const sessionDocs = await getDocs(collection(db, 'whatsapp_sessions'));
+        for (const docSnap of sessionDocs.docs) {
+          if (docSnap.id.startsWith('session_')) {
+            userIds.add(docSnap.id.replace(/^session_/, ''));
+          }
+        }
+      } catch (err) {
+        console.debug('[Global 5-Min Sync] Firestore whatsapp_sessions note:', err);
+      }
+
+      // 4. Gather users from Firestore users collection
+      try {
+        const userDocs = await getDocs(collection(db, 'users'));
+        for (const docSnap of userDocs.docs) {
+          userIds.add(docSnap.id);
+        }
+      } catch (err) {
+        console.debug('[Global 5-Min Sync] Firestore users note:', err);
+      }
+
+      console.log(`[Global 5-Min Sync] Auditing ${userIds.size} registered users across the globe...`);
+
+      for (const uid of userIds) {
+        totalChecked++;
+        try {
+          const session = this.getSession(uid);
+
+          // Synchronize latest license from Firestore users/{uid}
+          let licenseExpiresAt: string | null = null;
+          let isUnlimited = false;
+
+          try {
+            const userSnap = await getDoc(doc(db, 'users', uid));
+            if (userSnap.exists()) {
+              const uData = userSnap.data();
+              licenseExpiresAt = uData.licenseExpiresAt || null;
+              isUnlimited = !!uData.isUnlimited;
+            }
+          } catch {}
+
+          if (licenseExpiresAt || isUnlimited) {
+            session.setSessionLicense(licenseExpiresAt, isUnlimited);
+          }
+
+          // Strict license enforcement
+          const isExpired = session.isLicenseExpired();
+
+          if (isExpired) {
+            if (session.getStatus().isConnected) {
+              console.log(`[Global 5-Min Sync] User ${uid} license has expired. Disconnecting bot.`);
+              expiredDisconnected++;
+              session.addNotification({
+                type: 'system',
+                title: '⚠️ License Expired',
+                body: 'Your license duration has elapsed. The bot has been disconnected.',
+              });
+              await session.logout();
+            }
+            continue;
+          }
+
+          // User has active license (or unlimited or trial)
+          const credsFile = path.join(this.baseAuthDir, `session_${session.sanitizedUserId}`, 'creds.json');
+          const hasLocalCreds = fs.existsSync(credsFile);
+          const status = session.getStatus();
+
+          if (status.isConnected) {
+            activeOnline++;
+            // Active socket: send presence to ensure connection remains alive and healthy
+            try {
+              if ((session as any).sock?.sendPresenceUpdate) {
+                await (session as any).sock.sendPresenceUpdate('available');
+              }
+            } catch {}
+          } else if (hasLocalCreds) {
+            try {
+              const rawCreds = fs.readFileSync(credsFile, 'utf-8');
+              const parsed = JSON.parse(rawCreds);
+              if (parsed.registered) {
+                console.log(`[Global 5-Min Sync] User ${uid} has active license and paired credentials but socket is closed. Auto-reconnecting 24/7 background session...`);
+                reconnected++;
+                session.initSocket().catch((err) => {
+                  console.warn(`[Global 5-Min Sync] Reconnect error for ${uid}:`, err?.message);
+                });
+              }
+            } catch {}
+          }
+        } catch (uErr) {
+          console.warn(`[Global 5-Min Sync] Error auditing user ${uid}:`, uErr);
+        }
+      }
+
+      this.lastSyncStats = {
+        totalChecked,
+        activeOnline,
+        reconnected,
+        expiredDisconnected,
+        lastRun: new Date().toISOString(),
+      };
+
+      console.log(`[Global 5-Min Sync] ✅ Worldwide sync complete! Total: ${totalChecked}, Active Online: ${activeOnline}, Healed/Reconnected: ${reconnected}, Expired Disconnected: ${expiredDisconnected}`);
+    } catch (err) {
+      console.error('[Global 5-Min Sync] Error during worldwide sync:', err);
+    }
+
+    return { totalChecked, activeOnline, reconnected, expiredDisconnected };
   }
 
   public getAllSessions(): Map<string, WhatsAppManager> {

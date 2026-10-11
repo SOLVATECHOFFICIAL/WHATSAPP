@@ -224,10 +224,10 @@ export default function App() {
       const data = await safeParseJson(resStatus);
       if (data?.status) {
         setStatus(data.status);
-        if (data.status.pairingCode) {
-          setPairingCode(data.status.pairingCode);
-        } else if (data.status.isConnected) {
+        if (data.status.isConnected || data.status.state === 'connected' || data.status.pairingStage === 'connected') {
           setPairingCode(null);
+        } else if (data.status.pairingCode) {
+          setPairingCode(data.status.pairingCode);
         }
       }
 
@@ -405,6 +405,12 @@ export default function App() {
     const userId = currentUser.uid;
     fetchAntiDeleteStatus(userId);
 
+    const isPairingActive =
+      Boolean(pairingCode) ||
+      status.pairingStage === 'code_generated' ||
+      status.pairingStage === 'pairing_handshake' ||
+      status.state === 'awaiting_pairing';
+
     const fetchData = async () => {
       try {
         const [resStatus, resNotifs] = await Promise.all([
@@ -415,10 +421,10 @@ export default function App() {
         const data = await safeParseJson(resStatus);
         if (data?.status) {
           setStatus(data.status);
-          if (data.status.pairingCode) {
-            setPairingCode(data.status.pairingCode);
-          } else if (data.status.isConnected) {
+          if (data.status.isConnected || data.status.state === 'connected' || data.status.pairingStage === 'connected') {
             setPairingCode(null);
+          } else if (data.status.pairingCode) {
+            setPairingCode(data.status.pairingCode);
           }
         }
 
@@ -441,9 +447,11 @@ export default function App() {
     };
 
     fetchData();
-    const interval = setInterval(fetchData, 2500);
+    // High-frequency polling (1000ms - "listen every seconds") during pairing handshake, 2500ms when idle
+    const pollIntervalMs = isPairingActive ? 1000 : 2500;
+    const interval = setInterval(fetchData, pollIntervalMs);
     return () => clearInterval(interval);
-  }, [currentUser?.uid]);
+  }, [currentUser?.uid, pairingCode, status.pairingStage, status.state, status.isConnected]);
 
   // Countdown timer for pairing code (120s)
   useEffect(() => {
@@ -465,10 +473,10 @@ export default function App() {
           .then((data) => {
             if (data?.status) {
               setStatus(data.status);
-              if (data.status.pairingCode) {
-                setPairingCode(data.status.pairingCode);
-              } else if (data.status.isConnected) {
+              if (data.status.isConnected || data.status.state === 'connected' || data.status.pairingStage === 'connected') {
                 setPairingCode(null);
+              } else if (data.status.pairingCode) {
+                setPairingCode(data.status.pairingCode);
               }
             }
           })
@@ -797,9 +805,15 @@ export default function App() {
     status.isConnected;
 
   const isStep2Active =
-    status.pairingStage === 'pairing_handshake' || status.isConnected;
+    status.pairingStage === 'pairing_handshake' ||
+    status.pairingStage === 'connected' ||
+    status.isConnected ||
+    status.state === 'connected';
 
-  const isStep3Active = status.isConnected || status.state === 'connected';
+  const isStep3Active =
+    status.isConnected ||
+    status.state === 'connected' ||
+    status.pairingStage === 'connected';
 
   // Compact bot commands list
   const BOT_COMMANDS = [
