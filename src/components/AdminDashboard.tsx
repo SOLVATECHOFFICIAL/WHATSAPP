@@ -164,16 +164,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
   const loadLiveStatus = async () => {
     try {
       const [resStatus, resNotifs] = await Promise.all([
-        fetch('/api/whatsapp/status'),
-        fetch('/api/whatsapp/notifications'),
+        fetch('/api/whatsapp/status').catch(() => null),
+        fetch('/api/whatsapp/notifications').catch(() => null),
       ]);
-      if (resStatus.ok) {
-        const d = await resStatus.json();
-        if (d.status) setWhatsappStatus(d.status);
+      if (resStatus && resStatus.ok) {
+        const text = await resStatus.text();
+        if (text && !text.trim().startsWith('<')) {
+          const d = JSON.parse(text);
+          if (d?.status) setWhatsappStatus(d.status);
+        }
       }
-      if (resNotifs.ok) {
-        const n = await resNotifs.json();
-        if (Array.isArray(n.notifications)) setWhatsappNotifications(n.notifications);
+      if (resNotifs && resNotifs.ok) {
+        const text = await resNotifs.text();
+        if (text && !text.trim().startsWith('<')) {
+          const n = JSON.parse(text);
+          if (Array.isArray(n?.notifications)) setWhatsappNotifications(n.notifications);
+        }
       }
     } catch {
       // Ignore background fetch error

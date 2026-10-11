@@ -66,6 +66,19 @@ interface WhatsAppStatus {
   };
 }
 
+export async function safeParseJson<T = any>(res: Response | null | undefined): Promise<T | null> {
+  if (!res || !res.ok) return null;
+  const contentType = res.headers.get('content-type') || '';
+  if (!contentType.includes('application/json') && !contentType.includes('+json')) return null;
+  try {
+    const raw = await res.text();
+    if (!raw || raw.trim().startsWith('<')) return null;
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
 export default function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
@@ -138,27 +151,23 @@ export default function App() {
     setIsRefreshingStatus(true);
     try {
       const [resStatus, resNotifs] = await Promise.all([
-        fetch('/api/whatsapp/status'),
-        fetch('/api/whatsapp/notifications'),
+        fetch('/api/whatsapp/status').catch(() => null),
+        fetch('/api/whatsapp/notifications').catch(() => null),
       ]);
 
-      if (resStatus.ok) {
-        const data = await resStatus.json();
-        if (data.status) {
-          setStatus(data.status);
-          if (data.status.pairingCode) {
-            setPairingCode(data.status.pairingCode);
-          } else if (data.status.isConnected) {
-            setPairingCode(null);
-          }
+      const data = await safeParseJson(resStatus);
+      if (data?.status) {
+        setStatus(data.status);
+        if (data.status.pairingCode) {
+          setPairingCode(data.status.pairingCode);
+        } else if (data.status.isConnected) {
+          setPairingCode(null);
         }
       }
 
-      if (resNotifs.ok) {
-        const dataNotifs = await resNotifs.json();
-        if (Array.isArray(dataNotifs.notifications)) {
-          setNotifications(dataNotifs.notifications);
-        }
+      const dataNotifs = await safeParseJson(resNotifs);
+      if (dataNotifs && Array.isArray(dataNotifs.notifications)) {
+        setNotifications(dataNotifs.notifications);
       }
 
       setToastNotification({
@@ -199,24 +208,31 @@ export default function App() {
         }
 
         // Real-time Firestore sync
+        let unsubSnap: (() => void) | undefined;
         try {
-          onSnapshot(doc(db, 'users', user.uid), (snap) => {
-            if (snap.exists()) {
-              const data = snap.data();
-              setUserLicenseData({
-                expiresAt: data.licenseExpiresAt || null,
-                isUnlimited: !!data.isUnlimited,
-                plan:
-                  data.licensePlan ||
-                  (data.isUnlimited
-                    ? '👑 Unlimited Lifetime (Admin Granted)'
-                    : 'Active Plan'),
-                key: data.licenseKey || null,
-              });
+          unsubSnap = onSnapshot(
+            doc(db, 'users', user.uid),
+            (snap) => {
+              if (snap.exists()) {
+                const data = snap.data();
+                setUserLicenseData({
+                  expiresAt: data.licenseExpiresAt || null,
+                  isUnlimited: !!data.isUnlimited,
+                  plan:
+                    data.licensePlan ||
+                    (data.isUnlimited
+                      ? '👑 Unlimited Lifetime (Admin Granted)'
+                      : 'Active Plan'),
+                  key: data.licenseKey || null,
+                });
+              }
+            },
+            (err) => {
+              console.debug('Firestore user listener in offline mode:', err.message);
             }
-          });
+          );
         } catch (e) {
-          console.warn('Firestore user listener warning:', e);
+          console.debug('Firestore user listener note:', e);
         }
       }
     });
@@ -243,39 +259,35 @@ export default function App() {
     const fetchData = async () => {
       try {
         const [resStatus, resNotifs] = await Promise.all([
-          fetch('/api/whatsapp/status'),
-          fetch('/api/whatsapp/notifications'),
+          fetch('/api/whatsapp/status').catch(() => null),
+          fetch('/api/whatsapp/notifications').catch(() => null),
         ]);
 
-        if (resStatus.ok) {
-          const data = await resStatus.json();
-          if (data.status) {
-            setStatus(data.status);
-            if (data.status.pairingCode) {
-              setPairingCode(data.status.pairingCode);
-            } else if (data.status.isConnected) {
-              setPairingCode(null);
-            }
+        const data = await safeParseJson(resStatus);
+        if (data?.status) {
+          setStatus(data.status);
+          if (data.status.pairingCode) {
+            setPairingCode(data.status.pairingCode);
+          } else if (data.status.isConnected) {
+            setPairingCode(null);
           }
         }
 
-        if (resNotifs.ok) {
-          const dataNotifs = await resNotifs.json();
-          if (Array.isArray(dataNotifs.notifications)) {
-            setNotifications((prev) => {
-              if (prev.length > 0 && dataNotifs.notifications.length > prev.length) {
-                const newest = dataNotifs.notifications[0];
-                if (newest && newest.id !== prev[0]?.id) {
-                  setToastNotification(newest);
-                  setTimeout(() => setToastNotification(null), 5000);
-                }
+        const dataNotifs = await safeParseJson(resNotifs);
+        if (dataNotifs && Array.isArray(dataNotifs.notifications)) {
+          setNotifications((prev) => {
+            if (prev.length > 0 && dataNotifs.notifications.length > prev.length) {
+              const newest = dataNotifs.notifications[0];
+              if (newest && newest.id !== prev[0]?.id) {
+                setToastNotification(newest);
+                setTimeout(() => setToastNotification(null), 5000);
               }
-              return dataNotifs.notifications;
-            });
-          }
+            }
+            return dataNotifs.notifications;
+          });
         }
       } catch (err) {
-        console.error('Error polling WhatsApp status and notifications:', err);
+        console.debug('Polling WhatsApp note (offline resilient):', err);
       }
     };
 
@@ -447,8 +459,8 @@ export default function App() {
         }),
       });
 
-      const data = await res.json();
-      if (data.success) {
+      const data = await safeParseJson(res);
+      if (data && data.success) {
         setPairingCode(data.pairingCode);
         setCountdown(120);
         setStatus((prev) => ({
@@ -459,7 +471,7 @@ export default function App() {
           targetPhone: `+${fullNumber}`,
         }));
       } else {
-        setPairingError(data.error || 'Failed to request pairing code');
+        setPairingError(data?.error || 'Failed to request pairing code or server unavailable');
       }
     } catch (err: any) {
       setPairingError(err.message || 'Error communicating with WhatsApp server');
@@ -564,6 +576,8 @@ export default function App() {
     { cmd: '.lock / .unlock', desc: 'Close or open group chat for members' },
     { cmd: '.antilink on/off', desc: 'Automatically remove external group links' },
     { cmd: '.antibot on/off', desc: 'Auto-kick unauthorized bot accounts' },
+    { cmd: '.antistatus on/off', desc: 'Auto-remove WhatsApp status group mentions' },
+    { cmd: '.antispam on/off', desc: 'Purge spam messages & instant kick on continuous spam' },
     { cmd: '.warn @user', desc: 'Issue warning to group participant' },
   ];
 

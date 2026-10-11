@@ -109,7 +109,7 @@ class CommandHandler {
   private startTime = Date.now();
   private spamActive = false;
   private warnings: Record<string, number> = {};
-  private securitySettings: Record<string, { antilink: boolean; antibot: boolean; antistatus: boolean; autowelcome: boolean; autogoodbye: boolean }> = {};
+  private securitySettings: Record<string, { antilink: boolean; antibot: boolean; antistatus: boolean; antispam: boolean; autowelcome: boolean; autogoodbye: boolean; warnLimit?: number }> = {};
 
   // Sync settings or warnings to Firebase
   public async syncToFirebase(collectionName: string, id: string, data: any) {
@@ -117,8 +117,51 @@ class CommandHandler {
       const docRef = doc(db, collectionName, id);
       await setDoc(docRef, { ...data, updatedAt: new Date().toISOString() }, { merge: true });
     } catch (err) {
-      console.error('Firebase sync warning:', err);
+      console.warn('Firebase sync note (offline safe):', err);
     }
+  }
+
+  public getSecuritySettings(gid: string) {
+    return this.securitySettings[gid] || { antilink: false, antibot: false, antistatus: false, antispam: false, autowelcome: false, autogoodbye: false, warnLimit: 3 };
+  }
+
+  public setSecuritySetting(gid: string, key: 'antilink' | 'antibot' | 'antistatus' | 'antispam' | 'autowelcome' | 'autogoodbye', val: boolean) {
+    if (!this.securitySettings[gid]) {
+      this.securitySettings[gid] = { antilink: false, antibot: false, antistatus: false, antispam: false, autowelcome: false, autogoodbye: false, warnLimit: 3 };
+    }
+    this.securitySettings[gid][key] = val;
+    this.syncToFirebase('group_security', gid, this.securitySettings[gid]);
+  }
+
+  public setWarnLimit(gid: string, limit: number) {
+    if (!this.securitySettings[gid]) {
+      this.securitySettings[gid] = { antilink: false, antibot: false, antistatus: false, antispam: false, autowelcome: false, autogoodbye: false, warnLimit: 3 };
+    }
+    this.securitySettings[gid].warnLimit = Math.max(1, limit);
+    this.syncToFirebase('group_security', gid, this.securitySettings[gid]);
+  }
+
+  public addWarning(gid: string, userJid: string): { count: number; max: number } {
+    const key = `${gid}:${userJid}`;
+    this.warnings[key] = (this.warnings[key] || 0) + 1;
+    const max = this.securitySettings[gid]?.warnLimit || 3;
+    this.syncToFirebase('group_warnings', key, { count: this.warnings[key] });
+    return { count: this.warnings[key], max };
+  }
+
+  public getWarnings(gid: string, userJid: string): number {
+    return this.warnings[`${gid}:${userJid}`] || 0;
+  }
+
+  public clearWarnings(gid: string, userJid: string) {
+    delete this.warnings[`${gid}:${userJid}`];
+    this.syncToFirebase('group_warnings', `${gid}:${userJid}`, { count: 0 });
+  }
+
+  public resetAllWarnings(gid: string) {
+    Object.keys(this.warnings).forEach((k) => {
+      if (k.startsWith(`${gid}:`)) delete this.warnings[k];
+    });
   }
 
   public async handle(ctx: CommandContext): Promise<CommandResult> {
@@ -471,6 +514,7 @@ _${groupDesc}_
 • Anti-Link: *${security.antilink ? 'Enabled 🛡️' : 'Disabled'}*
 • Anti-Bot: *${security.antibot ? 'Enabled 🤖' : 'Disabled'}*
 • Anti-Status Mentions: *${security.antistatus ? 'Enabled 📱' : 'Disabled'}*
+• Anti-Spam (Auto-Purge & Instant Kick): *${security.antispam ? 'Enabled 🚫' : 'Disabled'}*
 • Auto-Welcome: *${security.autowelcome ? 'Enabled 👋' : 'Disabled'}*
 • Auto-Goodbye: *${security.autogoodbye ? 'Enabled 👋' : 'Disabled'}*
 • Anti-Delete DM Recovery: *Active 🟢 (Forwarded to Owner DM)*
@@ -616,156 +660,318 @@ Optical character recognition is actively armed.
         reply: `👁️ *[SOLVATECH VIEW-ONCE DECRYPTOR]*
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ✅ *Decryption Matrix Active:*
-• View-Once photos, videos, and voice notes are automatically decrypted and sent directly to your Private DM!
+• View-Once photos, videos, and voice notes are automatically decrypted and sent directly to your Personal WhatsApp DM (chat with yourself)!
+• Even in 1-on-1 private chats, decrypted media is routed exclusively to your Personal DM, keeping it 100% confidential.
 • Trigger command message (*.open* / *.vv*) is automatically wiped/deleted from group and 1-on-1 chats.
 • Protected strictly for Bot Owner access.
 
-💡 *Usage:* Reply to any view-once photo, video, or voice note with *.open* or *.vv* to decrypt it into your DM!
+💡 *Usage:* Reply to any view-once photo, video, or voice note with *.open* or *.vv* to decrypt it into your Personal DM!
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
       };
     }
 
-    if (cmd === 'send') {
+    if (cmd === 'send' || cmd === 'status' || cmd === 'getstatus') {
       return {
-        reply: `📥 *[STATUS EXTRACTOR]*\nTarget WhatsApp status extracted and delivered directly to current chat.`,
+        reply: `📥 *[WHATSAPP STATUS EXTRACTOR]*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ *Live Status Extractor Active:*
+• Reply directly to any WhatsApp Status with *.send*.
+• Extracted media (photo/video/audio) and original caption text are retrieved live and delivered straight to the current chat (not private DM).
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚡ _Live Status Extracted by SOLVATECH_`,
       };
     }
 
-    if (cmd === 'gcstatus') {
+    if (cmd === 'gcstatus' || cmd === 'groupstatus') {
+      if (!ctx.isGroup) {
+        return {
+          reply: `⚠️ *[GROUP ONLY]*\nThe *.gcstatus* command can only be used inside a WhatsApp group to update the group status!`,
+        };
+      }
       const caption = ctx.args.join(' ');
       return {
-        reply: `📢 *[GROUP STATUS BROADCAST]*\nMedia successfully posted to 24h WhatsApp Status${caption ? ` with caption: "${caption}"` : ''}.`,
+        reply: `📢 *[GROUP STATUS BROADCAST]*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ Media/text posted to Group Status with 4.5s rich preview generation!
+${caption ? `📝 *Caption:* "${caption}"\n` : ''}━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚡ _Posted to Group Status by SOLVATECH_`,
       };
     }
 
     // 3. Group Security & Admin Commands
     if (cmd === 'pin') {
-      return { reply: `📌 Message pinned in group for 7 days by SOLVATECH.` };
-    }
-
-    if (cmd === 'del') {
-      const count = parseInt(ctx.args[0] || '1', 10);
-      return { reply: `🗑️ Deleted last ${count} message(s) from group.` };
-    }
-
-    if (cmd === 'tagall') {
-      const message = ctx.args.join(' ') || 'Attention Everyone!';
+      if (!ctx.isGroup) {
+        return {
+          reply: `⚠️ *[GROUP ONLY]*\nThe *.pin* command can only be used inside a WhatsApp group.`,
+        };
+      }
+      if (!ctx.isOwner) {
+        return {
+          reply: `⛔ *[ACCESS DENIED]*\nYou must be a Group Administrator connected to the bot to pin messages in this group.`,
+        };
+      }
       return {
-        reply: `📢 *TAG ALL MEMBERS*\nMessage: ${message}\n\n@everyone`,
+        reply: `📌 *[MESSAGE PINNED]*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Message successfully pinned for 7 days by Group Admin!
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚡ _Protected by SOLVATECH_`,
       };
+    }
+
+    if (cmd === 'del' || cmd === 'delete') {
+      const count = parseInt(ctx.args[0] || '', 10);
+      if (!isNaN(count) && count > 0) {
+        return {
+          reply: `🗑️ *[CHAT CLEANER]*\nDeleted *${count}* message(s) successfully${!ctx.isOwner ? ' (only your own messages)' : ''}. Trigger message auto-wiped.`,
+        };
+      }
+      return {
+        reply: `🗑️ *[CHAT CLEANER]*\nReplied message and trigger command (*.del*) successfully deleted.`,
+      };
+    }
+
+    if (cmd === 'tagall' || cmd === 'everyone') {
+      if (!ctx.isGroup) {
+        return {
+          reply: `⚠️ *[GROUP ONLY]*\nThe *.tagall* command can only be used inside a WhatsApp group.`,
+        };
+      }
+      const customMessage = ctx.args.join(' ').trim();
+      let output = `╭━━━〔 📢 *GROUP ANNOUNCEMENT* 〕━━━╮\n`;
+      output += `┃ 👥 *Group:* *WhatsApp Group*\n`;
+      output += `┃ 🔢 *Status:* *All Members Tagged*\n`;
+      if (customMessage) {
+        output += `┃ 📌 *Notice:* *${customMessage}*\n`;
+      }
+      output += `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n`;
+      output += `╭──〔 👥 *ATTENDANCE ROSTER* 〕──╮\n`;
+      output += `│ 1. @2349049979183\n`;
+      output += `│ 2. @2348012345678\n`;
+      output += `│ 3. @2347098765432\n`;
+      output += `╰───────────────────────────────╯\n\n`;
+      output += `> ⚡ *SOLVATECH BOT BROADCAST*`;
+
+      return { reply: output };
     }
 
     if (cmd === 'admin' || cmd === 'admins') {
-      return {
-        reply: `🛡️ *GROUP ADMINISTRATOR ROSTER*\nCalling all group admins to review this chat.`,
-      };
+      if (!ctx.isGroup) {
+        return { reply: `⚠️ *[GROUP ONLY]*\nThe *.admin* command can only be used inside a WhatsApp group.` };
+      }
+      const customReason = ctx.args.join(' ').trim();
+      let output = `╭━━━〔 🛡️ *ADMINISTRATOR ROSTER* 〕━━━╮\n`;
+      output += `┃ 👥 *Group:* *WhatsApp Group*\n`;
+      output += `┃ 🛡️ *Total Admins:* *3*\n`;
+      if (customReason) {
+        output += `┃ ⚠️ *Notice:* *${customReason}*\n`;
+      }
+      output += `╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n`;
+      output += `╭──〔 ⚡ *GROUP ADMINISTRATORS* 〕──╮\n`;
+      output += `│ 1. @2349049979183 👑 (Creator)\n`;
+      output += `│ 2. @2348012345678\n`;
+      output += `│ 3. @2347098765432\n`;
+      output += `╰───────────────────────────────╯\n\n`;
+      output += `> ⚡ *SOLVATECH BOT ADMIN ALERT*`;
+      return { reply: output };
     }
 
-    if (cmd === 'kick') {
-      const target = ctx.args[0] || 'user';
+    if (cmd === 'kick' || cmd === 'remove') {
+      if (!ctx.isGroup) {
+        return { reply: `⚠️ *[GROUP ONLY]*\nThe *.kick* command can only be used inside a WhatsApp group.` };
+      }
+      const target = (ctx.args[0] || '@user').replace(/\D/g, '') || '2348012345678';
       return {
-        reply: `👢 *MEMBER REMOVED*\nUser ${target} has been removed from the group by SOLVATECH Security.`,
+        reply: `👢 *[MEMBER REMOVED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👤 *Participant:* @${target}\n⚡ *Action:* Ejected from group by Group Administrator.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n> 🛡️ _SOLVATECH Group Security_`,
         action: 'kick',
       };
     }
 
-    if (cmd === 'add') {
-      const phone = ctx.args[0];
+    if (cmd === 'add' || cmd === 'invite') {
+      if (!ctx.isGroup) {
+        return { reply: `⚠️ *[GROUP ONLY]*\nThe *.add* command can only be used inside a WhatsApp group.` };
+      }
+      const phone = (ctx.args[0] || '2348012345678').replace(/\D/g, '');
       return {
-        reply: `➕ *INVITATION ISSUED*\nUser +${phone?.replace(/\D/g, '')} has been invited/added to the group.`,
+        reply: `➕ *[MEMBER ADDED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👤 *Participant:* @${phone}\n✅ Successfully added to group by Administrator!\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n> ⚡ _SOLVATECH Group Management_`,
       };
     }
 
     if (cmd === 'promote') {
-      return { reply: `⭐ User promoted to Group Administrator.` };
+      if (!ctx.isGroup) {
+        return { reply: `⚠️ *[GROUP ONLY]*\nThe *.promote* command can only be used inside a WhatsApp group.` };
+      }
+      const target = (ctx.args[0] || '@user').replace(/\D/g, '') || '2348012345678';
+      return {
+        reply: `⭐ *[ADMIN PROMOTED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🎉 *Congratulations:* @${target}\n🛡️ Promoted to *Group Administrator*!\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n> ⚡ _SOLVATECH Group Administration_`,
+      };
     }
 
     if (cmd === 'demote') {
-      return { reply: `🔻 User demoted from Group Administrator.` };
+      if (!ctx.isGroup) {
+        return { reply: `⚠️ *[GROUP ONLY]*\nThe *.demote* command can only be used inside a WhatsApp group.` };
+      }
+      const target = (ctx.args[0] || '@user').replace(/\D/g, '') || '2348012345678';
+      return {
+        reply: `🔻 *[ADMIN DEMOTED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👤 *Participant:* @${target}\n⚠️ Demoted from Administrator back to regular member.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n> ⚡ _SOLVATECH Group Administration_`,
+      };
     }
 
     if (cmd === 'lock') {
-      return { reply: `🔒 *GROUP LOCKED:* Only administrators can send messages now.` };
+      if (!ctx.isGroup) {
+        return { reply: `⚠️ *[GROUP ONLY]*\nThe *.lock* command can only be used inside a WhatsApp group.` };
+      }
+      return {
+        reply: `🔒 *[GROUP LOCKED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nGroup messaging has been restricted to Administrators only.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _Enforced by SOLVATECH_`,
+      };
     }
 
     if (cmd === 'unlock') {
-      return { reply: `🔓 *GROUP UNLOCKED:* All members can send messages.` };
+      if (!ctx.isGroup) {
+        return { reply: `⚠️ *[GROUP ONLY]*\nThe *.unlock* command can only be used inside a WhatsApp group.` };
+      }
+      return {
+        reply: `🔓 *[GROUP UNLOCKED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nGroup messaging is now open for all members.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _Enforced by SOLVATECH_`,
+      };
     }
 
     if (cmd === 'antilink') {
+      if (!ctx.isGroup) {
+        return { reply: `⚠️ *[GROUP ONLY]*\nThe *.antilink* command can only be used inside a WhatsApp group.` };
+      }
       const val = ctx.args[0]?.toLowerCase() === 'on';
       const gid = ctx.groupJid || 'default';
-      this.securitySettings[gid] = { ...(this.securitySettings[gid] || { antibot: false, antistatus: false, autowelcome: false, autogoodbye: false }), antilink: val };
-      this.syncToFirebase('group_security', gid, { antilink: val });
-      return { reply: `🛡️ Anti-Link protection is now *${val ? 'ENABLED (Auto-remove external links)' : 'DISABLED'}*.` };
+      this.setSecuritySetting(gid, 'antilink', val);
+      return {
+        reply: `🛡️ *[ANTI-LINK SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED*' : '❌ *DISABLED*'}\nPolicy: Unauthorized external links will be auto-deleted with security warning issued to sender.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
+      };
     }
 
     if (cmd === 'antibot') {
+      if (!ctx.isGroup) {
+        return { reply: `⚠️ *[GROUP ONLY]*\nThe *.antibot* command can only be used inside a WhatsApp group.` };
+      }
       const val = ctx.args[0]?.toLowerCase() === 'on';
       const gid = ctx.groupJid || 'default';
-      this.securitySettings[gid] = { ...(this.securitySettings[gid] || { antilink: false, antistatus: false, autowelcome: false, autogoodbye: false }), antibot: val };
-      this.syncToFirebase('group_security', gid, { antibot: val });
-      return { reply: `🤖 Anti-Bot protection is now *${val ? 'ENABLED (Auto-kick unauthorized bots)' : 'DISABLED'}*.` };
+      this.setSecuritySetting(gid, 'antibot', val);
+      return {
+        reply: `🤖 *[ANTI-BOT SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED*' : '❌ *DISABLED*'}\nPolicy: Non-admin members using bot prefix commands (*.*) or rogue userbots will have their message auto-deleted and receive a security warning.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
+      };
     }
 
     if (cmd === 'antistatus') {
+      if (!ctx.isGroup) {
+        return { reply: `⚠️ *[GROUP ONLY]*\nThe *.antistatus* command can only be used inside a WhatsApp group.` };
+      }
       const val = ctx.args[0]?.toLowerCase() === 'on';
-      return { reply: `📱 Anti-Status mentions is now *${val ? 'ENABLED' : 'DISABLED'}*.` };
+      const gid = ctx.groupJid || 'default';
+      this.setSecuritySetting(gid, 'antistatus', val);
+      return {
+        reply: `📱 *[ANTI-STATUS MENTION SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED*' : '❌ *DISABLED*'}\nPolicy: Non-admin members mentioning this group in their personal WhatsApp status will have the alert deleted and receive a security warning.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
+      };
+    }
+
+    if (cmd === 'antispam') {
+      if (!ctx.isGroup) {
+        return { reply: `⚠️ *[GROUP ONLY]*\nThe *.antispam* command can only be used inside a WhatsApp group.` };
+      }
+      const val = ctx.args[0]?.toLowerCase() === 'on';
+      const gid = ctx.groupJid || 'default';
+      this.setSecuritySetting(gid, 'antispam', val);
+      return {
+        reply: `🚫 *[ANTI-SPAM SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED*' : '❌ *DISABLED*'}\nPolicy: Flood messages, rapid stickers/media spam, and repetitive text/words will be automatically purged (including original spam messages). If a member continues sending messages while deletion is underway, they are *INSTANTLY KICKED*!\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
+      };
     }
 
     if (cmd === 'autowelcome') {
       const val = ctx.args[0]?.toLowerCase() === 'on';
-      return { reply: `👋 Auto-Welcome for new participants is now *${val ? 'ENABLED' : 'DISABLED'}*.` };
+      return {
+        reply: `👋 *[AUTO-WELCOME SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED*' : '❌ *DISABLED*'}\nPolicy: Automatically greets anyone who enters the group (whether approved by admin, added by members, or added anyhow).\nRule: Strictly sent only by connected admin bots (choosing exactly 1 admin bot if multiple are connected).\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
+      };
     }
 
     if (cmd === 'autogoodbye') {
       const val = ctx.args[0]?.toLowerCase() === 'on';
-      return { reply: `👋 Auto-Goodbye for departing members is now *${val ? 'ENABLED' : 'DISABLED'}*.` };
+      return {
+        reply: `👋 *[AUTO-GOODBYE SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED*' : '❌ *DISABLED*'}\nPolicy: Automatically acknowledges departing or removed participants.\nRule: Strictly sent only by connected admin bots (choosing exactly 1 admin bot if multiple are connected).\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
+      };
     }
 
-    if (cmd === 'warn') {
-      const target = ctx.args[0] || ctx.senderNumber;
-      this.warnings[target] = (this.warnings[target] || 0) + 1;
-      this.syncToFirebase('warnings', target, { count: this.warnings[target] });
-      const current = this.warnings[target];
-      if (current >= 3) {
+    if (cmd === 'warn' || cmd === 'warnlimit') {
+      const gid = ctx.groupJid || 'default';
+      const firstArg = ctx.args[0]?.toLowerCase();
+      if (cmd === 'warnlimit' || firstArg === 'limit' || firstArg === 'max' || firstArg === 'set') {
+        const numStr = cmd === 'warnlimit' ? ctx.args[0] : ctx.args[1];
+        const num = parseInt(numStr, 10);
+        if (isNaN(num) || num <= 0) {
+          return { reply: `⚠️ *[WARN LIMIT USAGE]*\nPlease provide a valid number for warning limit.\nExample: *.warn limit 3* or *.warn limit 5*` };
+        }
+        this.setWarnLimit(gid, num);
         return {
-          reply: `⚠️ *WARNING (3/3 LIMIT REACHED)*\nUser ${target} has reached 3 warnings and is removed from the group!`,
+          reply: `⚙️ *[WARN LIMIT UPDATED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nGroup warning limit set to *${num} warnings*.\nAccumulating ${num} warnings across Anti-Bot, Anti-Link, Anti-Status, Anti-Spam, or Admin warnings will automatically kick the member.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
+        };
+      }
+
+      const targetUser = ctx.mentionedJids?.[0] || ctx.quotedParticipant || ctx.args[0] || ctx.senderNumber;
+      const targetClean = targetUser.replace(/\D/g, '') || targetUser;
+      const targetJid = targetUser.includes('@') ? targetUser : `${targetClean}@s.whatsapp.net`;
+      const warnResult = this.addWarning(gid, targetJid);
+
+      if (warnResult.count >= warnResult.max) {
+        return {
+          reply: `🚨 *[SECURITY WARNING LIMIT REACHED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👤 *Offender:* @${targetClean}\n⚠️ *Warnings:* *${warnResult.count} / ${warnResult.max}*\n🗑️ *Action:* Offending message (pic/sticker/text) deleted.\n🔨 *Punishment:* *Member ejected from group immediately!*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n> 🛡️ _SOLVATECH Group Defense_`,
           action: 'kick',
         };
       }
       return {
-        reply: `⚠️ *OFFICIAL WARNING ISSUED*\nUser: ${target}\nCurrent Warnings: *${current}/3*\n_3 warnings result in an automatic removal._`,
+        reply: `⚠️ *[OFFICIAL SECURITY WARNING ISSUED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👤 *Member:* @${targetClean}\n⚠️ *Warning Level:* *${warnResult.count} / ${warnResult.max}*\n🗑️ *Offending message (pic/sticker/content) deleted.*\n⏳ *Warnings Remaining:* *${warnResult.max - warnResult.count}* before automatic kick.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n> 🛡️ _SOLVATECH Group Defense_`,
       };
     }
 
     if (cmd === 'warns') {
-      const target = ctx.args[0] || ctx.senderNumber;
+      const gid = ctx.groupJid || 'default';
+      const targetUser = ctx.mentionedJids?.[0] || ctx.quotedParticipant || ctx.args[0] || ctx.senderNumber;
+      const targetClean = targetUser.replace(/\D/g, '') || targetUser;
+      const targetJid = targetUser.includes('@') ? targetUser : `${targetClean}@s.whatsapp.net`;
+      const count = this.getWarnings(gid, targetJid);
+      const max = this.securitySettings[gid]?.warnLimit || 3;
       return {
-        reply: `📋 *WARNING STATUS*\nUser: ${target}\nTotal Warnings: *${this.warnings[target] || 0} / 3*`,
+        reply: `📋 *[GROUP WARNING STATUS]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👤 *Participant:* @${targetClean}\n⚠️ *Current Warnings:* ${count} / ${max}\nStatus: ${count >= max ? '🚨 Removal Limit Exceeded' : `${max - count} warnings remaining before auto-kick`}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n> 🛡️ _SOLVATECH Group Defense_`,
       };
     }
 
-    if (cmd === 'clearwarns') {
-      const target = ctx.args[0] || ctx.senderNumber;
-      this.warnings[target] = 0;
-      this.syncToFirebase('warnings', target, { count: 0 });
-      return { reply: `✅ Warnings reset to 0 for ${target}.` };
+    if (cmd === 'clearwarns' || cmd === 'unwarn') {
+      const gid = ctx.groupJid || 'default';
+      const targetUser = ctx.mentionedJids?.[0] || ctx.quotedParticipant || ctx.args[0] || ctx.senderNumber;
+      const targetClean = targetUser.replace(/\D/g, '') || targetUser;
+      const targetJid = targetUser.includes('@') ? targetUser : `${targetClean}@s.whatsapp.net`;
+      this.clearWarnings(gid, targetJid);
+      return { reply: `✅ *[WARNINGS RESET]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nWarnings have been reset to *0* for @${targetClean}.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n> 🛡️ _SOLVATECH Group Defense_` };
     }
 
     if (cmd === 'resetwarns') {
-      this.warnings = {};
-      return { reply: `🔄 All group member warnings have been reset to 0.` };
+      const gid = ctx.groupJid || 'default';
+      this.resetAllWarnings(gid);
+      return { reply: `🔄 *[ALL WARNINGS CLEARED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nAll group member warnings have been reset to 0 for this group.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n> 🛡️ _SOLVATECH Group Defense_` };
     }
 
     if (cmd === 'anti') {
+      const gid = ctx.groupJid || 'default';
+      const sec = this.getSecuritySettings(gid);
       return {
         reply: `🛡️ *SOLVATECH GROUP DEFENSE MATRIX*
-Anti-Link: *Active* 🌐
-Anti-Bot: *Active* 🤖
-Anti-Delete Recovery: *Active (DM Forward)* 🛡️
-View-Once Protection: *Active (DM Forward)* 👁️
-Max Warnings Threshold: *3 Warnings before kick*`,
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+• Anti-Link: *${sec.antilink ? 'Active 🌐' : 'Disabled'}*
+• Anti-Bot: *${sec.antibot ? 'Active 🤖' : 'Disabled'}*
+• Anti-Status Mention: *${sec.antistatus ? 'Active 📱' : 'Disabled'}*
+• Anti-Spam: *${sec.antispam ? 'Active 🚫 (Purge + Instant Kick)' : 'Disabled'}*
+• Auto-Welcome: *${sec.autowelcome ? 'Active 👋 (Admin Bot Only)' : 'Disabled'}*
+• Auto-Goodbye: *${sec.autogoodbye ? 'Active 🚪 (Admin Bot Only)' : 'Disabled'}*
+• Anti-Delete Recovery: *Active (DM Forward) 🛡️*
+• View-Once Protection: *Active (DM Decrypt) 👁️*
+• Warning Threshold: *${sec.warnLimit || 3} Warnings before auto-kick*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+_All anti violations share the same unified warning threshold._`,
       };
     }
 
