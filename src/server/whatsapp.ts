@@ -18,7 +18,7 @@ import { execSync } from 'child_process';
 import sharp from 'sharp';
 import webpmux from 'node-webpmux';
 import { createWorker } from 'tesseract.js';
-import { commandHandler, parseSpamArgs } from './commands.ts';
+import { commandHandler, parseSpamArgs, GROUP_ONLY_COMMANDS } from './commands.ts';
 import { db } from '../services/firebase.ts';
 import { doc, getDoc, setDoc, deleteDoc } from 'firebase/firestore';
 
@@ -538,6 +538,31 @@ class WhatsAppManager {
 
   public clearNotifications() {
     this.notifications = [];
+  }
+
+  // High-Speed In-Memory Group Metadata Cache (eliminates repeated slow network roundtrips)
+  private groupMetaCache = new Map<string, { meta: any; timestamp: number }>();
+
+  public async getCachedGroupMetadata(sock: any, gid: string, force = false): Promise<any> {
+    const now = Date.now();
+    const cached = this.groupMetaCache.get(gid);
+    if (!force && cached && now - cached.timestamp < 60000) {
+      return cached.meta;
+    }
+    try {
+      const meta = await sock.groupMetadata(gid);
+      if (meta) {
+        this.groupMetaCache.set(gid, { meta, timestamp: now });
+      }
+      return meta;
+    } catch (err) {
+      if (cached) return cached.meta;
+      throw err;
+    }
+  }
+
+  public invalidateGroupMetaCache(gid: string) {
+    this.groupMetaCache.delete(gid);
   }
 
   private ensureAuthDir() {
@@ -1111,9 +1136,9 @@ class WhatsAppManager {
           let isSenderAdmin = false;
           if (isGroup) {
             try {
-              const groupMeta = await sock.groupMetadata(remoteJid);
+              const groupMeta = await this.getCachedGroupMetadata(sock, remoteJid);
               const p = groupMeta.participants.find(
-                (x) => x.id.replace(/\D/g, '') === senderNum || x.id === senderJid
+                (x: any) => x.id.replace(/\D/g, '') === senderNum || x.id === senderJid
               );
               isSenderAdmin = p?.admin === 'admin' || p?.admin === 'superadmin';
             } catch {}
@@ -1160,8 +1185,9 @@ class WhatsAppManager {
               return;
             }
 
-            // 2. Anti-Link: Member posting external links
-            const hasLink = /(https?:\/\/[^\s]+|chat\.whatsapp\.com\/[^\s]+|wa\.me\/[^\s]+|t\.me\/[^\s]+)/i.test(text);
+            // 2. Anti-Link: Member posting external links (solvatech.up.railway.app is whitelisted so it is never deleted)
+            const textWithoutOfficialDomain = text.replace(/solvatech\.up\.railway\.app/gi, '');
+            const hasLink = /(https?:\/\/[^\s]+|chat\.whatsapp\.com\/[^\s]+|wa\.me\/[^\s]+|t\.me\/[^\s]+)/i.test(textWithoutOfficialDomain);
             if (sec.antilink && hasLink) {
               try { await sock.sendMessage(remoteJid, { delete: msg.key }); } catch {}
               const warn = commandHandler.addWarning(remoteJid, senderJid);
@@ -1312,8 +1338,20 @@ class WhatsAppManager {
             const command = parts[0]?.toLowerCase();
             const args = parts.slice(1);
 
-            // STRICT RULE: All commands are strictly for bot users only — ignore any other person
-            if (!isOwner) {
+            // STRICT RULE: Group commands NEVER answer in 1v1 chat!
+            if (!isGroup && GROUP_ONLY_COMMANDS.has(command)) {
+              return;
+            }
+
+            // In groups: Group commands can ONLY be executed by an Admin connected to the bot!
+            if (isGroup && GROUP_ONLY_COMMANDS.has(command)) {
+              if (!isOwner && !isSenderAdmin) {
+                return; // Non-admin members in group get no response
+              }
+            }
+
+            // For non-group commands: strictly owner/controller execution only
+            if (!isOwner && !GROUP_ONLY_COMMANDS.has(command)) {
               return;
             }
 
@@ -2722,8 +2760,13 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
               setGroupInviteCode: (gid: string, code: string) => this.setGroupInviteCode(gid, code),
             });
 
+            // If reply is empty (unauthorized, ignored, or internal action), do not send any message
+            if (!res.reply || !res.reply.trim()) {
+              return;
+            }
+
             try {
-              let finalText = res.reply;
+              let finalText = res.reply.trim();
               if (!finalText.includes('SOLVATECH') && !finalText.includes('Solomon')) {
                 finalText += `\n\n> ⚡ *SOLVATECH BOT* • _Solomon Oladimeji_`;
               }

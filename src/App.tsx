@@ -951,7 +951,7 @@ export default function App() {
 
   // AUTHENTICATED DASHBOARD VIEW
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex justify-center p-0 sm:py-4 font-sans select-none sm:select-auto overflow-x-hidden">
+    <div className="h-[100dvh] max-h-[100dvh] w-full bg-slate-950 text-slate-100 flex justify-center p-0 sm:py-2 font-sans select-none sm:select-auto overflow-hidden">
       {/* Toast Notification Banner */}
       {toastNotification && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 max-w-sm w-full px-4 animate-in slide-in-from-top duration-200">
@@ -975,10 +975,10 @@ export default function App() {
         </div>
       )}
 
-      {/* Main Container */}
-      <div className="w-full max-w-lg mx-auto bg-slate-900 border-x sm:border border-slate-800 sm:rounded-3xl shadow-2xl flex flex-col min-h-screen relative overflow-x-hidden">
-        {/* Top Header - Stagnant Floating Bar */}
-        <header className="sticky top-0 z-40 px-3.5 pt-3 pb-2.5 bg-slate-950/95 backdrop-blur-md border-b border-slate-800/90 flex flex-col gap-2 shrink-0 shadow-md">
+      {/* Main Container Phone Frame */}
+      <div className="w-full max-w-lg mx-auto bg-slate-900 border-x sm:border border-slate-800 sm:rounded-3xl shadow-2xl flex flex-col h-full sm:h-[96vh] sm:max-h-[920px] relative overflow-hidden">
+        {/* Top Header */}
+        <header className="shrink-0 z-40 px-3.5 pt-3 pb-2.5 bg-slate-950/95 backdrop-blur-md border-b border-slate-800/90 flex flex-col gap-2 shadow-md">
           <div className="flex items-center justify-between gap-1 sm:gap-2">
             <div className="flex items-center gap-1.5 sm:gap-2 min-w-0">
               <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-xl bg-gradient-to-tr from-emerald-500 to-teal-400 flex items-center justify-center shadow-md shadow-emerald-950/60 shrink-0">
@@ -1084,65 +1084,10 @@ export default function App() {
               <Zap className="w-2.5 h-2.5 text-amber-400" />
             </div>
           </button>
-
-          {/* STAGNANT FLOATING TABS BAR: Always pinned at the top, never goes down when scrolling! */}
-          <div className="grid grid-cols-4 gap-1 p-1 bg-slate-900/90 rounded-xl border border-slate-800/90 text-[11px] font-bold">
-            <button
-              type="button"
-              onClick={() => setActiveTab('pair')}
-              className={`py-1.5 px-1 rounded-lg transition-all flex items-center justify-center gap-1 cursor-pointer ${
-                activeTab === 'pair'
-                  ? 'bg-emerald-500 text-slate-950 shadow-xs font-black'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              <KeyRound className="w-3.5 h-3.5 shrink-0" />
-              <span>Link</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('groups')}
-              className={`py-1.5 px-1 rounded-lg transition-all flex items-center justify-center gap-1 relative cursor-pointer ${
-                activeTab === 'groups'
-                  ? 'bg-emerald-500 text-slate-950 shadow-xs font-black'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              <Crown className="w-3.5 h-3.5 shrink-0" />
-              <span>Groups</span>
-              {status.isConnected && (
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-              )}
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('license')}
-              className={`py-1.5 px-1 rounded-lg transition-all flex items-center justify-center gap-1 cursor-pointer ${
-                activeTab === 'license'
-                  ? 'bg-emerald-500 text-slate-950 shadow-xs font-black'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              <Key className="w-3.5 h-3.5 shrink-0" />
-              <span>License</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('commands')}
-              className={`py-1.5 px-1 rounded-lg transition-all flex items-center justify-center gap-1 cursor-pointer ${
-                activeTab === 'commands'
-                  ? 'bg-emerald-500 text-slate-950 shadow-xs font-black'
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              <Terminal className="w-3.5 h-3.5 shrink-0" />
-              <span>Commands</span>
-            </button>
-          </div>
         </header>
 
-        {/* Content Body */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-4">
+        {/* Content Body - Scrollable independently while header and footer stay pinned */}
+        <div className="flex-1 overflow-y-auto p-4 space-y-4 overscroll-contain">
           {/* 2 MANDATORY LINKS STRICTLY FORCED FOR EVERY USER */}
           <div className="p-3.5 rounded-2xl bg-gradient-to-r from-emerald-950/70 via-slate-900 to-amber-950/50 border border-emerald-500/40 space-y-2.5 shadow-md">
             <div className="flex items-center justify-between">
@@ -2010,60 +1955,77 @@ export default function App() {
           )}
         </div>
 
-        {/* Bottom Nav - Sticky Pinned */}
-        <nav className="sticky bottom-0 z-40 px-2 py-2 bg-slate-950/95 backdrop-blur-md border-t border-slate-800/80 flex items-center justify-around shrink-0 shadow-lg">
-          <button
-            onClick={() => setActiveTab('pair')}
-            className={`flex flex-col items-center gap-1 py-1 px-2.5 rounded-xl transition-all ${
-              activeTab === 'pair' ? 'text-emerald-400 font-bold' : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <KeyRound className="w-4 h-4" />
-            <span className="text-[10px]">Link</span>
-          </button>
-
-          <button
-            onClick={() => setActiveTab('groups')}
-            className={`flex flex-col items-center gap-1 py-1 px-2.5 rounded-xl transition-all relative ${
-              activeTab === 'groups' ? 'text-emerald-400 font-bold' : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <Crown className="w-4 h-4" />
-            <span className="text-[10px]">My Groups</span>
-            {status.isConnected && (
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 absolute top-1 right-2" />
-            )}
-          </button>
-
-          <button
-            onClick={() => setActiveTab('license')}
-            className={`flex flex-col items-center gap-1 py-1 px-2.5 rounded-xl transition-all ${
-              activeTab === 'license' ? 'text-emerald-400 font-bold' : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <Key className="w-4 h-4" />
-            <span className="text-[10px]">License</span>
-          </button>
-
-          <button
-            onClick={() => setActiveTab('commands')}
-            className={`flex flex-col items-center gap-1 py-1 px-2.5 rounded-xl transition-all ${
-              activeTab === 'commands' ? 'text-emerald-400 font-bold' : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <Terminal className="w-4 h-4" />
-            <span className="text-[10px]">Commands</span>
-          </button>
-
-          {isOwner && (
+        {/* Bottom Nav - Tip-Down Floating Bar (Non-movable, pinned to bottom) */}
+        <nav className="shrink-0 z-40 px-2.5 py-2 bg-slate-950/95 backdrop-blur-md border-t border-slate-800/90 shadow-2xl pb-[max(0.6rem,env(safe-area-inset-bottom))]">
+          <div className={`grid ${isOwner ? 'grid-cols-5' : 'grid-cols-4'} gap-1 text-[10px]`}>
             <button
-              onClick={() => setIsAdminModalOpen(true)}
-              className="flex flex-col items-center gap-1 py-1 px-2 rounded-xl text-amber-400 hover:text-amber-300 transition-all"
+              type="button"
+              onClick={() => setActiveTab('pair')}
+              className={`flex flex-col items-center justify-center gap-1 py-1.5 px-1 rounded-xl transition-all cursor-pointer ${
+                activeTab === 'pair'
+                  ? 'bg-emerald-500/15 text-emerald-400 font-bold border border-emerald-500/30 shadow-xs'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/50'
+              }`}
             >
-              <Zap className="w-4 h-4 fill-amber-400/30" />
-              <span className="text-[10px] font-bold">Admin OS</span>
+              <KeyRound className="w-4 h-4 shrink-0" />
+              <span className="truncate">Link</span>
             </button>
-          )}
+
+            <button
+              type="button"
+              onClick={() => setActiveTab('groups')}
+              className={`flex flex-col items-center justify-center gap-1 py-1.5 px-1 rounded-xl transition-all relative cursor-pointer ${
+                activeTab === 'groups'
+                  ? 'bg-emerald-500/15 text-emerald-400 font-bold border border-emerald-500/30 shadow-xs'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/50'
+              }`}
+            >
+              <div className="relative">
+                <Crown className="w-4 h-4 shrink-0" />
+                {status.isConnected && (
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 absolute -top-0.5 -right-1" />
+                )}
+              </div>
+              <span className="truncate">Groups</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab('license')}
+              className={`flex flex-col items-center justify-center gap-1 py-1.5 px-1 rounded-xl transition-all cursor-pointer ${
+                activeTab === 'license'
+                  ? 'bg-emerald-500/15 text-emerald-400 font-bold border border-emerald-500/30 shadow-xs'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/50'
+              }`}
+            >
+              <Key className="w-4 h-4 shrink-0" />
+              <span className="truncate">License</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab('commands')}
+              className={`flex flex-col items-center justify-center gap-1 py-1.5 px-1 rounded-xl transition-all cursor-pointer ${
+                activeTab === 'commands'
+                  ? 'bg-emerald-500/15 text-emerald-400 font-bold border border-emerald-500/30 shadow-xs'
+                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/50'
+              }`}
+            >
+              <Terminal className="w-4 h-4 shrink-0" />
+              <span className="truncate">Commands</span>
+            </button>
+
+            {isOwner && (
+              <button
+                type="button"
+                onClick={() => setIsAdminModalOpen(true)}
+                className="flex flex-col items-center justify-center gap-1 py-1.5 px-1 rounded-xl text-amber-400 hover:text-amber-300 hover:bg-amber-500/15 border border-amber-500/30 bg-amber-500/10 transition-all cursor-pointer shadow-xs"
+              >
+                <Zap className="w-4 h-4 shrink-0 fill-amber-400/40 text-amber-400" />
+                <span className="font-bold truncate">Admin OS</span>
+              </button>
+            )}
+          </div>
         </nav>
       </div>
 

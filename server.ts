@@ -19,6 +19,21 @@ async function startServer() {
 
   app.use(express.json());
 
+  // Serve solva.webp from root folder or public folder
+  app.get('/solva.webp', (_req, res) => {
+    const rootPath = path.resolve(__dirname, 'solva.webp');
+    const pubPath = path.resolve(__dirname, 'public', 'solva.webp');
+    if (fs.existsSync(rootPath)) {
+      res.setHeader('Content-Type', 'image/webp');
+      return res.sendFile(rootPath);
+    }
+    if (fs.existsSync(pubPath)) {
+      res.setHeader('Content-Type', 'image/webp');
+      return res.sendFile(pubPath);
+    }
+    res.status(404).send('Not found');
+  });
+
   // WhatsApp Baileys API endpoints
   app.get('/api/whatsapp/status', (_req, res) => {
     res.json({
@@ -307,7 +322,7 @@ async function startServer() {
 
   // 30-Minute Free Test Management Store (server-authoritative & persistent across restarts/devices)
   const trialStorePath = path.resolve(process.cwd(), '.trial_store.json');
-  const getTrialStore = (): Record<string, { uid?: string; email?: string; hasUsedTrial: boolean; isReset: boolean; expiresAt: string | null; claimedAt?: string; resetAt?: string }> => {
+  const getTrialStore = (): Record<string, { uid?: string; email?: string; hasUsedTrial: boolean; isReset?: boolean; lifetimeLocked?: boolean; expiresAt: string | null; claimedAt?: string; resetAt?: string }> => {
     try {
       if (fs.existsSync(trialStorePath)) {
         const raw = fs.readFileSync(trialStorePath, 'utf-8');
@@ -343,7 +358,6 @@ async function startServer() {
         return res.json({
           success: true,
           hasUsedTrial: false,
-          isReset: false,
           isActive: false,
           expiresAt: null,
           remainingMs: 0,
@@ -357,8 +371,7 @@ async function startServer() {
 
       return res.json({
         success: true,
-        hasUsedTrial: userRecord.hasUsedTrial && !userRecord.isReset,
-        isReset: Boolean(userRecord.isReset),
+        hasUsedTrial: Boolean(userRecord.hasUsedTrial),
         isActive,
         expiresAt: userRecord.expiresAt,
         remainingMs,
@@ -368,7 +381,7 @@ async function startServer() {
     }
   });
 
-  // 2. Claim 30-Minute Trial
+  // 2. Claim 30-Minute Trial (Once in a lifetime permanent lock per user/email)
   app.post('/api/trial/claim', (req, res) => {
     try {
       const { uid, email, currentExpiresAt } = req.body;
@@ -381,10 +394,10 @@ async function startServer() {
       const store = getTrialStore();
 
       const existing = store[cleanUid] || (cleanEmail && store[cleanEmail]);
-      if (existing && existing.hasUsedTrial && !existing.isReset) {
+      if (existing && existing.hasUsedTrial) {
         return res.status(400).json({
           success: false,
-          message: 'The 30-minute test has already been used on this Google account. It can only be claimed once in a lifetime.',
+          message: 'The 30-minute test is strictly once in a lifetime per user. It is permanently linked to your email in Firebase and cannot be claimed again.',
         });
       }
 
@@ -398,7 +411,7 @@ async function startServer() {
         uid: cleanUid,
         email: cleanEmail,
         hasUsedTrial: true,
-        isReset: false,
+        lifetimeLocked: true,
         claimedAt: new Date(now).toISOString(),
         expiresAt: newExpiresAt,
       };
@@ -417,66 +430,20 @@ async function startServer() {
     }
   });
 
-  // 3. Reset 30-Minute Trial (Admin action)
-  app.post('/api/trial/reset', (req, res) => {
-    try {
-      const { uid, email } = req.body;
-      if (!uid && !email) {
-        return res.status(400).json({ success: false, message: 'User ID or Email is required.' });
-      }
-
-      const cleanEmail = (email || '').toLowerCase().trim();
-      const cleanUid = uid || cleanEmail;
-      const store = getTrialStore();
-
-      const record = {
-        uid: cleanUid,
-        email: cleanEmail,
-        hasUsedTrial: false,
-        isReset: true,
-        expiresAt: null,
-        resetAt: new Date().toISOString(),
-      };
-
-      if (cleanUid) store[cleanUid] = record;
-      if (cleanEmail) store[cleanEmail] = record;
-
-      // Also reset any keys in store matching this email or uid
-      for (const k of Object.keys(store)) {
-        if (
-          (cleanEmail && (store[k].email?.toLowerCase() === cleanEmail || k.toLowerCase() === cleanEmail)) ||
-          (cleanUid && (store[k].uid === cleanUid || k === cleanUid))
-        ) {
-          store[k] = { ...record };
-        }
-      }
-
-      saveTrialStore(store);
-
-      return res.json({
-        success: true,
-        message: `30-minute test reset for ${cleanEmail || cleanUid}! They can tap and claim it again.`,
-      });
-    } catch (err: any) {
-      res.status(500).json({ success: false, message: err.message });
-    }
+  // 3. Reset 30-Minute Trial (DISABLED: Once in a lifetime forever)
+  app.post('/api/trial/reset', (_req, res) => {
+    return res.status(403).json({
+      success: false,
+      message: 'The 30-minute trial is permanent and once in a lifetime per user email in Firebase. Admin cannot reset or return 30-minute trials.',
+    });
   });
 
-  // 4. Reset all trials (Admin action)
+  // 4. Reset all trials (DISABLED: Once in a lifetime forever)
   app.post('/api/trial/reset-all', (_req, res) => {
-    try {
-      const store = getTrialStore();
-      for (const k of Object.keys(store)) {
-        store[k].hasUsedTrial = false;
-        store[k].isReset = true;
-        store[k].expiresAt = null;
-        store[k].resetAt = new Date().toISOString();
-      }
-      saveTrialStore(store);
-      return res.json({ success: true, message: 'All user 30-minute trials have been reset!' });
-    } catch (err: any) {
-      res.status(500).json({ success: false, message: err.message });
-    }
+    return res.status(403).json({
+      success: false,
+      message: 'The 30-minute trial is permanent and once in a lifetime per user email in Firebase. Admin cannot reset or return 30-minute trials.',
+    });
   });
 
   // Execute bot command directly via Simulator / Web UI

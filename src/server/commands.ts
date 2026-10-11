@@ -13,6 +13,7 @@ export interface CommandContext {
   groupJid?: string;
   pushName?: string;
   isOwner: boolean;
+  isGroupAdmin?: boolean;
   linkedSince?: number | null;
   linkedPhone?: string | null;
   licenseExpiresAt?: string | null;
@@ -24,6 +25,41 @@ export interface CommandContext {
   getGroupInviteCode?: (gid: string) => string | undefined;
   setGroupInviteCode?: (gid: string, code: string) => void;
 }
+
+export const GROUP_ONLY_COMMANDS = new Set([
+  'anti',
+  'warn',
+  'warnlimit',
+  'warns',
+  'unwarn',
+  'clearwarns',
+  'resetwarns',
+  'antilink',
+  'antibot',
+  'antistatus',
+  'antispam',
+  'autowelcome',
+  'welcome',
+  'autogoodbye',
+  'goodbye',
+  'kick',
+  'remove',
+  'add',
+  'invite',
+  'promote',
+  'demote',
+  'lock',
+  'unlock',
+  'pin',
+  'tagall',
+  'everyone',
+  'admin',
+  'admins',
+  'link',
+  'groupinfo',
+  'gcinfo',
+  'group',
+]);
 
 export interface CommandResult {
   reply: string;
@@ -405,20 +441,35 @@ class CommandHandler {
     const cmd = ctx.command.toLowerCase();
     const startTime = Date.now();
 
+    // STRICT RULE: Group commands must NEVER answer in 1v1 chat!
+    if (!ctx.isGroup && GROUP_ONLY_COMMANDS.has(cmd)) {
+      return { reply: '' };
+    }
+
+    // STRICT RULE: Only admin connected to bot can use group commands (.warn, .anti, etc.) in a group!
+    if (ctx.isGroup && GROUP_ONLY_COMMANDS.has(cmd)) {
+      const isAuthorized = ctx.isOwner || Boolean(ctx.isGroupAdmin);
+      if (!isAuthorized) {
+        return { reply: '' }; // Regular members in group get no answer!
+      }
+    }
+
     // 1. Core Utility Commands (Batch 1)
     if (cmd === 'menu' || cmd === 'help') {
       return { reply: SOLVATECH_MENU };
     }
 
     if (cmd === 'ping') {
-      const latency = Date.now() - startTime + Math.floor(Math.random() * 20 + 15);
+      const latency = Date.now() - startTime + Math.floor(Math.random() * 15 + 8);
       return {
         reply: `⚡ *PONG!*
-Speed: *${latency}ms*
-Status: *Active & Operational* 🟢
-Engine: *SOLVATECH Multi-Device Engine*
-Cloud Worker: *Online & Synced* 🛡️
-Web Portal: *${process.env.APP_URL || 'SOLVATECH Web Console'}*`,
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚡ *Latency:* *${latency}ms*
+🟢 *Status:* *ACTIVE & OPERATIONAL*
+🛡️ *Engine:* *SOLVATECH Multi-Device Engine*
+🌐 *Portal:* solvatech.up.railway.app
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+> ⚡ *SOLVATECH FAST ENGINE*`,
       };
     }
 
@@ -461,17 +512,19 @@ Web Portal: *${process.env.APP_URL || 'SOLVATECH Web Console'}*`,
     if (cmd === 'owner') {
       return {
         reply: `👑 *SOLVATECH BOT OWNER & DEVELOPER*
-
-👤 Developer: *Solomon Oladimeji*
-📧 Contact: *awoyinfasolomon1@gmail.com*
-💳 OPay Account: *9049979183* (Solomon Oladimeji)
-💬 Official WhatsApp: *+234 904 997 9183*
-🔒 Bot Mode: *100% Private (Owner Protected)*
-🌐 Web Console: *${process.env.APP_URL || 'SOLVATECH Web Console'}*
-🛡️ Status: *Official Certified Developer*
-
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+👤 *Developer:* *Solomon Oladimeji*
+📧 *Contact:* *awoyinfasolomon1@gmail.com*
+💳 *OPay Account:* *9049979183* (Solomon Oladimeji)
+💬 *Official WhatsApp:* *+234 904 997 9183*
+🔒 *Bot Mode:* *100% Private (Owner Protected)*
+🌐 *Web Portal:* solvatech.up.railway.app
+🛡️ *Status:* *Official Certified Developer*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
 🌐 *WEB DEVELOPMENT SERVICES:*
-_Need a custom website of any kind? Developer Solomon builds high-performance websites, e-commerce stores, web applications, SaaS dashboards, and automated bots. DM +2349049979183 for your website project!_`,
+_Need a custom website of any kind? Developer Solomon builds high-performance websites, e-commerce stores, web applications, SaaS dashboards, and automated bots. DM +2349049979183 for your website project!_
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+> ⚡ *SOLVATECH BOT* • _Solomon Oladimeji_`,
       };
     }
 
@@ -523,7 +576,7 @@ Type *.plans* or *.buy* to select a duration and pay to OPay *9049979183*.`,
     if (cmd === 'plans' || cmd === 'buy' || cmd === 'price' || cmd === 'license') {
       return {
         reply: `⚔️ *SOLVATECH BOT — LICENSE PLANS* ⚔️
-
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
 🔑 *Choose your license duration:*
 • 1 Day — *₦200*
 • 3 Days — *₦500*
@@ -534,20 +587,23 @@ Type *.plans* or *.buy* to select a duration and pay to OPay *9049979183*.`,
 • 3 Months — *₦12,000*
 • 6 Months — *₦24,000*
 • 12 Months / 1 Year — *₦48,000*
-
-💳 *OFFICIAL OPAY PAYMENT DETAILS*
-🏦 *Bank*: *OPay (PayCom / Microfinance Bank)*
-🔢 *Account Number*: *9049979183*
-👤 *Account Name*: *SOLOMON OLADIMEJI*
-
-📝 *Payment Verification*: Transfer to OPay *9049979183* and send payment screenshot/receipt to WhatsApp *wa.me/2349049979183* for instant license key activation!
-🌐 *Redeem Key*: ${process.env.APP_URL || 'Official Web Console'}`,
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+💳 *OFFICIAL OPAY PAYMENT DETAILS:*
+🏦 *Bank:* *OPay (PayCom / Microfinance Bank)*
+🔢 *Account Number:* *9049979183*
+👤 *Account Name:* *SOLOMON OLADIMEJI*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📝 *Payment Verification:* Transfer to OPay *9049979183* and send receipt to WhatsApp *wa.me/2349049979183* for instant license activation!
+🌐 *Redeem Key:* solvatech.up.railway.app
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+> ⚡ *SOLVATECH BOT* • _Solomon Oladimeji_`,
       };
     }
 
     if (cmd === 'share') {
       return {
         reply: `🚀 *SHARE SOLVATECH BOT*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Empower your WhatsApp account and groups with next-generation automated security, Anti-Delete recovery, View-Once bypass, and high-speed multi-device automation!
 
 ⚡ *TOP FEATURES:*
@@ -559,8 +615,10 @@ Empower your WhatsApp account and groups with next-generation automated security
 🌐 *WEB SERVICES:*
 Developer Solomon also builds websites of any kind! DM *wa.me/2349049979183* for web development projects.
 
-👉 *Visit ${process.env.APP_URL || 'the Web Console'} to connect your WhatsApp!*
-_Forward this message to friends & groups to share!_`,
+👉 *Visit solvatech.up.railway.app to connect your WhatsApp!*
+_Forward this message to friends & groups to share!_
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+> ⚡ *SOLVATECH BOT* • _Solomon Oladimeji_`,
       };
     }
 
@@ -1199,22 +1257,57 @@ Message successfully pinned for 7 days by Group Admin!
     }
 
     if (cmd === 'anti') {
+      if (!ctx.isGroup || (!ctx.isOwner && !ctx.isGroupAdmin)) {
+        return { reply: '' };
+      }
       const gid = ctx.groupJid || 'default';
       const sec = this.getSecuritySettings(gid);
       return {
-        reply: `🛡️ *SOLVATECH GROUP DEFENSE MATRIX*
-━━━━━━━━━━━━━━━━━━━━━━━━━━━
-• Anti-Link: *${sec.antilink ? 'Active 🌐' : 'Disabled'}*
-• Anti-Bot: *${sec.antibot ? 'Active 🤖' : 'Disabled'}*
-• Anti-Status Mention: *${sec.antistatus ? 'Active 📱' : 'Disabled'}*
-• Anti-Spam: *${sec.antispam ? 'Active 🚫 (Purge + Instant Kick)' : 'Disabled'}*
-• Auto-Welcome: *${sec.autowelcome ? 'Active 👋 (Admin Bot Only)' : 'Disabled'}*
-• Auto-Goodbye: *${sec.autogoodbye ? 'Active 🚪 (Admin Bot Only)' : 'Disabled'}*
-• Anti-Delete Recovery: *Active (DM Forward) 🛡️*
-• View-Once Protection: *Active (DM Decrypt) 👁️*
-• Warning Threshold: *${sec.warnLimit || 3} Warnings before auto-kick*
-━━━━━━━━━━━━━━━━━━━━━━━━━━━
-_All anti violations share the same unified warning threshold._`,
+        reply: `╭━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╮
+┃  🛡️ *SOLVATECH GROUP DEFENSE MATRIX* 🛡️  ┃
+╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯
+
+⚡ *STATUS:*  🟢 *ARMED & OPERATIONAL*
+👑 *ACCESS:*  👑 *ADMINISTRATORS ONLY*
+🌐 *DOMAIN:* solvatech.up.railway.app
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🛡️ *ACTIVE SHIELD POLICIES*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🌐 *ANTI-LINK SYSTEM:*
+   ► *STATUS:* ${sec.antilink ? '🟢 *ENABLED & ENFORCED*' : '🔴 *DISABLED*'}
+   ► *POLICY:* *Auto-delete link + 1 Security Warning*
+
+🤖 *ANTI-BOT SYSTEM:*
+   ► *STATUS:* ${sec.antibot ? '🟢 *ENABLED & ENFORCED*' : '🔴 *DISABLED*'}
+   ► *POLICY:* *Auto-purge member prefix commands + Warning*
+
+📱 *ANTI-STATUS MENTIONS:*
+   ► *STATUS:* ${sec.antistatus ? '🟢 *ENABLED & ENFORCED*' : '🔴 *DISABLED*'}
+   ► *POLICY:* *Block group status mentions + Warning*
+
+🚫 *ANTI-SPAM DEFENSE:*
+   ► *STATUS:* ${sec.antispam ? '🟢 *ENABLED & ENFORCED*' : '🔴 *DISABLED*'}
+   ► *POLICY:* *Auto-purge flood messages + INSTANT KICK*
+
+👋 *AUTO-WELCOME:*
+   ► *STATUS:* ${sec.autowelcome ? '🟢 *ENABLED (ADMIN BOT)*' : '🔴 *DISABLED*'}
+   ► *POLICY:* *Contextual welcome greeting to new members*
+
+🚪 *AUTO-GOODBYE:*
+   ► *STATUS:* ${sec.autogoodbye ? '🟢 *ENABLED (ADMIN BOT)*' : '🔴 *DISABLED*'}
+   ► *POLICY:* *Departure acknowledgments*
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚙️ *WARNING & PUNISHMENT RULES*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚠️ *WARNING LIMIT:* *${sec.warnLimit || 3} WARNINGS*
+🔨 *ENFORCEMENT:* *AUTOMATIC KICK AT STRIKE ${sec.warnLimit || 3}*
+🗑️ *OFFENDING MEDIA:* *Auto-deleted on warning (pics/stickers/text)*
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+> 🛡️ *SOLVATECH AUTOMATED ENGINE* • _solvatech.up.railway.app_`,
       };
     }
 
@@ -1244,14 +1337,14 @@ _All anti violations share the same unified warning threshold._`,
       return {
         reply: `✍️ *SOLVATECH OFFICIAL SIGNATURE & BADGE*
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
-⚡ *Bot Engine:* SOLVATECH Multi-Device Engine
-👑 *Developer / Owner:* Solomon Oladimeji
-📧 *Email:* awoyinfasolomon1@gmail.com
-💳 *OPay Account:* 9049979183 (Solomon Oladimeji)
-💬 *Official WhatsApp:* +234 904 997 9183
-🔒 *Bot Access Mode:* 100% Private (Owner-Only Execution)
-🌐 *Platform:* ${process.env.APP_URL || 'SOLVATECH Cloud Automation'}
-
+⚡ *Bot Engine:* *SOLVATECH Multi-Device Engine*
+👑 *Developer / Owner:* *Solomon Oladimeji*
+📧 *Email:* *awoyinfasolomon1@gmail.com*
+💳 *OPay Account:* *9049979183* (Solomon Oladimeji)
+💬 *Official WhatsApp:* *+234 904 997 9183*
+🔒 *Bot Access Mode:* *100% Private (Owner-Only Execution)*
+🌐 *Web Portal:* solvatech.up.railway.app
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
 🌐 *WEB SERVICES:*
 Developer Solomon builds websites of any kind! DM *wa.me/2349049979183* for custom web applications, SaaS dashboards, e-commerce, and bots.
 
