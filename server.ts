@@ -14,7 +14,7 @@ const __dirname = path.dirname(__filename);
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
   const isProd = process.env.NODE_ENV === 'production';
 
   app.use(express.json());
@@ -63,7 +63,7 @@ async function startServer() {
       res.json({
         success: true,
         pairingCode,
-        targetPhone: req.body.phoneNumber,
+        targetPhone: whatsappManager.getStatus().targetPhone || req.body.phoneNumber,
         status: whatsappManager.getStatus(),
       });
     } catch (err: any) {

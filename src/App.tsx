@@ -511,11 +511,21 @@ export default function App() {
     }
 
     let cleanEntered = phoneNumber.replace(/\D/g, '');
-    if (cleanEntered.startsWith('0')) {
-      cleanEntered = cleanEntered.substring(1);
+    if (cleanEntered.startsWith('00')) {
+      cleanEntered = cleanEntered.substring(2);
     }
 
     const cleanDial = selectedCountry.dialCode.replace(/\D/g, '');
+    
+    // Auto-fix: if user typed/pasted number already starting with the selected country code
+    if (cleanDial && cleanEntered.startsWith(cleanDial + cleanDial)) {
+      cleanEntered = cleanEntered.substring(cleanDial.length);
+    } else if (cleanDial && cleanEntered.startsWith(cleanDial)) {
+      cleanEntered = cleanEntered.substring(cleanDial.length);
+    } else if (cleanEntered.startsWith('0')) {
+      cleanEntered = cleanEntered.substring(1);
+    }
+
     const fullNumber = `${cleanDial}${cleanEntered}`;
 
     setLoading(true);
@@ -1552,15 +1562,32 @@ export default function App() {
 
                   {/* Instructions */}
                   {pairingCode && (
-                    <div className="text-[11px] text-slate-300 space-y-1 bg-slate-900/60 p-3 rounded-xl border border-slate-800">
-                      <p className="font-semibold text-white">How to link on your phone:</p>
-                      <ol className="list-decimal list-inside space-y-0.5 text-slate-400">
-                        <li>Open WhatsApp on your phone</li>
-                        <li>Tap <strong>Settings / ⋮</strong> → <strong>Linked Devices</strong></li>
-                        <li>Tap <strong>Link a Device</strong></li>
-                        <li>Tap <strong className="text-emerald-400">Link with phone number instead</strong></li>
-                        <li>Enter the code above: <strong className="text-emerald-400 font-mono">{pairingCode}</strong></li>
-                      </ol>
+                    <div className="text-[11px] text-slate-300 space-y-2 bg-slate-900/80 p-3.5 rounded-xl border border-emerald-500/40 shadow-sm">
+                      <div className="flex items-center justify-between pb-1 border-b border-slate-800">
+                        <span className="font-bold text-white flex items-center gap-1.5">
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                          <span>Code Dispatched to WhatsApp</span>
+                        </span>
+                        <span className="font-mono text-[10px] text-emerald-400 font-bold">
+                          {status.targetPhone || `+${phoneNumber.replace(/\D/g, '')}`}
+                        </span>
+                      </div>
+                      <p className="font-semibold text-slate-200">2 Ways to complete link on your phone:</p>
+                      <div className="space-y-1.5 text-slate-300 pl-1">
+                        <p>
+                          <strong className="text-white">Option A (Push Notification):</strong> If a WhatsApp banner popped up on your phone screen, simply tap it and enter <strong className="text-emerald-400 font-mono">{pairingCode}</strong>.
+                        </p>
+                        <p>
+                          <strong className="text-white">Option B (Direct in WhatsApp):</strong>
+                        </p>
+                        <ol className="list-decimal list-inside space-y-0.5 text-slate-400 pl-1">
+                          <li>Open WhatsApp on this phone</li>
+                          <li>Go to <strong>Settings (or ⋮ 3 dots) → Linked Devices</strong></li>
+                          <li>Tap <strong>Link a Device</strong></li>
+                          <li>Tap <strong className="text-emerald-400 font-semibold">Link with phone number instead</strong> at the bottom</li>
+                          <li>Enter the 8-digit code: <strong className="text-emerald-400 font-mono text-xs">{pairingCode}</strong></li>
+                        </ol>
+                      </div>
                     </div>
                   )}
                 </div>

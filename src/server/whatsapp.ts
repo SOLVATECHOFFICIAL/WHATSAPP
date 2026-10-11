@@ -584,7 +584,7 @@ class WhatsAppManager {
           },
           logger: pinoLogger,
           printQRInTerminal: false,
-          browser: Browsers.ubuntu('Chrome'),
+          browser: Browsers.windows('Chrome'),
           connectTimeoutMs: 60000,
           defaultQueryTimeoutMs: 60000,
           keepAliveIntervalMs: 30000,
@@ -3057,7 +3057,19 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
   }
 
   public async requestPairingCode(rawPhoneNumber: string): Promise<string> {
-    const cleanPhone = rawPhoneNumber.replace(/\D/g, '');
+    let cleanPhone = rawPhoneNumber.replace(/\D/g, '');
+    if (cleanPhone.startsWith('00')) {
+      cleanPhone = cleanPhone.slice(2);
+    }
+    // Automatically detect and fix accidental double country codes (e.g., 234234..., 4444..., 11...)
+    const commonCodes = ['234', '233', '254', '256', '255', '27', '1', '44', '91', '62', '55', '92', '20', '212', '213', '216', '218', '220', '221', '222', '223', '224', '225', '226', '227', '228', '229'];
+    for (const prefix of commonCodes) {
+      if (cleanPhone.startsWith(prefix + prefix) && cleanPhone.length > prefix.length * 2 + 5) {
+        cleanPhone = cleanPhone.slice(prefix.length);
+        console.log(`[Baileys Pairing] Auto-corrected double dial code from +${rawPhoneNumber} to +${cleanPhone}`);
+        break;
+      }
+    }
     if (!cleanPhone || cleanPhone.length < 8) {
       throw new Error('Please provide a valid phone number with country code (e.g., 2348012345678)');
     }
