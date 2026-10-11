@@ -22,6 +22,30 @@ import { commandHandler, parseSpamArgs, GROUP_ONLY_COMMANDS } from './commands.t
 import { db } from '../services/firebase.ts';
 import { doc, getDoc, setDoc, deleteDoc, collection, getDocs } from 'firebase/firestore';
 
+// Helper: Retrieve official SOLVATECH brand image as buffer for WhatsApp messages (.menu, welcome, etc.)
+export async function getSolvaBrandBuffer(): Promise<Buffer | null> {
+  const candidatePaths = [
+    path.resolve(process.cwd(), 'public', 'solva.webp'),
+    path.resolve(process.cwd(), 'solva.webp'),
+    path.resolve(process.cwd(), 'dist', 'solva.webp'),
+  ];
+  for (const p of candidatePaths) {
+    if (fs.existsSync(p)) {
+      try {
+        const raw = fs.readFileSync(p);
+        try {
+          return await sharp(raw).jpeg({ quality: 90 }).toBuffer();
+        } catch {
+          return raw;
+        }
+      } catch (err) {
+        console.warn('Could not read solva brand image at', p, err);
+      }
+    }
+  }
+  return null;
+}
+
 // Helper: Iteratively unwrap ephemeral, viewOnce, and document wrappers
 export function unwrapMessage(msgObj: any): any {
   if (!msgObj) return null;
@@ -1084,10 +1108,20 @@ export class WhatsAppManager {
               const ownerDm = `${phone}@s.whatsapp.net`;
               setTimeout(async () => {
                 try {
-                  await sock.sendMessage(ownerDm, {
-                    text: `⚡ *SOLVATECH BOT CONNECTED SUCCESSFULLY* ⚡\n\n🎉 Welcome! Your WhatsApp account (+${phone}) is now officially linked with the SOLVATECH automation engine.\n\n🛡️ *Active Features:*\n• Anti-Delete Message Recovery (deleted messages flood here)\n• View-Once Media Decryption (*.open* / *.vv*)\n• Group Security, Anti-Link & Anti-Bot matrix\n• High-Speed Media & Sticker Converters\n• Over 35+ Automation Commands\n\n💬 *Commands Directory:* Type *.menu* to view all commands.\n🌐 *Web Console:* ${process.env.APP_URL || 'SOLVATECH Web Portal'}\n\n> 👑 _Developer: Solomon Oladimeji (+234 904 997 9183)_`,
-                  });
-                  console.log(`[WhatsApp Notification] Fresh pairing confirmation sent to ${ownerDm} (once only)`);
+                  const welcomeCaption = `⚡ *SOLVATECH BOT CONNECTED SUCCESSFULLY* ⚡\n\n🎉 Welcome! Your WhatsApp account (+${phone}) is now officially linked with the SOLVATECH automation engine.\n\n🛡️ *Active Features:*\n• Anti-Delete Message Recovery (deleted messages flood here)\n• View-Once Media Decryption (*.open* / *.vv*)\n• Group Security, Anti-Link & Anti-Bot matrix\n• High-Speed Media & Sticker Converters\n• Over 35+ Automation Commands\n\n💬 *Commands Directory:* Type *.menu* to view all commands.\n🌐 *Web Console:* ${process.env.APP_URL || 'SOLVATECH Web Portal'}\n\n> 👑 _Developer: Solomon Oladimeji (+234 904 997 9183)_`;
+                  const brandBuf = await getSolvaBrandBuffer();
+                  if (brandBuf) {
+                    await sock.sendMessage(ownerDm, {
+                      image: brandBuf,
+                      caption: welcomeCaption,
+                      mimetype: 'image/jpeg',
+                    });
+                  } else {
+                    await sock.sendMessage(ownerDm, {
+                      text: welcomeCaption,
+                    });
+                  }
+                  console.log(`[WhatsApp Notification] Fresh pairing confirmation sent with brand image to ${ownerDm} (once only)`);
                 } catch (dmErr) {
                   console.warn('[WhatsApp Notification] Note sending welcome DM:', dmErr);
                 }
@@ -2820,7 +2854,35 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
               if (!finalText.includes('SOLVATECH') && !finalText.includes('Solomon')) {
                 finalText += `\n\n> ⚡ *SOLVATECH BOT* • _Solomon Oladimeji_`;
               }
-              if (res.imageUrl) {
+              const isBrandMenuCommand =
+                command === 'menu' ||
+                command === 'help' ||
+                command === 'signature' ||
+                command === 'sign' ||
+                command === 'dev' ||
+                res.imageUrl === '/solva.webp';
+
+              if (isBrandMenuCommand) {
+                try {
+                  const brandBuf = await getSolvaBrandBuffer();
+                  if (brandBuf) {
+                    await sock.sendMessage(
+                      remoteJid,
+                      {
+                        image: brandBuf,
+                        caption: finalText,
+                        mimetype: 'image/jpeg',
+                      },
+                      { quoted: msg }
+                    );
+                  } else {
+                    await sock.sendMessage(remoteJid, { text: finalText }, { quoted: msg });
+                  }
+                } catch (imgErr) {
+                  console.warn('Brand image sending note, fallback to text:', imgErr);
+                  await sock.sendMessage(remoteJid, { text: finalText }, { quoted: msg });
+                }
+              } else if (res.imageUrl) {
                 try {
                   await sock.sendMessage(
                     remoteJid,

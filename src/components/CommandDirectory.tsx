@@ -98,17 +98,23 @@ export const CommandDirectory: React.FC<CommandDirectoryProps> = ({ onRunCommand
     <div className="bg-slate-950 border border-slate-800 rounded-2xl p-5 shadow-xl space-y-4">
       {/* Header */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
-        <div>
-          <div className="flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
-            <h3 className="font-bold text-white text-base">SOLVATECH Command Directory</h3>
-            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/10 text-amber-300 border border-amber-500/20">
-              35+ COMMANDS
-            </span>
+        <div className="flex items-center gap-3">
+          <img
+            src="/solva.webp"
+            alt="SOLVATECH"
+            className="w-10 h-10 rounded-xl object-cover ring-1 ring-emerald-500/40 shadow-md shrink-0"
+          />
+          <div>
+            <div className="flex items-center gap-2">
+              <h3 className="font-bold text-white text-base">SOLVATECH Command Directory</h3>
+              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/10 text-amber-300 border border-amber-500/20">
+                35+ COMMANDS
+              </span>
+            </div>
+            <p className="text-xs text-slate-400 mt-0.5">
+              100% Private (Owner-Only) • Anti-Delete Recovery • Firebase Cloud Sync
+            </p>
           </div>
-          <p className="text-xs text-slate-400 mt-0.5">
-            100% Private (Owner-Only) • Anti-Delete Recovery • Firebase Cloud Sync
-          </p>
         </div>
 
         <button

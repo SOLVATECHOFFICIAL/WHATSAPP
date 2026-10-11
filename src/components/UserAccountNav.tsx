@@ -69,34 +69,22 @@ export const UserAccountNav: React.FC<UserAccountNavProps> = ({ user, onOpenAuth
           </p>
         </div>
 
-        {user.photoURL ? (
-          <img
-            src={user.photoURL}
-            alt="User avatar"
-            className="w-6 h-6 sm:w-7 sm:h-7 rounded-lg object-cover ring-1 ring-emerald-500/50"
-          />
-        ) : (
-          <div className="w-6 h-6 sm:w-7 sm:h-7 rounded-lg bg-emerald-600 text-white font-bold flex items-center justify-center text-xs">
-            {user.displayName?.charAt(0) || 'U'}
-          </div>
-        )}
+        <img
+          src={user.photoURL || '/solva.webp'}
+          alt="User avatar"
+          className="w-6 h-6 sm:w-7 sm:h-7 rounded-lg object-cover ring-1 ring-emerald-500/50"
+        />
         <ChevronDown className="w-3 h-3 text-slate-400 shrink-0" />
       </button>
 
       {isOpen && (
         <div className="absolute right-0 mt-2 w-60 sm:w-64 max-w-[calc(100vw-2rem)] bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl p-3 z-50 animate-in fade-in zoom-in-95 duration-100 space-y-3">
           <div className="pb-2.5 border-b border-slate-800 flex items-center gap-2.5 min-w-0">
-            {user.photoURL ? (
-              <img
-                src={user.photoURL}
-                alt="User avatar"
-                className="w-8 h-8 rounded-xl object-cover ring-1 ring-emerald-500/50 shrink-0"
-              />
-            ) : (
-              <div className="w-8 h-8 rounded-xl bg-emerald-600 text-white font-bold flex items-center justify-center text-xs shrink-0">
-                {user.displayName?.charAt(0) || 'U'}
-              </div>
-            )}
+            <img
+              src={user.photoURL || '/solva.webp'}
+              alt="User avatar"
+              className="w-8 h-8 rounded-xl object-cover ring-1 ring-emerald-500/50 shrink-0"
+            />
             <div className="min-w-0 flex-1">
               <p className="font-bold text-white text-xs truncate">{user.displayName || 'Personal Account'}</p>
               <p className="text-[10px] text-slate-400 truncate">{user.email}</p>

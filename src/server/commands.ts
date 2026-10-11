@@ -491,7 +491,7 @@ class CommandHandler {
 
     // 1. Core Utility Commands (Batch 1)
     if (cmd === 'menu' || cmd === 'help') {
-      return { reply: SOLVATECH_MENU };
+      return { reply: SOLVATECH_MENU, imageUrl: '/solva.webp' };
     }
 
     if (cmd === 'ping') {
@@ -546,6 +546,7 @@ class CommandHandler {
 
     if (cmd === 'owner') {
       return {
+        imageUrl: '/solva.webp',
         reply: `👑 *SOLVATECH BOT OWNER & DEVELOPER*
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
 👤 *Developer:* *Solomon Oladimeji*
@@ -1418,6 +1419,7 @@ Message successfully pinned for 7 days by Group Admin!
 
     if (cmd === 'signature' || cmd === 'sign' || cmd === 'dev') {
       return {
+        imageUrl: '/solva.webp',
         reply: `✍️ *SOLVATECH OFFICIAL SIGNATURE & BADGE*
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ⚡ *Bot Engine:* *SOLVATECH Multi-Device Engine*

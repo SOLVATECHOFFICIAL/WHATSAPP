@@ -53,9 +53,11 @@ GEMINI_API_KEY=YOUR_GEMINI_API_KEY`;
       <div className="bg-slate-900 border border-slate-800 rounded-3xl w-full max-w-2xl overflow-hidden shadow-2xl animate-in zoom-in-95 duration-150">
         <div className="p-5 border-b border-slate-800 flex items-center justify-between bg-slate-950/60">
           <div className="flex items-center gap-3">
-            <div className="p-2.5 rounded-xl bg-purple-500/10 text-purple-400 border border-purple-500/20">
-              <Server className="w-5 h-5 font-bold" />
-            </div>
+            <img
+              src="/solva.webp"
+              alt="SOLVATECH"
+              className="w-10 h-10 rounded-xl object-cover ring-1 ring-purple-500/40 shadow-md shrink-0"
+            />
             <div>
               <h3 className="font-bold text-white text-base">24/7 Railway Deployment Architecture</h3>
               <p className="text-xs text-slate-400">Keep SOLVATECH online 24/7 without disconnects</p>

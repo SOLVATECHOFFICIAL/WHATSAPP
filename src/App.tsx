@@ -1536,9 +1536,11 @@ export default function App() {
                     <div className="p-4 rounded-2xl bg-gradient-to-r from-amber-950/70 via-slate-900 to-emerald-950/50 border-2 border-amber-500/60 shadow-xl space-y-3">
                       <div className="flex items-start justify-between gap-3">
                         <div className="flex items-start gap-3">
-                          <div className="w-10 h-10 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0 border border-amber-500/40">
-                            <Sparkles className="w-5 h-5 text-amber-400" />
-                          </div>
+                          <img
+                            src="/solva.webp"
+                            alt="SOLVATECH"
+                            className="w-10 h-10 rounded-xl object-cover ring-1 ring-amber-500/50 shadow-md shrink-0"
+                          />
                           <div>
                             <div className="flex items-center gap-2 flex-wrap">
                               <h4 className="font-bold text-sm text-white">🎁 30-Minute Free Test</h4>
@@ -1740,9 +1742,11 @@ export default function App() {
               <div className="p-4 rounded-2xl bg-gradient-to-r from-amber-950/70 via-slate-900 to-emerald-950/50 border-2 border-amber-500/60 shadow-xl space-y-3">
                 <div className="flex items-start justify-between gap-3">
                   <div className="flex items-start gap-3">
-                    <div className="w-10 h-10 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0 border border-amber-500/40">
-                      <Sparkles className="w-5 h-5 text-amber-400" />
-                    </div>
+                    <img
+                      src="/solva.webp"
+                      alt="SOLVATECH"
+                      className="w-10 h-10 rounded-xl object-cover ring-1 ring-amber-500/50 shadow-md shrink-0"
+                    />
                     <div>
                       <div className="flex items-center gap-2 flex-wrap">
                         <h4 className="font-bold text-sm text-white">🎁 30-Minute Free Test</h4>

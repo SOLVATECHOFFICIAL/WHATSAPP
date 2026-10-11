@@ -7,6 +7,7 @@ interface Message {
   text: string;
   time: string;
   isDeleted?: boolean;
+  imageUrl?: string;
 }
 
 interface ChatSimulatorProps {
@@ -24,6 +25,7 @@ export const ChatSimulator: React.FC<ChatSimulatorProps> = ({
       sender: 'bot',
       text: `╭━━━〔 ⚡ *SOLVATECH BOT READY* 〕━━━╮\n\nType *.menu* to view all commands, or *.ping* to test latency!`,
       time: '12:00 PM',
+      imageUrl: '/solva.webp',
     },
   ]);
   const [inputText, setInputText] = useState('');
@@ -69,11 +71,19 @@ export const ChatSimulator: React.FC<ChatSimulatorProps> = ({
 
       const data = await res.json();
       if (data.success && data.result) {
+        const isMenuOrBrand =
+          textToSend.trim().toLowerCase().startsWith('.menu') ||
+          textToSend.trim().toLowerCase().startsWith('.help') ||
+          textToSend.trim().toLowerCase().startsWith('.signature') ||
+          textToSend.trim().toLowerCase().startsWith('.owner') ||
+          Boolean(data.result.imageUrl);
+
         const botMsg: Message = {
           id: Math.random().toString(36).substring(2),
           sender: 'bot',
           text: data.result.reply,
           time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          imageUrl: data.result.imageUrl || (isMenuOrBrand ? '/solva.webp' : undefined),
         };
         setMessages((prev) => [...prev, botMsg]);
       }
@@ -113,8 +123,13 @@ export const ChatSimulator: React.FC<ChatSimulatorProps> = ({
       {/* WhatsApp Header */}
       <div className="p-3.5 bg-slate-900 border-b border-slate-800 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-full bg-emerald-600 flex items-center justify-center text-white font-bold text-sm shadow-md">
-            <Bot className="w-5 h-5" />
+          <div className="relative shrink-0">
+            <img
+              src="/solva.webp"
+              alt="SOLVATECH"
+              className="w-9 h-9 rounded-full object-cover ring-2 ring-emerald-500/50 shadow-md"
+            />
+            <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 border-2 border-slate-900 absolute -bottom-0.5 -right-0.5 animate-pulse" />
           </div>
           <div>
             <h4 className="text-sm font-bold text-white leading-tight flex items-center gap-1.5">
@@ -162,7 +177,7 @@ export const ChatSimulator: React.FC<ChatSimulatorProps> = ({
               className={`flex flex-col ${isBot ? 'items-start' : 'items-end'}`}
             >
               <div
-                className={`max-w-[85%] sm:max-w-[78%] rounded-2xl px-4 py-2.5 text-xs shadow-md ${
+                className={`max-w-[88%] sm:max-w-[80%] rounded-2xl px-4 py-2.5 text-xs shadow-md ${
                   isBot
                     ? 'bg-slate-900 border border-slate-800 text-slate-100 rounded-tl-sm'
                     : m.isDeleted
@@ -170,6 +185,27 @@ export const ChatSimulator: React.FC<ChatSimulatorProps> = ({
                     : 'bg-emerald-700 text-white rounded-tr-sm'
                 }`}
               >
+                {isBot && (
+                  <div className="flex items-center gap-1.5 mb-1.5 pb-1 border-b border-slate-800/80">
+                    <img
+                      src="/solva.webp"
+                      alt="SOLVATECH"
+                      className="w-4 h-4 rounded-full object-cover ring-1 ring-emerald-500/40 shrink-0"
+                    />
+                    <span className="text-[10px] font-bold text-emerald-400 font-mono tracking-wide">
+                      SOLVATECH BOT
+                    </span>
+                  </div>
+                )}
+                {m.imageUrl && (
+                  <div className="mb-2.5 rounded-xl overflow-hidden border border-emerald-500/40 shadow-lg max-w-sm">
+                    <img
+                      src={m.imageUrl}
+                      alt="SOLVATECH"
+                      className="w-full h-36 object-cover"
+                    />
+                  </div>
+                )}
                 <div className="whitespace-pre-wrap font-sans leading-relaxed break-words">
                   {m.text}
                 </div>
