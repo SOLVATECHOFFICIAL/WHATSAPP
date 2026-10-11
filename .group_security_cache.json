@@ -1,0 +1,29 @@
+{
+  "1203630248491823@g.us": {
+    "antilink": true,
+    "antibot": true,
+    "antistatus": true,
+    "antispam": true,
+    "autowelcome": true,
+    "autogoodbye": true,
+    "warnLimit": 3
+  },
+  "120363412883427866@g.us": {
+    "antilink": true,
+    "antibot": false,
+    "antistatus": false,
+    "antispam": false,
+    "autowelcome": true,
+    "autogoodbye": true,
+    "warnLimit": 2
+  },
+  "default": {
+    "antilink": false,
+    "antibot": false,
+    "antistatus": false,
+    "antispam": true,
+    "autowelcome": false,
+    "autogoodbye": false,
+    "warnLimit": 5
+  }
+}

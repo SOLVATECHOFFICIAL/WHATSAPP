@@ -94,6 +94,152 @@ async function startServer() {
     }
   });
 
+  // Groups Management & Security Settings (Auto-Welcome & Auto-Goodbye UI Switches)
+  app.get('/api/groups', async (req, res) => {
+    try {
+      const status = whatsappManager.getStatus();
+      if (!status.isConnected) {
+        return res.json({
+          success: true,
+          connected: false,
+          message: 'Link account first to show your groups that you are in.',
+          groups: [],
+        });
+      }
+      const adminOnly = req.query.adminOnly === 'true' || req.query.adminOnly === '1';
+      const groups = await whatsappManager.getGroupsWithSettings(adminOnly);
+      res.json({ success: true, connected: true, groups });
+    } catch (err: any) {
+      console.error('Error fetching groups:', err);
+      res.status(500).json({ success: false, error: err.message, groups: [] });
+    }
+  });
+
+  app.post('/api/groups/sync', async (req, res) => {
+    try {
+      const status = whatsappManager.getStatus();
+      if (!status.isConnected) {
+        return res.json({
+          success: true,
+          connected: false,
+          message: 'Link account first to show your groups that you are in.',
+          groups: [],
+        });
+      }
+      const adminOnly = req.query.adminOnly === 'true' || req.query.adminOnly === '1';
+      const groups = await whatsappManager.getGroupsWithSettings(adminOnly);
+      res.json({ success: true, connected: true, groups });
+    } catch (err: any) {
+      console.error('Error syncing groups:', err);
+      res.status(500).json({ success: false, error: err.message, groups: [] });
+    }
+  });
+
+  app.get('/api/groups/:gid/picture', async (req, res) => {
+    try {
+      const { gid } = req.params;
+      const pictureUrl = await whatsappManager.getGroupPictureUrl(gid);
+      if (pictureUrl) {
+        return res.json({ success: true, pictureUrl });
+      }
+      return res.status(404).json({ success: false, error: 'No group picture available' });
+    } catch (err: any) {
+      return res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  app.post('/api/groups/settings', (req, res) => {
+    try {
+      const { groupId, key, value } = req.body;
+      if (!groupId || !key || typeof value !== 'boolean') {
+        return res.status(400).json({
+          success: false,
+          error: 'groupId, key (e.g. autowelcome, autogoodbye), and boolean value are required',
+        });
+      }
+
+      commandHandler.setSecuritySetting(groupId, key as any, value);
+      const updatedSettings = commandHandler.getSecuritySettings(groupId);
+      res.json({ success: true, groupId, settings: updatedSettings });
+    } catch (err: any) {
+      console.error('Error updating group security setting:', err);
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  app.post('/api/groups/toggle-all', (req, res) => {
+    try {
+      const { groupId, enableAll } = req.body;
+      if (!groupId || typeof enableAll !== 'boolean') {
+        return res.status(400).json({
+          success: false,
+          error: 'groupId and boolean enableAll required',
+        });
+      }
+      const updated = commandHandler.toggleAllForGroup(groupId, enableAll);
+      res.json({ success: true, groupId, settings: updated });
+    } catch (err: any) {
+      console.error('Error toggling all group settings:', err);
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  app.post('/api/groups/warn-limit', (req, res) => {
+    try {
+      const { groupId, limit } = req.body;
+      if (!groupId || typeof limit !== 'number') {
+        return res.status(400).json({
+          success: false,
+          error: 'groupId and numeric limit required',
+        });
+      }
+      commandHandler.setWarnLimit(groupId, limit);
+      res.json({ success: true, groupId, settings: commandHandler.getSecuritySettings(groupId) });
+    } catch (err: any) {
+      console.error('Error updating group warn limit:', err);
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  app.post('/api/groups/sync', async (_req, res) => {
+    try {
+      await commandHandler.loadAllSecuritySettingsFromFirebase();
+      const groups = await whatsappManager.getGroupsWithSettings();
+      res.json({ success: true, groups, message: 'Synchronized with WhatsApp and Firebase' });
+    } catch (err: any) {
+      console.error('Error syncing groups:', err);
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // User Anti-Delete Recovery Setting
+  app.get('/api/user/anti-delete', (_req, res) => {
+    res.json({
+      success: true,
+      enabled: commandHandler.getAntiDeleteEnabled(),
+    });
+  });
+
+  app.post('/api/user/anti-delete', (req, res) => {
+    try {
+      const { enabled } = req.body;
+      if (typeof enabled !== 'boolean') {
+        return res.status(400).json({ success: false, error: 'Boolean "enabled" field required' });
+      }
+      commandHandler.setAntiDeleteEnabled(enabled);
+      res.json({
+        success: true,
+        enabled: commandHandler.getAntiDeleteEnabled(),
+        message: enabled
+          ? 'Anti-delete recovery is ON. Deleted messages will be forwarded to your personal WhatsApp DM.'
+          : 'Anti-delete recovery is OFF. Deleted messages will be ignored.',
+      });
+    } catch (err: any) {
+      console.error('Error setting anti-delete:', err);
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
   // Execute bot command directly via Simulator / Web UI
   app.post('/api/commands/execute', async (req, res) => {
     try {
@@ -109,15 +255,19 @@ async function startServer() {
       const args = parts.slice(1);
 
       const status = whatsappManager.getStatus();
-      const isSimulatedGroup = req.body.isGroup ?? (command === 'link' || command === 'groupinfo');
+      const isSimulatedGroup =
+        req.body.isGroup ??
+        (req.body.groupJid ||
+          ['link', 'groupinfo', 'anti', 'autowelcome', 'autogoodbye', 'antilink', 'antibot', 'antistatus', 'antispam', 'warn', 'warnlimit', 'warns'].includes(command));
+      const groupJid = req.body.groupJid || req.body.groupId || (isSimulatedGroup ? '1203630248491823@g.us' : undefined);
       const result = await commandHandler.handle({
         command,
         args,
         fullText: cleanText,
         senderJid: '2349049979183@s.whatsapp.net',
         senderNumber: status.user?.phone?.replace(/\D/g, '') || '2349049979183',
-        isGroup: isSimulatedGroup,
-        groupJid: isSimulatedGroup ? (req.body.groupJid || '1203630248491823@g.us') : undefined,
+        isGroup: Boolean(isSimulatedGroup),
+        groupJid,
         pushName: 'Solvatech Tester',
         isOwner: isOwner ?? true,
         linkedSince: whatsappManager.getConnectedAt(),

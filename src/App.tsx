@@ -21,6 +21,9 @@ import {
   Lock,
   User as UserIcon,
   ArrowRight,
+  Trash2,
+  Crown,
+  Shield,
 } from 'lucide-react';
 import type { User } from 'firebase/auth';
 import { doc, onSnapshot } from 'firebase/firestore';
@@ -37,6 +40,7 @@ import { CountrySelect } from './components/CountrySelect';
 import { AuthModal } from './components/AuthModal';
 import { UserAccountNav } from './components/UserAccountNav';
 import { AdminDashboard } from './components/AdminDashboard';
+import { GroupAdminPanel } from './components/GroupAdminPanel';
 import {
   NotificationsPanel,
   WhatsAppNotification,
@@ -100,7 +104,7 @@ export default function App() {
   const [phoneNumber, setPhoneNumber] = useState('');
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [activeTab, setActiveTab] = useState<'pair' | 'license' | 'commands'>('pair');
+  const [activeTab, setActiveTab] = useState<'pair' | 'groups' | 'license' | 'commands'>('pair');
 
   const [status, setStatus] = useState<WhatsAppStatus>({
     state: 'disconnected',
@@ -133,6 +137,59 @@ export default function App() {
 
   const [isRefreshingStatus, setIsRefreshingStatus] = useState(false);
 
+  // User Dashboard: Anti-Delete Message Recovery state
+  const [antiDeleteEnabled, setAntiDeleteEnabled] = useState(true);
+  const [togglingAntiDelete, setTogglingAntiDelete] = useState(false);
+
+  const fetchAntiDeleteStatus = async () => {
+    try {
+      const res = await fetch('/api/user/anti-delete').catch(() => null);
+      if (res && res.ok) {
+        const data = await safeParseJson<{ success: boolean; enabled: boolean }>(res);
+        if (data && typeof data.enabled === 'boolean') {
+          setAntiDeleteEnabled(data.enabled);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to fetch anti-delete status:', err);
+    }
+  };
+
+  const handleToggleAntiDelete = async () => {
+    const nextValue = !antiDeleteEnabled;
+    setTogglingAntiDelete(true);
+    setAntiDeleteEnabled(nextValue); // Optimistic UI update
+
+    try {
+      const res = await fetch('/api/user/anti-delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: nextValue }),
+      });
+
+      if (res.ok) {
+        setToastNotification({
+          id: 'antidel_' + Date.now(),
+          type: 'system',
+          title: nextValue ? '🚨 Anti-Delete Recovery Active' : '⚪ Anti-Delete Turned Off',
+          body: nextValue
+            ? 'All deleted messages from anywhere will instantly flood directly into your personal WhatsApp DM chat!'
+            : 'Anti-delete recovery is disabled. Deleted messages will be ignored.',
+          timestamp: new Date().toLocaleTimeString(),
+        });
+        setTimeout(() => setToastNotification(null), 4000);
+      } else {
+        // Revert on failure
+        setAntiDeleteEnabled(!nextValue);
+      }
+    } catch (err) {
+      console.error('Anti-delete toggle error:', err);
+      setAntiDeleteEnabled(!nextValue);
+    } finally {
+      setTogglingAntiDelete(false);
+    }
+  };
+
   const isStudioEnv =
     typeof window !== 'undefined' &&
     (window.location.hostname.includes('.run.app') ||
@@ -153,6 +210,7 @@ export default function App() {
       const [resStatus, resNotifs] = await Promise.all([
         fetch('/api/whatsapp/status').catch(() => null),
         fetch('/api/whatsapp/notifications').catch(() => null),
+        fetchAntiDeleteStatus(),
       ]);
 
       const data = await safeParseJson(resStatus);
@@ -256,6 +314,7 @@ export default function App() {
 
   // Polling backend status and real-time notifications
   useEffect(() => {
+    fetchAntiDeleteStatus();
     const fetchData = async () => {
       try {
         const [resStatus, resNotifs] = await Promise.all([
@@ -574,6 +633,9 @@ export default function App() {
     { cmd: '.promote @user', desc: 'Promote participant to group admin' },
     { cmd: '.demote @user', desc: 'Demote group admin to normal member' },
     { cmd: '.lock / .unlock', desc: 'Close or open group chat for members' },
+    { cmd: '.autowelcome on/off', desc: 'Auto-greet joining members with user tags & group description' },
+    { cmd: '.autogoodbye on/off', desc: 'Auto-farewell departing or removed members with remaining count' },
+    { cmd: '.anti', desc: 'Display full group security matrix & current active shields' },
     { cmd: '.antilink on/off', desc: 'Automatically remove external group links' },
     { cmd: '.antibot on/off', desc: 'Auto-kick unauthorized bot accounts' },
     { cmd: '.antistatus on/off', desc: 'Auto-remove WhatsApp status group mentions' },
@@ -1013,8 +1075,78 @@ export default function App() {
                   <p className="text-[11px] text-slate-300">
                     Your bot is listening to messages and answering commands (.menu, .ping, etc.) in your WhatsApp.
                   </p>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('groups')}
+                    className="w-full mt-2 py-2 px-3.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-500 hover:to-teal-400 text-slate-950 font-black text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-950/40 transition-all cursor-pointer"
+                  >
+                    <Crown className="w-4 h-4" />
+                    <span>Open Group Admin & Welcome Controls →</span>
+                  </button>
                 </div>
               )}
+
+              {/* USER DASHBOARD FEATURE: ANTI-DELETE MESSAGE RECOVERY SWITCH */}
+              <div className="p-4 sm:p-5 rounded-2xl bg-gradient-to-br from-slate-900 to-slate-950 border border-slate-800 hover:border-slate-700/80 transition-all shadow-xl space-y-3">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="flex items-start gap-3.5 min-w-0">
+                    <div
+                      className={`w-11 h-11 rounded-2xl flex items-center justify-center shrink-0 border transition-all ${
+                        antiDeleteEnabled
+                          ? 'bg-rose-500/10 border-rose-500/40 text-rose-400 shadow-md shadow-rose-950/40'
+                          : 'bg-slate-800 border-slate-700 text-slate-500'
+                      }`}
+                    >
+                      <Trash2 className="w-5 h-5" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h4 className="font-bold text-sm text-white">Anti-Delete Message Recovery</h4>
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                            antiDeleteEnabled
+                              ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40 animate-pulse'
+                              : 'bg-slate-800 text-slate-400 border border-slate-700'
+                          }`}
+                        >
+                          {antiDeleteEnabled ? 'ACTIVE (FLOOD TO DM) 🚨' : 'DISABLED (OFF) ⚪'}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-300 mt-1 leading-relaxed">
+                        {antiDeleteEnabled ? (
+                          <span className="text-rose-200/90">
+                            ⚡ <strong>Active:</strong> All deleted messages from anywhere (groups & private chats) will instantly flood directly into your personal WhatsApp DM chat.
+                          </span>
+                        ) : (
+                          <span className="text-slate-400">
+                            ⚪ <strong>Inactive:</strong> Anti-delete recovery is turned off. Deleted messages are ignored and nothing is forwarded.
+                          </span>
+                        )}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* UI Toggle Switch */}
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={antiDeleteEnabled}
+                    onClick={handleToggleAntiDelete}
+                    disabled={togglingAntiDelete}
+                    className={`relative inline-flex h-7 w-12 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-hidden disabled:opacity-50 ${
+                      antiDeleteEnabled ? 'bg-rose-500 shadow-lg shadow-rose-500/30' : 'bg-slate-700'
+                    }`}
+                    title="Toggle Anti-Delete Message Recovery to Personal WhatsApp DM"
+                  >
+                    <span
+                      aria-hidden="true"
+                      className={`pointer-events-none inline-block h-6 w-6 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
+                        antiDeleteEnabled ? 'translate-x-5' : 'translate-x-0'
+                      }`}
+                    />
+                  </button>
+                </div>
+              </div>
 
               {/* THREE LIVE STEP CONFIRMATION FLOW */}
               {(pairingCode || status.pairingStage !== 'idle' || status.isConnected) && (
@@ -1290,7 +1422,17 @@ export default function App() {
             </div>
           )}
 
-          {/* TAB 2: LICENSE */}
+          {/* TAB 2: MY GROUPS & ADMIN DEFENSE */}
+          {activeTab === 'groups' && (
+            <GroupAdminPanel
+              isConnected={status.isConnected}
+              targetPhone={status.user?.phone || status.targetPhone}
+              onShowToast={setToastNotification}
+              onGoToPair={() => setActiveTab('pair')}
+            />
+          )}
+
+          {/* TAB 3: LICENSE */}
           {activeTab === 'license' && (
             <div className="space-y-4">
 
@@ -1540,10 +1682,10 @@ export default function App() {
         </div>
 
         {/* Bottom Nav */}
-        <nav className="px-3 py-2 bg-slate-950 border-t border-slate-800/80 flex items-center justify-around shrink-0">
+        <nav className="px-2 py-2 bg-slate-950 border-t border-slate-800/80 flex items-center justify-around shrink-0">
           <button
             onClick={() => setActiveTab('pair')}
-            className={`flex flex-col items-center gap-1 py-1 px-4 rounded-xl transition-all ${
+            className={`flex flex-col items-center gap-1 py-1 px-2.5 rounded-xl transition-all ${
               activeTab === 'pair' ? 'text-emerald-400 font-bold' : 'text-slate-400 hover:text-slate-200'
             }`}
           >
@@ -1552,8 +1694,21 @@ export default function App() {
           </button>
 
           <button
+            onClick={() => setActiveTab('groups')}
+            className={`flex flex-col items-center gap-1 py-1 px-2.5 rounded-xl transition-all relative ${
+              activeTab === 'groups' ? 'text-emerald-400 font-bold' : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Crown className="w-4 h-4" />
+            <span className="text-[10px]">My Groups</span>
+            {status.isConnected && (
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 absolute top-1 right-2" />
+            )}
+          </button>
+
+          <button
             onClick={() => setActiveTab('license')}
-            className={`flex flex-col items-center gap-1 py-1 px-4 rounded-xl transition-all ${
+            className={`flex flex-col items-center gap-1 py-1 px-2.5 rounded-xl transition-all ${
               activeTab === 'license' ? 'text-emerald-400 font-bold' : 'text-slate-400 hover:text-slate-200'
             }`}
           >
@@ -1563,7 +1718,7 @@ export default function App() {
 
           <button
             onClick={() => setActiveTab('commands')}
-            className={`flex flex-col items-center gap-1 py-1 px-4 rounded-xl transition-all ${
+            className={`flex flex-col items-center gap-1 py-1 px-2.5 rounded-xl transition-all ${
               activeTab === 'commands' ? 'text-emerald-400 font-bold' : 'text-slate-400 hover:text-slate-200'
             }`}
           >
@@ -1574,7 +1729,7 @@ export default function App() {
           {isOwner && (
             <button
               onClick={() => setIsAdminModalOpen(true)}
-              className="flex flex-col items-center gap-1 py-1 px-4 rounded-xl text-amber-400 hover:text-amber-300 transition-all"
+              className="flex flex-col items-center gap-1 py-1 px-2 rounded-xl text-amber-400 hover:text-amber-300 transition-all"
             >
               <Zap className="w-4 h-4 fill-amber-400/30" />
               <span className="text-[10px] font-bold">Admin OS</span>

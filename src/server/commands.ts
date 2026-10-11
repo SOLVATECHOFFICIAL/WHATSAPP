@@ -1,3 +1,5 @@
+import fs from 'fs';
+import path from 'path';
 import { db } from '../services/firebase.ts';
 import { collection, doc, setDoc, getDoc, getDocs, updateDoc } from 'firebase/firestore';
 
@@ -110,6 +112,68 @@ class CommandHandler {
   private spamActive = false;
   private warnings: Record<string, number> = {};
   private securitySettings: Record<string, { antilink: boolean; antibot: boolean; antistatus: boolean; antispam: boolean; autowelcome: boolean; autogoodbye: boolean; warnLimit?: number }> = {};
+  private antiDeleteEnabled = true;
+  private cacheFilePath = path.resolve(process.cwd(), '.group_security_cache.json');
+
+  constructor() {
+    this.loadSettingsFromCache();
+    // Asynchronously load settings from Firebase Firestore
+    this.loadAllSecuritySettingsFromFirebase().catch(() => {});
+  }
+
+  private saveSettingsToCache() {
+    try {
+      fs.writeFileSync(this.cacheFilePath, JSON.stringify(this.securitySettings, null, 2));
+    } catch {}
+  }
+
+  private loadSettingsFromCache() {
+    try {
+      if (fs.existsSync(this.cacheFilePath)) {
+        const raw = fs.readFileSync(this.cacheFilePath, 'utf-8');
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') {
+          this.securitySettings = parsed;
+        }
+      }
+    } catch {}
+  }
+
+  public async loadAllSecuritySettingsFromFirebase() {
+    try {
+      const snap = await getDocs(collection(db, 'group_security'));
+      snap.forEach((docSnap) => {
+        const d = docSnap.data();
+        if (d && docSnap.id) {
+          this.securitySettings[docSnap.id] = {
+            antilink: d.antilink !== false,
+            antibot: d.antibot !== false,
+            antistatus: d.antistatus !== false,
+            antispam: d.antispam !== false,
+            autowelcome: d.autowelcome !== false,
+            autogoodbye: d.autogoodbye !== false,
+            warnLimit: d.warnLimit || 3,
+          };
+        }
+      });
+      this.saveSettingsToCache();
+    } catch (err) {
+      console.warn('Firebase group_security fetch note:', err);
+    }
+  }
+
+  public getAntiDeleteEnabled(): boolean {
+    return this.antiDeleteEnabled;
+  }
+
+  public setAntiDeleteEnabled(val: boolean) {
+    this.antiDeleteEnabled = val;
+    this.syncToFirebase('bot_settings', 'anti_delete', { enabled: val });
+  }
+
+  public getAllSecuritySettings(): Record<string, { antilink: boolean; antibot: boolean; antistatus: boolean; antispam: boolean; autowelcome: boolean; autogoodbye: boolean; warnLimit?: number }> {
+    return { ...this.securitySettings };
+  }
 
   // Sync settings or warnings to Firebase
   public async syncToFirebase(collectionName: string, id: string, data: any) {
@@ -121,23 +185,68 @@ class CommandHandler {
     }
   }
 
+  // DEFAULT FOR ALL GROUPS: KEEPING EVERYTHING ON (true)
   public getSecuritySettings(gid: string) {
-    return this.securitySettings[gid] || { antilink: false, antibot: false, antistatus: false, antispam: false, autowelcome: false, autogoodbye: false, warnLimit: 3 };
+    const defaults = {
+      antilink: true,
+      antibot: true,
+      antistatus: true,
+      antispam: true,
+      autowelcome: true,
+      autogoodbye: true,
+      warnLimit: 3,
+    };
+    if (!this.securitySettings[gid]) {
+      return defaults;
+    }
+    return {
+      ...defaults,
+      ...this.securitySettings[gid],
+      antilink: this.securitySettings[gid].antilink !== false,
+      antibot: this.securitySettings[gid].antibot !== false,
+      antistatus: this.securitySettings[gid].antistatus !== false,
+      antispam: this.securitySettings[gid].antispam !== false,
+      autowelcome: this.securitySettings[gid].autowelcome !== false,
+      autogoodbye: this.securitySettings[gid].autogoodbye !== false,
+    };
   }
 
-  public setSecuritySetting(gid: string, key: 'antilink' | 'antibot' | 'antistatus' | 'antispam' | 'autowelcome' | 'autogoodbye', val: boolean) {
+  public setSecuritySetting(
+    gid: string,
+    key: 'antilink' | 'antibot' | 'antistatus' | 'antispam' | 'autowelcome' | 'autogoodbye',
+    val: boolean
+  ) {
     if (!this.securitySettings[gid]) {
-      this.securitySettings[gid] = { antilink: false, antibot: false, antistatus: false, antispam: false, autowelcome: false, autogoodbye: false, warnLimit: 3 };
+      this.securitySettings[gid] = this.getSecuritySettings(gid);
     }
     this.securitySettings[gid][key] = val;
+    this.saveSettingsToCache();
     this.syncToFirebase('group_security', gid, this.securitySettings[gid]);
+  }
+
+  // Quick switch: Turn on or off all anti and welcome protections for a group
+  public toggleAllForGroup(gid: string, enableAll: boolean) {
+    const current = this.getSecuritySettings(gid);
+    this.securitySettings[gid] = {
+      antilink: enableAll,
+      antibot: enableAll,
+      antistatus: enableAll,
+      antispam: enableAll,
+      autowelcome: enableAll,
+      autogoodbye: enableAll,
+      warnLimit: current.warnLimit || 3,
+    };
+    this.saveSettingsToCache();
+    this.syncToFirebase('group_security', gid, this.securitySettings[gid]);
+    return this.securitySettings[gid];
   }
 
   public setWarnLimit(gid: string, limit: number) {
     if (!this.securitySettings[gid]) {
-      this.securitySettings[gid] = { antilink: false, antibot: false, antistatus: false, antispam: false, autowelcome: false, autogoodbye: false, warnLimit: 3 };
+      this.securitySettings[gid] = this.getSecuritySettings(gid);
     }
     this.securitySettings[gid].warnLimit = Math.max(1, limit);
+    this.saveSettingsToCache();
     this.syncToFirebase('group_security', gid, this.securitySettings[gid]);
   }
 
@@ -670,6 +779,23 @@ Optical character recognition is actively armed.
       };
     }
 
+    if (cmd === 'antidelete' || cmd === 'antidel') {
+      const val = ctx.args[0]?.toLowerCase() === 'off' ? false : true;
+      this.setAntiDeleteEnabled(val);
+      return {
+        reply: `🚨 *[SOLVATECH ANTI-DELETE RECOVERY]*
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Status: ${val ? '✅ *ENABLED (FLOOD TO DM ACTIVE)*' : '❌ *DISABLED (OFF)*'}
+Policy: ${
+          val
+            ? 'All deleted messages from anywhere (groups & private chats) are instantly recovered and forwarded to your personal DM chat.'
+            : 'Anti-delete recovery is turned off. Deleted messages are ignored and nothing is forwarded.'
+        }
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+⚡ _SOLVATECH Personal Defense Engine_`,
+      };
+    }
+
     if (cmd === 'send' || cmd === 'status' || cmd === 'getstatus') {
       return {
         reply: `📥 *[WHATSAPP STATUS EXTRACTOR]*
@@ -839,7 +965,7 @@ Message successfully pinned for 7 days by Group Admin!
       if (!ctx.isGroup) {
         return { reply: `⚠️ *[GROUP ONLY]*\nThe *.antilink* command can only be used inside a WhatsApp group.` };
       }
-      const val = ctx.args[0]?.toLowerCase() === 'on';
+      const val = ctx.args[0]?.toLowerCase() === 'off' ? false : true;
       const gid = ctx.groupJid || 'default';
       this.setSecuritySetting(gid, 'antilink', val);
       return {
@@ -851,7 +977,7 @@ Message successfully pinned for 7 days by Group Admin!
       if (!ctx.isGroup) {
         return { reply: `⚠️ *[GROUP ONLY]*\nThe *.antibot* command can only be used inside a WhatsApp group.` };
       }
-      const val = ctx.args[0]?.toLowerCase() === 'on';
+      const val = ctx.args[0]?.toLowerCase() === 'off' ? false : true;
       const gid = ctx.groupJid || 'default';
       this.setSecuritySetting(gid, 'antibot', val);
       return {
@@ -863,7 +989,7 @@ Message successfully pinned for 7 days by Group Admin!
       if (!ctx.isGroup) {
         return { reply: `⚠️ *[GROUP ONLY]*\nThe *.antistatus* command can only be used inside a WhatsApp group.` };
       }
-      const val = ctx.args[0]?.toLowerCase() === 'on';
+      const val = ctx.args[0]?.toLowerCase() === 'off' ? false : true;
       const gid = ctx.groupJid || 'default';
       this.setSecuritySetting(gid, 'antistatus', val);
       return {
@@ -875,7 +1001,7 @@ Message successfully pinned for 7 days by Group Admin!
       if (!ctx.isGroup) {
         return { reply: `⚠️ *[GROUP ONLY]*\nThe *.antispam* command can only be used inside a WhatsApp group.` };
       }
-      const val = ctx.args[0]?.toLowerCase() === 'on';
+      const val = ctx.args[0]?.toLowerCase() === 'off' ? false : true;
       const gid = ctx.groupJid || 'default';
       this.setSecuritySetting(gid, 'antispam', val);
       return {
@@ -884,14 +1010,18 @@ Message successfully pinned for 7 days by Group Admin!
     }
 
     if (cmd === 'autowelcome') {
-      const val = ctx.args[0]?.toLowerCase() === 'on';
+      const gid = ctx.groupJid || 'default';
+      const val = ctx.args[0]?.toLowerCase() === 'off' ? false : true;
+      this.setSecuritySetting(gid, 'autowelcome', val);
       return {
-        reply: `👋 *[AUTO-WELCOME SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED*' : '❌ *DISABLED*'}\nPolicy: Automatically greets anyone who enters the group (whether approved by admin, added by members, or added anyhow).\nRule: Strictly sent only by connected admin bots (choosing exactly 1 admin bot if multiple are connected).\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
+        reply: `👋 *[AUTO-WELCOME SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED*' : '❌ *DISABLED*'}\nPolicy: Automatically greets anyone who enters the group (whether approved by admin, added by members, or added via link).\nRule: Strictly sent only by connected admin bots (choosing exactly 1 admin bot if multiple are connected).\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
       };
     }
 
     if (cmd === 'autogoodbye') {
-      const val = ctx.args[0]?.toLowerCase() === 'on';
+      const gid = ctx.groupJid || 'default';
+      const val = ctx.args[0]?.toLowerCase() === 'off' ? false : true;
+      this.setSecuritySetting(gid, 'autogoodbye', val);
       return {
         reply: `👋 *[AUTO-GOODBYE SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED*' : '❌ *DISABLED*'}\nPolicy: Automatically acknowledges departing or removed participants.\nRule: Strictly sent only by connected admin bots (choosing exactly 1 admin bot if multiple are connected).\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
       };

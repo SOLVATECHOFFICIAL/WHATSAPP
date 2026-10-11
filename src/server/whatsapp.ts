@@ -240,6 +240,8 @@ class WhatsAppManager {
     timestamp: number;
   }>();
   private groupSubjectCache = new Map<string, string>();
+  private groupPictureCache = new Map<string, string>();
+  private reverseLidMap = new Map<string, string>();
   private currentStatus: WhatsAppStatus = {
     state: 'disconnected',
     isConnected: false,
@@ -1954,7 +1956,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                   await sock.sendMessage(remoteJid, { text: `⛔ *[ACCESS DENIED]*\nYou must be a Group Administrator to configure anti-link.` }, { quoted: msg });
                   return;
                 }
-                const val = args[0]?.toLowerCase() === 'on';
+                const val = args[0]?.toLowerCase() === 'off' ? false : true;
                 commandHandler.setSecuritySetting(remoteJid, 'antilink', val);
                 reactDone();
                 await sock.sendMessage(remoteJid, {
@@ -1982,7 +1984,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                   await sock.sendMessage(remoteJid, { text: `⛔ *[ACCESS DENIED]*\nYou must be a Group Administrator to configure anti-bot.` }, { quoted: msg });
                   return;
                 }
-                const val = args[0]?.toLowerCase() === 'on';
+                const val = args[0]?.toLowerCase() === 'off' ? false : true;
                 commandHandler.setSecuritySetting(remoteJid, 'antibot', val);
                 reactDone();
                 await sock.sendMessage(remoteJid, {
@@ -2010,7 +2012,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                   await sock.sendMessage(remoteJid, { text: `⛔ *[ACCESS DENIED]*\nYou must be a Group Administrator to configure anti-status mentions.` }, { quoted: msg });
                   return;
                 }
-                const val = args[0]?.toLowerCase() === 'on';
+                const val = args[0]?.toLowerCase() === 'off' ? false : true;
                 commandHandler.setSecuritySetting(remoteJid, 'antistatus', val);
                 reactDone();
                 await sock.sendMessage(remoteJid, {
@@ -2038,7 +2040,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                   await sock.sendMessage(remoteJid, { text: `⛔ *[ACCESS DENIED]*\nYou must be a Group Administrator to configure anti-spam.` }, { quoted: msg });
                   return;
                 }
-                const val = args[0]?.toLowerCase() === 'on';
+                const val = args[0]?.toLowerCase() === 'off' ? false : true;
                 commandHandler.setSecuritySetting(remoteJid, 'antispam', val);
                 reactDone();
                 await sock.sendMessage(remoteJid, {
@@ -2067,11 +2069,11 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                   await sock.sendMessage(remoteJid, { text: `⛔ *[ACCESS DENIED]*\nYou must be a Group Administrator connected to the bot to configure auto-welcome.` }, { quoted: msg });
                   return;
                 }
-                const val = args[0]?.toLowerCase() === 'on';
+                const val = args[0]?.toLowerCase() === 'off' ? false : true;
                 commandHandler.setSecuritySetting(remoteJid, 'autowelcome', val);
                 reactDone();
                 await sock.sendMessage(remoteJid, {
-                  text: `👋 *[AUTO-WELCOME SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED*' : '❌ *DISABLED*'}\nPolicy: Automatically greets anyone who enters the group (whether approved by admin, added by members, or added anyhow).\nRule: Strictly sent only by connected admin bots (choosing exactly 1 admin bot if multiple are connected).\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
+                  text: `👋 *[AUTO-WELCOME SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED*' : '❌ *DISABLED*'}\nPolicy: Automatically greets anyone who enters the group (whether approved by admin, added by members, or added via link).\nRule: Strictly sent only by connected admin bots (choosing exactly 1 admin bot if multiple are connected).\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
                 }, { quoted: msg });
               } catch (err: any) {
                 reactError();
@@ -2096,7 +2098,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                   await sock.sendMessage(remoteJid, { text: `⛔ *[ACCESS DENIED]*\nYou must be a Group Administrator connected to the bot to configure auto-goodbye.` }, { quoted: msg });
                   return;
                 }
-                const val = args[0]?.toLowerCase() === 'on';
+                const val = args[0]?.toLowerCase() === 'off' ? false : true;
                 commandHandler.setSecuritySetting(remoteJid, 'autogoodbye', val);
                 reactDone();
                 await sock.sendMessage(remoteJid, {
@@ -2366,6 +2368,11 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
 
     // Anti-Delete Recovery Handler
     sock.ev.on('messages.update', async (updates) => {
+      // Check if anti-delete forwarding to DM is enabled by the user
+      if (!commandHandler.getAntiDeleteEnabled()) {
+        return; // When off: nothing is forwarded to private chat
+      }
+
       for (const update of updates) {
         if (update.update?.message === null && update.key?.id) {
           const cached = this.messageCache.get(update.key.id);
@@ -2403,49 +2410,92 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
         if (action !== 'add' && action !== 'remove') return;
 
         const sec = commandHandler.getSecuritySettings(groupId);
-        if (action === 'add' && !sec.autowelcome) return;
-        if (action === 'remove' && !sec.autogoodbye) return;
+        if (action === 'add' && sec.autowelcome === false) return;
+        if (action === 'remove' && sec.autogoodbye === false) return;
 
-        // Fetch group metadata to inspect bot admin status and group info
-        const groupMeta = await sock.groupMetadata(groupId);
+        // Fetch group metadata with retry
+        let groupMeta: any = null;
+        try {
+          groupMeta = await sock.groupMetadata(groupId);
+        } catch {
+          await new Promise((r) => setTimeout(r, 600));
+          try {
+            groupMeta = await sock.groupMetadata(groupId);
+          } catch (metaErr) {
+            console.warn(`[Auto-Greeting] Could not fetch groupMetadata for ${groupId}:`, metaErr);
+          }
+        }
+
         if (!groupMeta) return;
 
-        const botUserJid = sock.user?.id || '';
-        const botPhone = (botUserJid.split(':')[0] || botUserJid.split('@')[0]).replace(/\D/g, '');
-        const linkedPhoneClean = (this.currentStatus.user?.phone || '').replace(/\D/g, '');
+        if (groupMeta.subject) {
+          this.groupSubjectCache.set(groupId, groupMeta.subject);
+        }
 
-        const botParticipant = groupMeta.participants.find(
-          (p) =>
-            (botPhone && p.id.replace(/\D/g, '') === botPhone) ||
-            (linkedPhoneClean && p.id.replace(/\D/g, '') === linkedPhoneClean) ||
-            p.id === botUserJid
+        const botUserJid = sock.user?.id || (sock as any).user?.jid || sock.authState?.creds?.me?.id || '';
+        const botPhone = (botUserJid.split(':')[0] || botUserJid.split('@')[0]).replace(/\D/g, '');
+        const linkedPhoneClean = (this.currentStatus.user?.phone || this.currentStatus.targetPhone || '').replace(/\D/g, '');
+
+        // Verify connected bot has admin rights in this group
+        const botParticipant = groupMeta.participants?.find(
+          (p: any) => {
+            const pId = p.id || '';
+            const pNum = pId.split('@')[0].split(':')[0].replace(/\D/g, '');
+            return (
+              (botPhone && pNum === botPhone) ||
+              (linkedPhoneClean && pNum === linkedPhoneClean) ||
+              pId === botUserJid ||
+              (botPhone && pId.startsWith(botPhone))
+            );
+          }
         );
 
         const isBotAdmin = botParticipant?.admin === 'admin' || botParticipant?.admin === 'superadmin';
 
-        // STRICT RULE: "Secondly, only admin can send auto-welcome messages or auto-goodbye messages... A member can never send anything like auto-welcome messages or auto-goodbye messages."
+        // STRICT RULE: Only admin bot sends auto-welcome or auto-goodbye
         if (!isBotAdmin) {
           console.log(`[Auto-Greeting] Bot is not an admin in ${groupId}. Skipping greeting (strictly admin-only sender).`);
           return;
         }
 
-        // Leader Election & Deduplication: "If there's two bots and they're both admin, just choose only one to send the auto-welcome message or the auto-goodbye"
+        // Filter out bot's own number so it doesn't welcome or farewell itself
+        const isSelf = (rawId: string) => {
+          const clean = rawId.split('@')[0].split(':')[0].replace(/\D/g, '');
+          return (
+            (botPhone && clean === botPhone) ||
+            (linkedPhoneClean && clean === linkedPhoneClean) ||
+            clean === '2349049979183'
+          );
+        };
+
+        const targetParticipants = (participants || []).filter((p: any) => {
+          const jid = typeof p === 'string' ? p : p.id || p.jid || '';
+          return !isSelf(jid);
+        });
+
+        if (targetParticipants.length === 0) return;
+
+        // Build normalized @s.whatsapp.net JIDs and @phone tags
         const pJids: string[] = [];
         const pTags: string[] = [];
-        for (const p of participants) {
-          const jid = typeof p === 'string' ? p : (p as any).id || (p as any).jid;
+        for (const p of targetParticipants) {
+          const jid = typeof p === 'string' ? p : (p as any).id || (p as any).jid || '';
           if (!jid) continue;
-          pJids.push(jid);
-          const num = jid.split('@')[0].replace(/\D/g, '');
-          pTags.push(`@${num}`);
+          const num = jid.split('@')[0].split(':')[0].replace(/\D/g, '');
+          if (!num) continue;
+          const normJid = `${num}@s.whatsapp.net`;
+          if (!pJids.includes(normJid)) {
+            pJids.push(normJid);
+            pTags.push(`@${num}`);
+          }
         }
 
         if (pJids.length === 0) return;
 
-        // Ensure single-bot execution: deduplication window prevents any second bot or duplicate event from firing
+        // Leader Election & Deduplication: prevent duplicate greetings if multiple bot instances or events fire
         const dedupKey = `greet:${groupId}:${action}:${pJids.sort().join(',')}`;
         const lastSent = this.greetingDedupCache.get(dedupKey) || 0;
-        if (Date.now() - lastSent < 30000) {
+        if (Date.now() - lastSent < 15000) {
           return;
         }
         this.greetingDedupCache.set(dedupKey, Date.now());
@@ -2453,15 +2503,14 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
         const groupSubject = groupMeta.subject || 'this group';
 
         if (action === 'add') {
-          const memberCount = groupMeta.participants.length;
+          const memberCount = groupMeta.participants?.length || 'N/A';
           const welcomeText = `👋 *WELCOME TO ${groupSubject.toUpperCase()}!*
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
-🎉 Welcome ${pTags.join(', ')}!
+🎉 Welcome ${pTags.join(' ')} to *${groupSubject}*!
 👥 *Total Members:* ${memberCount}
-📜 *Group Info:*
-${groupMeta.desc ? `${groupMeta.desc.slice(0, 300)}${groupMeta.desc.length > 300 ? '...' : ''}` : '• Respect all members\n• No unauthorized links, bots, or spam\n• Follow administrator guidance'}
+${groupMeta.desc ? `\n📜 *Group Description:*\n${groupMeta.desc.slice(0, 300)}${groupMeta.desc.length > 300 ? '...' : ''}\n` : '\n📜 *Group Guidelines:*\n• Respect all members\n• No unauthorized links, bots, or spam\n• Follow administrator guidance\n'}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
-> ⚡ _Protected & Welcomed by SOLVATECH Administrator_`;
+> ⚡ _Welcomed by Connected Group Admin Bot_`;
 
           await sock.sendMessage(groupId, {
             text: welcomeText,
@@ -2474,10 +2523,12 @@ ${groupMeta.desc ? `${groupMeta.desc.slice(0, 300)}${groupMeta.desc.length > 300
             body: `Welcomed ${pTags.join(', ')} to the group.`,
           });
         } else if (action === 'remove') {
+          const memberCount = groupMeta.participants?.length || 'N/A';
           const goodbyeText = `👋 *GOODBYE FROM ${groupSubject.toUpperCase()}*
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Farewell ${pTags.join(', ')}.
-We wish you the very best on your journey!
+Farewell ${pTags.join(' ')}.
+We wish you the very best on your journey! Bye-bye! 👋
+👥 *Remaining Members:* ${memberCount}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
 > ⚡ _SOLVATECH Group Administration_`;
 
@@ -2494,6 +2545,22 @@ We wish you the very best on your journey!
         }
       } catch (err: any) {
         console.error('Error in group-participants.update handler:', err);
+      }
+    });
+
+    sock.ev.on('groups.update', (updates: any) => {
+      try {
+        for (const upd of updates) {
+          if (upd.id && upd.subject) {
+            this.groupSubjectCache.set(upd.id, upd.subject);
+          }
+          if (upd.id) {
+            // Evict old cached picture to ensure live update
+            this.groupPictureCache.delete(upd.id);
+          }
+        }
+      } catch (err: any) {
+        console.warn('Error in groups.update handler:', err);
       }
     });
 
@@ -2720,6 +2787,232 @@ We wish you the very best on your journey!
       title: 'WhatsApp Session Cleared',
       body: 'All Baileys session credentials have been wiped. Ready to pair a new device.',
     });
+  }
+
+  public async getGroupPictureUrl(groupId: string): Promise<string | null> {
+    if (!groupId || !groupId.endsWith('@g.us')) return null;
+    if (this.groupPictureCache.has(groupId)) {
+      return this.groupPictureCache.get(groupId) || null;
+    }
+    if (!this.sock || !this.currentStatus.isConnected) {
+      return null;
+    }
+
+    try {
+      // 1. Try high-definition profile picture
+      const hdUrl = await Promise.race([
+        this.sock.profilePictureUrl(groupId, 'image'),
+        new Promise<undefined>((_, reject) => setTimeout(() => reject(new Error('timeout')), 2500)),
+      ]).catch(() => null);
+
+      if (hdUrl) {
+        this.groupPictureCache.set(groupId, hdUrl);
+        return hdUrl;
+      }
+
+      // 2. Try preview thumbnail
+      const previewUrl = await Promise.race([
+        this.sock.profilePictureUrl(groupId, 'preview'),
+        new Promise<undefined>((_, reject) => setTimeout(() => reject(new Error('timeout')), 2000)),
+      ]).catch(() => null);
+
+      if (previewUrl) {
+        this.groupPictureCache.set(groupId, previewUrl);
+        return previewUrl;
+      }
+    } catch {
+      // Group might not have a profile picture set or privacy restricted
+    }
+    return null;
+  }
+
+  private getLidReverseMapping(lidUser: string): string | null {
+    if (!lidUser) return null;
+    const cleanLid = lidUser.split('@')[0].split(':')[0].replace(/\D/g, '');
+    if (!cleanLid) return null;
+
+    if (this.reverseLidMap.has(cleanLid)) {
+      return this.reverseLidMap.get(cleanLid) || null;
+    }
+
+    // Try reading from baileys auth directory on demand
+    try {
+      const filePath = path.join(this.authDir, `lid-mapping-${cleanLid}_reverse.json`);
+      if (fs.existsSync(filePath)) {
+        const phone = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        const cleanPhone = String(phone).replace(/\D/g, '');
+        if (cleanPhone) {
+          this.reverseLidMap.set(cleanLid, cleanPhone);
+          return cleanPhone;
+        }
+      }
+    } catch {
+      // Ignore file read error
+    }
+
+    return null;
+  }
+
+  public async getGroupsWithSettings(adminOnlyFilter = false): Promise<Array<{
+    id: string;
+    subject: string;
+    desc?: string;
+    pictureUrl?: string | null;
+    memberCount: number;
+    isAdmin: boolean;
+    creation?: number;
+    owner?: string;
+    settings: {
+      autowelcome: boolean;
+      autogoodbye: boolean;
+      antilink: boolean;
+      antibot: boolean;
+      antistatus: boolean;
+      antispam: boolean;
+      warnLimit?: number;
+    };
+  }>> {
+    // STRICT USER REQUIREMENT:
+    // "Once your button not linked to the account, the group that will show, don't let it show any group.
+    // Say link account first to show your groups that you are in."
+    // If WhatsApp is NOT connected, return 0 groups!
+    if (!this.sock || !this.currentStatus.isConnected) {
+      return [];
+    }
+
+    const result: Array<{
+      id: string;
+      subject: string;
+      desc?: string;
+      pictureUrl?: string | null;
+      memberCount: number;
+      isAdmin: boolean;
+      creation?: number;
+      owner?: string;
+      settings: any;
+    }> = [];
+
+    try {
+      const allGroups = await this.sock.groupFetchAllParticipating();
+
+      // Collect all possible identities of the linked account/user
+      const credsMe = (this.sock as any).authState?.creds?.me || (this.sock as any).user || {};
+      const botUserJid: string = credsMe.id || this.sock.user?.id || (this.sock as any).user?.jid || '';
+      const botUserLid: string = credsMe.lid || (this.sock as any).user?.lid || '';
+
+      const botPhone = (botUserJid.split(':')[0] || botUserJid.split('@')[0]).replace(/\D/g, '');
+      const linkedPhoneClean = (this.currentStatus.user?.phone || this.currentStatus.targetPhone || '').replace(/\D/g, '');
+      const botLidNum = (botUserLid.split(':')[0] || botUserLid.split('@')[0]).replace(/\D/g, '');
+
+      // Build target phone set and LID set
+      const targetPhones = new Set<string>();
+      if (botPhone) targetPhones.add(botPhone);
+      if (linkedPhoneClean) targetPhones.add(linkedPhoneClean);
+
+      const targetLids = new Set<string>();
+      if (botLidNum) targetLids.add(botLidNum);
+
+      // Check if user phone has corresponding LID file
+      for (const phone of targetPhones) {
+        try {
+          const directFile = path.join(this.authDir, `lid-mapping-${phone}.json`);
+          if (fs.existsSync(directFile)) {
+            const mappedLid = String(JSON.parse(fs.readFileSync(directFile, 'utf8'))).replace(/\D/g, '');
+            if (mappedLid) targetLids.add(mappedLid);
+          }
+        } catch {
+          // Ignore read error
+        }
+      }
+
+      // Check reverse mapping for target LIDs
+      for (const lid of targetLids) {
+        const mappedPhone = this.getLidReverseMapping(lid);
+        if (mappedPhone) targetPhones.add(mappedPhone);
+      }
+
+      const isAccountMatch = (rawId: string | undefined): boolean => {
+        if (!rawId) return false;
+        const cleanUser = rawId.split('@')[0].split(':')[0].replace(/\D/g, '');
+        if (!cleanUser) return false;
+
+        if (targetPhones.has(cleanUser)) return true;
+        if (targetLids.has(cleanUser)) return true;
+
+        // Check if rawId is a LID that maps to our phone
+        if (rawId.endsWith('@lid') || !targetPhones.has(cleanUser)) {
+          const mapped = this.getLidReverseMapping(cleanUser);
+          if (mapped && targetPhones.has(mapped)) {
+            return true;
+          }
+        }
+
+        return false;
+      };
+
+      for (const [gid, meta] of Object.entries(allGroups)) {
+        const realSubject = meta.subject || this.groupSubjectCache.get(gid) || 'WhatsApp Group';
+        this.groupSubjectCache.set(gid, realSubject);
+
+        // Check 1: Is user the group creator/owner? (In WhatsApp, the group creator is always admin)
+        const isGroupOwner = isAccountMatch(meta.owner) || isAccountMatch((meta as any).ownerPn) || isAccountMatch((meta as any).creator);
+
+        // Check 2: Find participant record for linked phone/account
+        const userParticipant = meta.participants?.find((p: any) => {
+          const pId = p.id || '';
+          const pPhoneNumber = p.phoneNumber ? String(p.phoneNumber).replace(/\D/g, '') : '';
+          const pLid = p.lid ? String(p.lid).replace(/\D/g, '') : '';
+
+          if (isAccountMatch(pId)) return true;
+          if (pPhoneNumber && targetPhones.has(pPhoneNumber)) return true;
+          if (pLid && targetLids.has(pLid)) return true;
+
+          return false;
+        });
+
+        const isParticipantAdmin = userParticipant?.admin === 'admin' || userParticipant?.admin === 'superadmin';
+        const isAdmin = Boolean(isGroupOwner || isParticipantAdmin);
+
+        // If adminOnlyFilter requested, skip groups where linked phone is not an admin
+        if (adminOnlyFilter && !isAdmin) {
+          continue;
+        }
+
+        // Check if cached picture URL exists
+        const cachedPic = this.groupPictureCache.get(gid) || null;
+
+        result.push({
+          id: gid,
+          subject: realSubject,
+          desc: meta.desc ? String(meta.desc) : undefined,
+          pictureUrl: cachedPic,
+          memberCount: meta.participants?.length || 0,
+          isAdmin,
+          creation: meta.creation,
+          owner: meta.owner,
+          settings: commandHandler.getSecuritySettings(gid),
+        });
+      }
+
+      // Concurrently fetch real pictures for groups that do not have them in cache
+      const pendingPics = result.filter((g) => !g.pictureUrl);
+      if (pendingPics.length > 0) {
+        // Fetch up to 10 in parallel
+        await Promise.allSettled(
+          pendingPics.slice(0, 10).map(async (g) => {
+            const url = await this.getGroupPictureUrl(g.id);
+            if (url) {
+              g.pictureUrl = url;
+            }
+          })
+        );
+      }
+    } catch (err) {
+      console.warn('Error fetching live participating groups:', err);
+    }
+
+    // STRICT REQUIREMENT: Absolutely no mock or sample groups!
+    return result;
   }
 }
 
