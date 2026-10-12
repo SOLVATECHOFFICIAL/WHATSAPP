@@ -42,11 +42,19 @@ EXPOSE 3000
 # Start server with persistent multi-device Baileys
 CMD ["npm", "run", "start"]`;
 
-  const railwayEnvCode = `# Railway Environment Variables
+  const railwayEnvCode = `# Railway Environment Variables (SOLVATECH 24/7)
 PORT=3000
 NODE_ENV=production
 NIXPACKS_NODE_VERSION=22
-GEMINI_API_KEY=YOUR_GEMINI_API_KEY`;
+APP_URL=https://solvatech.up.railway.app
+VITE_FIREBASE_API_KEY=AIzaSyBl0rplCgVmTyTsQQ2-yhp-aNdkWpoGXks
+VITE_FIREBASE_AUTH_DOMAIN=solvatech-academy.firebaseapp.com
+VITE_FIREBASE_PROJECT_ID=solvatech-academy
+VITE_FIREBASE_STORAGE_BUCKET=solvatech-academy.firebasestorage.app
+VITE_FIREBASE_MESSAGING_SENDER_ID=102061431394
+VITE_FIREBASE_APP_ID=1:102061431394:web:78b21e5f9878b3c85f4f3b
+VITE_FIREBASE_DATABASE_URL=https://solvatech-academy-default-rtdb.europe-west1.firebasedatabase.app
+FIREBASE_SERVICE_ACCOUNT_JSON=PASTE_SERVICE_ACCOUNT_JSON_HERE`;
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
