@@ -17,6 +17,7 @@ interface NotificationsPanelProps {
   isOpen: boolean;
   onClose: () => void;
   isConnected?: boolean;
+  userId?: string;
 }
 
 export const NotificationsPanel: React.FC<NotificationsPanelProps> = ({
@@ -25,21 +26,60 @@ export const NotificationsPanel: React.FC<NotificationsPanelProps> = ({
   isOpen,
   onClose,
   isConnected = false,
+  userId = '',
 }) => {
   const [filter, setFilter] = useState<'all' | 'messages' | 'pairing'>('all');
   const [sendingTest, setSendingTest] = useState(false);
   const [testStatus, setTestStatus] = useState<string | null>(null);
+  const [permissionState, setPermissionState] = useState<NotificationPermission>(() => {
+    return typeof window !== 'undefined' && 'Notification' in window ? Notification.permission : 'default';
+  });
 
   if (!isOpen) return null;
+
+  const handleRequestPushPermission = async () => {
+    if (typeof window !== 'undefined' && 'Notification' in window) {
+      try {
+        const perm = await Notification.requestPermission();
+        setPermissionState(perm);
+        if (perm === 'granted') {
+          setTestStatus('Real device notifications enabled!');
+          try {
+            new Notification('SOLVATECH Notifications Enabled', {
+              body: 'You will now receive real-time WhatsApp pairing and bot alerts on this device.',
+              icon: '/solva.webp',
+            });
+          } catch {}
+        }
+      } catch (err) {
+        console.warn('Permission request error:', err);
+      }
+    }
+  };
 
   const handleSendTestDM = async () => {
     setSendingTest(true);
     setTestStatus(null);
     try {
-      const res = await fetch('/api/whatsapp/test-dm', { method: 'POST' });
+      const res = await fetch('/api/whatsapp/test-dm', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-user-id': userId,
+        },
+        body: JSON.stringify({ userId }),
+      });
       const data = await res.json();
       if (data.success) {
         setTestStatus('Notification sent to your WhatsApp DM!');
+        if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
+          try {
+            new Notification('WhatsApp Test Dispatched 🔔', {
+              body: 'Test notification was dispatched directly to your personal WhatsApp chat.',
+              icon: '/solva.webp',
+            });
+          } catch {}
+        }
       } else {
         setTestStatus(data.error || 'Failed to send');
       }
@@ -197,7 +237,17 @@ export const NotificationsPanel: React.FC<NotificationsPanelProps> = ({
       </div>
 
       {/* Footer / Quick Actions */}
-      <div className="p-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/80 shrink-0">
+      <div className="p-3 border-t border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/80 shrink-0 space-y-2">
+        {permissionState !== 'granted' && (
+          <button
+            type="button"
+            onClick={handleRequestPushPermission}
+            className="w-full py-1.5 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/30 font-bold text-[11px] flex items-center justify-center gap-1.5 transition-all shadow-xs active:scale-95 cursor-pointer"
+          >
+            <Bell className="w-3.5 h-3.5 text-amber-400" />
+            <span>Enable Real Device Push Notifications</span>
+          </button>
+        )}
         <button
           onClick={handleSendTestDM}
           disabled={sendingTest || !isConnected}

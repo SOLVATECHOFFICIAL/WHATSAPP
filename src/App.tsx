@@ -75,6 +75,7 @@ interface WhatsAppStatus {
   latestHandshakeTime?: string;
   isExpired?: boolean;
   licenseExpiresAt?: string | null;
+  reconnectRemainingSeconds?: number | null;
   user?: {
     id: string;
     name?: string;
@@ -107,10 +108,25 @@ function sameWhatsAppStatus(a: WhatsAppStatus, b: WhatsAppStatus): boolean {
     a.lastError === b.lastError &&
     a.isExpired === b.isExpired &&
     a.licenseExpiresAt === b.licenseExpiresAt &&
+    a.reconnectRemainingSeconds === b.reconnectRemainingSeconds &&
     a.user?.id === b.user?.id &&
     a.user?.name === b.user?.name &&
     a.user?.phone === b.user?.phone
   );
+}
+
+export function sendDeviceNotification(title: string, body: string, icon = '/solva.webp') {
+  if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
+    try {
+      new Notification(title, { body, icon });
+    } catch {
+      if ('serviceWorker' in navigator && navigator.serviceWorker.ready) {
+        navigator.serviceWorker.ready.then((reg) => {
+          reg.showNotification(title, { body, icon });
+        }).catch(() => {});
+      }
+    }
+  }
 }
 
 export default function App() {
@@ -446,13 +462,15 @@ export default function App() {
         if (data?.status) {
           setStatus((previous) => {
             if (!previous.isConnected && data.status.isConnected) {
+              const phoneText = data.status.user?.phone || '';
               setToastNotification({
                 id: 'conn_' + Date.now(),
                 type: 'connection',
                 title: 'WhatsApp Connected Successfully! 🟢',
-                body: `Your phone ${data.status.user?.phone || ''} is now paired and online 24/7!`,
+                body: `Your phone ${phoneText} is now paired and online 24/7!`,
                 timestamp: new Date().toLocaleTimeString(),
               });
+              sendDeviceNotification('WhatsApp Connected! 🟢', `SOLVATECH bot paired with ${phoneText} and active 24/7.`);
               setTimeout(() => setToastNotification(null), 6000);
             }
             return sameWhatsAppStatus(previous, data.status) ? previous : data.status;
@@ -477,6 +495,7 @@ export default function App() {
               const newest = dataNotifs.notifications[0];
               if (newest && newest.id !== prev[0]?.id) {
                 setToastNotification(newest);
+                sendDeviceNotification(newest.title, newest.body);
                 setTimeout(() => setToastNotification(null), 5000);
               }
             }
@@ -754,6 +773,10 @@ export default function App() {
           body: `Code: ${data.pairingCode}. Enter this code in WhatsApp > Linked Devices > Link with phone number.`,
           timestamp: new Date().toLocaleTimeString(),
         });
+        sendDeviceNotification(
+          `WhatsApp Pairing Code: ${data.pairingCode}`,
+          `Enter ${data.pairingCode} in WhatsApp > Linked Devices > Link with phone number to pair.`
+        );
         setTimeout(() => setToastNotification(null), 8000);
       } else {
         setPairingError(
@@ -1495,8 +1518,66 @@ export default function App() {
                 </div>
               )}
 
-              {/* WhatsApp Paired Device Banner when Paused (License Expired or Offline) */}
-              {!status.isConnected && (status.isPaired || status.user?.phone) && (
+              {/* WhatsApp Reconnecting Card (e.g. after Railway restart) */}
+              {!status.isConnected && (status.isPaired || status.user?.phone) && status.state === 'connecting' && (
+                <div className="p-4 rounded-2xl bg-gradient-to-r from-emerald-950/40 via-slate-900 to-teal-950/30 border border-emerald-500/50 space-y-3 shadow-xl">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-9 h-9 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center border border-emerald-500/40">
+                        <RefreshCw className="w-5 h-5 text-emerald-400 animate-spin" />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <h3 className="font-bold text-sm text-white">Reconnecting to WhatsApp...</h3>
+                          <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[9px] font-bold uppercase tracking-wider animate-pulse">
+                            {status.reconnectRemainingSeconds !== undefined && status.reconnectRemainingSeconds !== null
+                              ? `${status.reconnectRemainingSeconds}s REMAINING`
+                              : 'CONNECTING 24/7'}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-emerald-300 font-mono">
+                          {status.user?.phone || status.targetPhone || 'Paired Phone'}
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={handleLogoutWhatsApp}
+                      disabled={loading}
+                      className="px-2.5 py-1.5 rounded-xl bg-slate-900 hover:bg-rose-950/40 text-slate-400 hover:text-rose-400 border border-slate-800 text-[11px] font-bold transition-colors flex items-center gap-1.5"
+                      title="Unlink and pair a new number immediately"
+                    >
+                      <LogOut className="w-3.5 h-3.5" />
+                      <span>Change Number</span>
+                    </button>
+                  </div>
+
+                  {/* 45-Second Reconnect Timeout Progress Indicator */}
+                  <div className="space-y-1.5 pt-1">
+                    <div className="flex items-center justify-between text-[11px]">
+                      <span className="text-slate-300">
+                        Checking if WhatsApp on your phone can be reached...
+                      </span>
+                      <span className="font-mono text-emerald-400 font-bold">
+                        {status.reconnectRemainingSeconds ?? 45}s / 45s
+                      </span>
+                    </div>
+                    <div className="w-full bg-slate-800/80 h-1.5 rounded-full overflow-hidden">
+                      <div
+                        className="bg-gradient-to-r from-emerald-500 to-teal-400 h-full rounded-full transition-all duration-1000"
+                        style={{
+                          width: `${Math.min(100, Math.max(5, (((status.reconnectRemainingSeconds ?? 45) / 45) * 100)))}%`,
+                        }}
+                      />
+                    </div>
+                    <p className="text-[10px] text-slate-400 leading-relaxed">
+                      If your device is reached, the bot will turn to <strong>Connected</strong> automatically. If WhatsApp cannot be reached within 45 seconds, the pairing screen will automatically reappear so you can enter your phone number again.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* WhatsApp Paired Device Banner when Paused (License Expired or Paused) */}
+              {!status.isConnected && (status.isPaired || status.user?.phone) && status.state !== 'connecting' && (
                 <div className="p-4 rounded-2xl bg-amber-950/30 border border-amber-500/40 space-y-3">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
@@ -1509,8 +1590,6 @@ export default function App() {
                           <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[9px] font-bold uppercase tracking-wider">
                             {status.state === 'expired' || !isLicenseActive
                               ? 'PAUSED (EXPIRED)'
-                              : status.state === 'connecting'
-                              ? 'RECONNECTING 24/7'
                               : 'PAUSED'}
                           </span>
                         </div>
@@ -1531,8 +1610,6 @@ export default function App() {
                   <p className="text-[11px] text-slate-300">
                     {status.state === 'expired' || !isLicenseActive
                       ? 'Your WhatsApp companion device is linked. 24/7 automation is currently paused because your active license duration has elapsed. Redeem a license key below to resume immediately.'
-                      : status.state === 'connecting'
-                      ? 'Your device is linked. Re-establishing the 24/7 cloud connection in the background...'
                       : 'Your device is linked but the bot is paused. Resume the connection from this page when you are ready.'}
                   </p>
                   {(!isLicenseActive || status.state === 'expired') && (
@@ -1610,8 +1687,8 @@ export default function App() {
                 </div>
               </div>
 
-              {/* THREE LIVE STEP CONFIRMATION FLOW */}
-              {(pairingCode || status.pairingStage !== 'idle' || status.isConnected) && (
+              {/* THREE LIVE STEP CONFIRMATION FLOW (ONLY SHOWN DURING ACTIVE PAIRING; LOCKED OUT WHEN CONNECTED) */}
+              {!status.isConnected && (pairingCode || status.pairingStage === 'code_generated' || status.pairingStage === 'pairing_handshake') && (
                 <div className="p-3.5 rounded-2xl bg-slate-950 border border-slate-800 space-y-3">
                   <div className="flex items-center justify-between pb-2 border-b border-slate-800/80">
                     <div className="flex items-center gap-2">
@@ -1621,9 +1698,7 @@ export default function App() {
                       </h3>
                     </div>
                     <span className="text-[10px] font-mono text-emerald-400 px-2 py-0.5 rounded-full bg-emerald-950/60 border border-emerald-500/30">
-                      {status.isConnected
-                        ? 'Connected'
-                        : status.pairingStage === 'pairing_handshake'
+                      {status.pairingStage === 'pairing_handshake'
                         ? 'Handshake'
                         : 'Code Ready'}
                     </span>
@@ -2522,6 +2597,7 @@ export default function App() {
         onClose={() => setIsNotificationsOpen(false)}
         onClear={handleClearNotifications}
         isConnected={status.isConnected}
+        userId={currentUser?.uid}
       />
 
       {/* Auth Modal */}

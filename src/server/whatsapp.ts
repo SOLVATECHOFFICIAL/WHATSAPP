@@ -365,6 +365,7 @@ export interface WhatsAppStatus {
   latestHandshakeTime?: string;
   isExpired?: boolean;
   licenseExpiresAt?: string | null;
+  reconnectRemainingSeconds?: number | null;
   user?: {
     id: string;
     name?: string;
@@ -444,6 +445,7 @@ export class WhatsAppManager {
   private antiDeleteEnabled = true;
   private notifications: WhatsAppNotification[] = [];
   private mediaCacheDir: string;
+  private reconnectingStartedAt: number | null = null;
   private recoveringMessageIds = new Set<string>();
   private messageCache = new Map<string, {
     key: proto.IMessageKey;
@@ -1227,25 +1229,89 @@ export class WhatsAppManager {
     // User is NOT expired: Check genuine live Baileys socket state
     const isLiveConnected = Boolean(this.sock && this.currentStatus.isConnected);
     if (isLiveConnected) {
+      this.reconnectingStartedAt = null;
       this.currentStatus.isConnected = true;
       this.currentStatus.state = 'connected';
       this.currentStatus.pairingStage = 'connected';
       this.currentStatus.pairingCode = undefined;
       this.currentStatus.qrCodeUrl = undefined;
       this.currentStatus.lastError = undefined;
+      this.currentStatus.reconnectRemainingSeconds = undefined;
       if (!this.connectedAt) {
         this.connectedAt = Date.now();
       }
       this.currentStatus.connectedAt = this.connectedAt;
     } else if (hasLocalCreds) {
-      // Credentials are fully registered, but socket dropped or is reconnecting
-      this.currentStatus.isConnected = false;
-      this.currentStatus.state = this.isIntentionalClosure ? 'disconnected' : 'connecting';
-      this.currentStatus.pairingStage = 'connected';
-      this.currentStatus.pairingCode = undefined;
+      if (this.isIntentionalClosure) {
+        this.currentStatus.isConnected = false;
+        this.currentStatus.state = 'disconnected';
+        this.currentStatus.pairingStage = 'connected';
+        this.currentStatus.pairingCode = undefined;
+        this.currentStatus.reconnectRemainingSeconds = undefined;
+      } else {
+        // Automatically reconnect 24/7 in background (e.g., after Railway restart or network drop)
+        if (!this.sock && !this.isConnecting && !this.isLicenseExpired()) {
+          this.initSocket().catch((err) => {
+            console.warn(`[Auto-Reconnect ${this.userId}] Note:`, err?.message || err);
+          });
+        }
+
+        if (!this.reconnectingStartedAt) {
+          this.reconnectingStartedAt = Date.now();
+        }
+
+        const elapsed = Date.now() - this.reconnectingStartedAt;
+        if (elapsed >= 45000) {
+          // STRICT USER REQUIREMENT:
+          // "if try reconnect back for full 45 sec and no avail just return back the real WhatsApp pair for user t put number again"
+          console.log(`[Baileys Reconnect ${this.userId}] 45 seconds elapsed without reaching WhatsApp device. Returning back to pairing screen.`);
+          this.reconnectingStartedAt = null;
+          this.isConnecting = false;
+          if (this.sock) {
+            try {
+              (this.sock as any)._isIntentionalClose = true;
+              this.sock.end(undefined);
+            } catch {}
+            this.sock = null;
+          }
+          try {
+            if (fs.existsSync(this.authDir)) {
+              fs.rmSync(this.authDir, { recursive: true, force: true });
+            }
+            this.clearCredsFromFirebase().catch(() => {});
+          } catch {}
+
+          this.currentStatus.isConnected = false;
+          this.currentStatus.isPaired = false;
+          this.currentStatus.state = 'disconnected';
+          this.currentStatus.pairingStage = 'idle';
+          this.currentStatus.pairingCode = undefined;
+          this.currentStatus.qrCodeUrl = undefined;
+          this.currentStatus.user = undefined;
+          this.currentStatus.lastError = 'Unable to reach your WhatsApp phone within 45 seconds. Please enter your phone number below to pair again.';
+          this.currentStatus.reconnectRemainingSeconds = undefined;
+          this.connectedAt = null;
+          this.currentStatus.connectedAt = undefined;
+
+          this.addNotification({
+            type: 'error',
+            title: 'WhatsApp Reconnect Timed Out (45s)',
+            body: 'Unable to reach your WhatsApp device within 45 seconds. Ready for fresh pairing.',
+          });
+        } else {
+          const remainingSec = Math.max(0, Math.ceil((45000 - elapsed) / 1000));
+          this.currentStatus.isConnected = false;
+          this.currentStatus.state = 'connecting';
+          this.currentStatus.pairingStage = 'connected';
+          this.currentStatus.pairingCode = undefined;
+          this.currentStatus.reconnectRemainingSeconds = remainingSec;
+        }
+      }
     } else if (!this.isConnecting && this.currentStatus.state !== 'awaiting_pairing') {
+      this.reconnectingStartedAt = null;
       this.currentStatus.isConnected = false;
       this.currentStatus.state = 'disconnected';
+      this.currentStatus.reconnectRemainingSeconds = undefined;
       if (!isPaired) {
         this.currentStatus.pairingStage = 'idle';
         this.currentStatus.user = undefined;
@@ -1357,6 +1423,12 @@ export class WhatsAppManager {
   public async ensureRestored(): Promise<boolean> {
     const credsPath = path.join(this.authDir, 'creds.json');
     if (fs.existsSync(credsPath)) {
+      if (!this.sock && !this.isConnecting && !this.isLicenseExpired() && !this.isIntentionalClosure) {
+        if (!this.reconnectingStartedAt) {
+          this.reconnectingStartedAt = Date.now();
+        }
+        this.initSocket().catch((err) => console.warn(`[Auto-Reconnect ${this.userId}] Note:`, err?.message || err));
+      }
       return true;
     }
     if (!this.restorePromise) {
@@ -1785,7 +1857,7 @@ export class WhatsAppManager {
           },
           logger: pinoLogger,
           printQRInTerminal: false,
-          browser: Browsers.ubuntu('Chrome'),
+          browser: Browsers.macOS('Chrome'),
           connectTimeoutMs: 60000,
           defaultQueryTimeoutMs: 60000,
           keepAliveIntervalMs: 15000,
@@ -1794,7 +1866,7 @@ export class WhatsAppManager {
           generateHighQualityLinkPreview: true,
           getUrlInfo: (text: string) => getUrlInfo(text),
           syncFullHistory: false,
-          markOnlineOnConnect: true,
+          markOnlineOnConnect: false,
           getMessage: async (key: any) => {
             if (key.id && this.messageCache.has(key.id)) {
               const cached = this.messageCache.get(key.id);
@@ -4270,11 +4342,22 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
     // 3. Initialize fresh socket without loading stale Firebase credentials
     const sock = await this.initSocket(true);
 
-    // 4. Wait for WebSocket connection to establish with WhatsApp
+    // 4. Wait for WebSocket connection to establish with WhatsApp servers
     console.log(`[Baileys Pairing] Waiting for WebSocket connection to establish for +${cleanPhone}...`);
 
     let pairingCodeResult: string | null = null;
     let lastErr: any = null;
+
+    // Ensure the underlying WebSocket connection is open before calling requestPairingCode
+    for (let wait = 0; wait < 25; wait++) {
+      if (this.currentStatus.isConnected) return 'ALREADY_PAIRED';
+      const activeSock = this.sock || sock;
+      if (activeSock && (activeSock as any).ws?.readyState === 1) {
+        console.log(`[Baileys Pairing] WebSocket is fully OPEN and authenticated with WhatsApp.`);
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 400));
+    }
 
     // Attempt to request pairing code with reasonable wait
     for (let attempt = 1; attempt <= 3; attempt++) {
@@ -4282,7 +4365,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
         return 'ALREADY_PAIRED';
       }
 
-      await new Promise((r) => setTimeout(r, attempt === 1 ? 2500 : 2000));
+      await new Promise((r) => setTimeout(r, attempt === 1 ? 1500 : 2000));
 
       const activeSock = this.sock || sock;
       if (!activeSock) continue;
