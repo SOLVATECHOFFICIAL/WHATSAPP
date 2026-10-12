@@ -422,10 +422,11 @@ async function startServer() {
     try {
       const session = getSessionForReq(req);
       const { groupId, key, value } = req.body;
-      if (!groupId || !key || typeof value !== 'boolean') {
+      const settingKeys = ['antilink', 'antibot', 'antistatus', 'antispam', 'autowelcome', 'autogoodbye'];
+      if (!groupId || !settingKeys.includes(key) || typeof value !== 'boolean') {
         return res.status(400).json({
           success: false,
-          error: 'groupId, key (e.g. autowelcome, autogoodbye), and boolean value are required',
+          error: 'groupId, a supported group setting, and boolean value are required',
         });
       }
 
@@ -438,7 +439,7 @@ async function startServer() {
         });
       }
 
-      commandHandler.setSecuritySetting(groupId, key as any, value);
+      await commandHandler.setSecuritySetting(groupId, key as any, value);
       const updatedSettings = commandHandler.getSecuritySettings(groupId);
       res.json({ success: true, groupId, settings: updatedSettings });
     } catch (err: any) {
@@ -467,7 +468,7 @@ async function startServer() {
         });
       }
 
-      const updated = commandHandler.toggleAllForGroup(groupId, enableAll);
+      const updated = await commandHandler.toggleAllForGroup(groupId, enableAll);
       res.json({ success: true, groupId, settings: updated });
     } catch (err: any) {
       console.error('Error toggling all group settings:', err);
@@ -495,7 +496,11 @@ async function startServer() {
         });
       }
 
-      commandHandler.setWarnLimit(groupId, limit);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+        return res.status(400).json({ success: false, error: 'limit must be a whole number between 1 and 100.' });
+      }
+
+      await commandHandler.setWarnLimit(groupId, limit);
       res.json({ success: true, groupId, settings: commandHandler.getSecuritySettings(groupId) });
     } catch (err: any) {
       console.error('Error updating group warn limit:', err);
@@ -722,6 +727,8 @@ async function startServer() {
         quotedParticipant: req.body.quotedParticipant || undefined,
         mentionedJids: req.body.mentionedJids || [],
         getTopChatted: (phone: string) => session.getTopChatted(phone),
+        isGroupParticipantAdmin: (gid: string, participantJid: string) =>
+          session.isGroupParticipantAdmin(gid, participantJid),
       });
 
       res.json({ success: true, result });

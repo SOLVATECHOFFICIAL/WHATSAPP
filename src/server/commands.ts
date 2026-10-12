@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { db } from '../services/firebase.ts';
-import { collection, doc, setDoc, getDoc, getDocs, updateDoc, onSnapshot } from 'firebase/firestore';
+import { collection, doc, setDoc, getDoc, getDocs, onSnapshot, runTransaction, writeBatch } from 'firebase/firestore';
 
 export interface CommandContext {
   command: string;
@@ -24,6 +24,7 @@ export interface CommandContext {
   getTopChatted?: (phone: string) => Array<{ phone: string; name?: string; count: number }>;
   getGroupInviteCode?: (gid: string) => string | undefined;
   setGroupInviteCode?: (gid: string, code: string) => void;
+  isGroupParticipantAdmin?: (gid: string, participantJid: string) => Promise<boolean>;
 }
 
 export const GROUP_ONLY_COMMANDS = new Set([
@@ -183,6 +184,7 @@ class CommandHandler {
     this.loadAllDataFromFirebase().catch(() => {});
     // Real-time synchronization across all admin devices: each group has exactly one document in Firebase
     this.setupRealtimeSecuritySync();
+    this.setupRealtimeWarningSync();
   }
 
   // Real-time synchronization: When any admin toggles an anti or welcome setting in Firebase,
@@ -215,6 +217,33 @@ class CommandHandler {
       );
     } catch (err) {
       console.warn('Real-time security sync listener setup note:', err);
+    }
+  }
+
+  private setupRealtimeWarningSync() {
+    try {
+      onSnapshot(
+        collection(db, 'group_warnings'),
+        (snapshot) => {
+          snapshot.docChanges().forEach((change) => {
+            const data = change.doc.data();
+            const key = data.rawKey ||
+              (data.cleanGid && data.userPhone
+                ? `${data.cleanGid}:${data.userPhone}`
+                : change.doc.id.replace('__', ':'));
+            const count = typeof data.count === 'number' ? data.count : 0;
+            if (change.type === 'removed' || count <= 0) {
+              delete this.warnings[key];
+            } else {
+              this.warnings[key] = count;
+            }
+          });
+          this.saveWarningsToCache();
+        },
+        (err) => console.warn('Real-time group_warnings snapshot listener note:', err)
+      );
+    } catch (err) {
+      console.warn('Real-time warning sync listener setup note:', err);
     }
   }
 
@@ -339,12 +368,8 @@ class CommandHandler {
 
   // Sync settings or warnings to Firebase
   public async syncToFirebase(collectionName: string, id: string, data: any) {
-    try {
-      const docRef = doc(db, collectionName, id);
-      await setDoc(docRef, { ...data, updatedAt: new Date().toISOString() }, { merge: true });
-    } catch (err) {
-      console.warn('Firebase sync note (offline safe):', err);
-    }
+    const docRef = doc(db, collectionName, id);
+    await setDoc(docRef, { ...data, updatedAt: new Date().toISOString() }, { merge: true });
   }
 
   // DEFAULT FOR ALL GROUPS: KEEPING EVERYTHING ON (true)
@@ -373,23 +398,21 @@ class CommandHandler {
     };
   }
 
-  public setSecuritySetting(
+  public async setSecuritySetting(
     gid: string,
     key: 'antilink' | 'antibot' | 'antistatus' | 'antispam' | 'autowelcome' | 'autogoodbye',
     val: boolean
-  ) {
-    if (!this.securitySettings[gid]) {
-      this.securitySettings[gid] = this.getSecuritySettings(gid);
-    }
-    this.securitySettings[gid][key] = val;
+  ): Promise<void> {
+    const updated = { ...this.getSecuritySettings(gid), [key]: val };
+    await this.syncToFirebase('group_security', gid, updated);
+    this.securitySettings[gid] = updated;
     this.saveSettingsToCache();
-    this.syncToFirebase('group_security', gid, this.securitySettings[gid]);
   }
 
   // Quick switch: Turn on or off all anti and welcome protections for a group
-  public toggleAllForGroup(gid: string, enableAll: boolean) {
+  public async toggleAllForGroup(gid: string, enableAll: boolean) {
     const current = this.getSecuritySettings(gid);
-    this.securitySettings[gid] = {
+    const updated = {
       antilink: enableAll,
       antibot: enableAll,
       antistatus: enableAll,
@@ -398,18 +421,20 @@ class CommandHandler {
       autogoodbye: enableAll,
       warnLimit: current.warnLimit || 3,
     };
+    await this.syncToFirebase('group_security', gid, updated);
+    this.securitySettings[gid] = updated;
     this.saveSettingsToCache();
-    this.syncToFirebase('group_security', gid, this.securitySettings[gid]);
     return this.securitySettings[gid];
   }
 
-  public setWarnLimit(gid: string, limit: number) {
-    if (!this.securitySettings[gid]) {
-      this.securitySettings[gid] = this.getSecuritySettings(gid);
-    }
-    this.securitySettings[gid].warnLimit = Math.max(1, limit);
+  public async setWarnLimit(gid: string, limit: number): Promise<void> {
+    const updated = {
+      ...this.getSecuritySettings(gid),
+      warnLimit: Math.min(100, Math.max(1, Math.floor(limit))),
+    };
+    await this.syncToFirebase('group_security', gid, updated);
+    this.securitySettings[gid] = updated;
     this.saveSettingsToCache();
-    this.syncToFirebase('group_security', gid, this.securitySettings[gid]);
   }
 
   private getNormalizedWarningKey(gid: string, userJid: string): { key: string; docId: string; cleanGid: string; cleanPhone: string } {
@@ -420,21 +445,34 @@ class CommandHandler {
     return { key, docId, cleanGid, cleanPhone };
   }
 
-  public addWarning(gid: string, userJid: string): { count: number; max: number } {
+  public async addWarning(gid: string, userJid: string): Promise<{ count: number; max: number }> {
     const { key, docId, cleanGid, cleanPhone } = this.getNormalizedWarningKey(gid, userJid);
-    this.warnings[key] = (this.warnings[key] || 0) + 1;
-    this.saveWarningsToCache();
-    const max = this.securitySettings[gid]?.warnLimit || 3;
-    this.syncToFirebase('group_warnings', docId, {
-      count: this.warnings[key],
-      groupId: gid,
-      cleanGid,
-      userPhone: cleanPhone,
-      rawKey: key,
-      warnLimit: max,
-      lastWarnedAt: new Date().toISOString(),
+    const result = await runTransaction(db, async (transaction) => {
+      const warningRef = doc(db, 'group_warnings', docId);
+      const settingsRef = doc(db, 'group_security', gid);
+      const warningSnap = await transaction.get(warningRef);
+      const settingsSnap = await transaction.get(settingsRef);
+      const count = (typeof warningSnap.data()?.count === 'number'
+        ? warningSnap.data()!.count
+        : 0) + 1;
+      const configuredLimit = settingsSnap.data()?.warnLimit;
+      const max = typeof configuredLimit === 'number'
+        ? Math.min(100, Math.max(1, Math.floor(configuredLimit)))
+        : 3;
+      transaction.set(warningRef, {
+        count,
+        groupId: gid,
+        cleanGid,
+        userPhone: cleanPhone,
+        rawKey: key,
+        warnLimit: max,
+        lastWarnedAt: new Date().toISOString(),
+      }, { merge: true });
+      return { count, max };
     });
-    return { count: this.warnings[key], max };
+    this.warnings[key] = result.count;
+    this.saveWarningsToCache();
+    return result;
   }
 
   public getWarnings(gid: string, userJid: string): number {
@@ -442,33 +480,47 @@ class CommandHandler {
     return this.warnings[key] || 0;
   }
 
-  public clearWarnings(gid: string, userJid: string) {
+  public async clearWarnings(gid: string, userJid: string): Promise<void> {
     const { key, docId, cleanGid, cleanPhone } = this.getNormalizedWarningKey(gid, userJid);
-    delete this.warnings[key];
-    this.saveWarningsToCache();
-    this.syncToFirebase('group_warnings', docId, {
-      count: 0,
-      groupId: gid,
-      cleanGid,
-      userPhone: cleanPhone,
-      rawKey: key,
-      clearedAt: new Date().toISOString(),
-    });
-  }
-
-  public resetAllWarnings(gid: string) {
-    const cleanGid = gid.split('@')[0].replace(/\D/g, '') || gid.split('@')[0];
-    const keysToReset = Object.keys(this.warnings).filter((k) => k.startsWith(`${cleanGid}:`) || k.startsWith(`${gid}:`));
-    keysToReset.forEach((k) => {
-      delete this.warnings[k];
-      const parts = k.split(':');
-      const docId = `${parts[0]}__${parts[1] || 'all'}`;
-      this.syncToFirebase('group_warnings', docId, {
+    await runTransaction(db, async (transaction) => {
+      transaction.set(doc(db, 'group_warnings', docId), {
         count: 0,
         groupId: gid,
+        cleanGid,
+        userPhone: cleanPhone,
+        rawKey: key,
         clearedAt: new Date().toISOString(),
-      });
+      }, { merge: true });
     });
+    delete this.warnings[key];
+    this.saveWarningsToCache();
+  }
+
+  public async resetAllWarnings(gid: string): Promise<void> {
+    const cleanGid = gid.split('@')[0].replace(/\D/g, '') || gid.split('@')[0];
+    const snapshot = await getDocs(collection(db, 'group_warnings'));
+    const groupDocs = snapshot.docs.filter((warningDoc) => {
+      const data = warningDoc.data();
+      return data.groupId === gid || data.cleanGid === cleanGid ||
+        warningDoc.id.startsWith(`${cleanGid}__`);
+    });
+    for (let index = 0; index < groupDocs.length; index += 400) {
+      const batch = writeBatch(db);
+      for (const warningDoc of groupDocs.slice(index, index + 400)) {
+        batch.set(warningDoc.ref, {
+          count: 0,
+          groupId: gid,
+          cleanGid,
+          clearedAt: new Date().toISOString(),
+        }, { merge: true });
+      }
+      await batch.commit();
+    }
+    for (const key of Object.keys(this.warnings)) {
+      if (key.startsWith(`${cleanGid}:`) || key.startsWith(`${gid}:`)) {
+        delete this.warnings[key];
+      }
+    }
     this.saveWarningsToCache();
   }
 
@@ -1177,7 +1229,7 @@ Message successfully pinned for 7 days by Group Admin!
       }
       const val = ctx.args[0]?.toLowerCase() === 'off' ? false : true;
       const gid = ctx.groupJid || 'default';
-      this.setSecuritySetting(gid, 'antilink', val);
+      await this.setSecuritySetting(gid, 'antilink', val);
       return {
         reply: `🛡️ *[ANTI-LINK SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED*' : '❌ *DISABLED*'}\nPolicy: Unauthorized external links will be auto-deleted with security warning issued to sender.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
       };
@@ -1192,7 +1244,7 @@ Message successfully pinned for 7 days by Group Admin!
       }
       const val = ctx.args[0]?.toLowerCase() === 'off' ? false : true;
       const gid = ctx.groupJid || 'default';
-      this.setSecuritySetting(gid, 'antibot', val);
+      await this.setSecuritySetting(gid, 'antibot', val);
       return {
         reply: `🤖 *[ANTI-BOT SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED*' : '❌ *DISABLED*'}\nPolicy: Non-admin members using bot prefix commands (*.*) or rogue userbots will have their message auto-deleted and receive a security warning.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
       };
@@ -1207,7 +1259,7 @@ Message successfully pinned for 7 days by Group Admin!
       }
       const val = ctx.args[0]?.toLowerCase() === 'off' ? false : true;
       const gid = ctx.groupJid || 'default';
-      this.setSecuritySetting(gid, 'antistatus', val);
+      await this.setSecuritySetting(gid, 'antistatus', val);
       return {
         reply: `📱 *[ANTI-STATUS MENTION SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED*' : '❌ *DISABLED*'}\nPolicy: Non-admin members mentioning this group in their personal WhatsApp status will have the alert deleted and receive a security warning.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
       };
@@ -1222,7 +1274,7 @@ Message successfully pinned for 7 days by Group Admin!
       }
       const val = ctx.args[0]?.toLowerCase() === 'off' ? false : true;
       const gid = ctx.groupJid || 'default';
-      this.setSecuritySetting(gid, 'antispam', val);
+      await this.setSecuritySetting(gid, 'antispam', val);
       return {
         reply: `🚫 *[ANTI-SPAM SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED*' : '❌ *DISABLED*'}\nPolicy: Flood messages, rapid stickers/media spam, and repetitive text/words will be automatically purged (including original spam messages). If a member continues sending messages while deletion is underway, they are *INSTANTLY KICKED*!\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
       };
@@ -1237,7 +1289,7 @@ Message successfully pinned for 7 days by Group Admin!
       }
       const gid = ctx.groupJid || 'default';
       const val = ctx.args[0]?.toLowerCase() === 'off' ? false : true;
-      this.setSecuritySetting(gid, 'autowelcome', val);
+      await this.setSecuritySetting(gid, 'autowelcome', val);
       return {
         reply: `👋 *[AUTO-WELCOME SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED*' : '❌ *DISABLED*'}\nPolicy: Automatically greets anyone who enters the group (added by admin, added by members, join request approved, or link).\n⚡ *Smart Features:*\n• Contextual AI-style greetings tailored to group subject & description (e.g. Serious learners for Academy, Builders for Tech, Business for Commerce).\n• If multiple people are added rapidly (2 or 3+), all are tagged together in one message!\n• Sent exclusively by connected Group Admin Bot.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*Sample Preview:*\n_Hello @user, Welcome to SOLVATECH ACADEMY._\n\n_This group is for serious learners only. Kindly go through the group description and pinned messages to get started._\n\n_- Admin_\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
       };
@@ -1252,7 +1304,7 @@ Message successfully pinned for 7 days by Group Admin!
       }
       const gid = ctx.groupJid || 'default';
       const val = ctx.args[0]?.toLowerCase() === 'off' ? false : true;
-      this.setSecuritySetting(gid, 'autogoodbye', val);
+      await this.setSecuritySetting(gid, 'autogoodbye', val);
       return {
         reply: `👋 *[AUTO-GOODBYE SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED*' : '❌ *DISABLED*'}\nPolicy: Automatically acknowledges departing or removed participants.\n⚡ *Smart Features:*\n• Contextual farewell message tailored to group info/theme.\n• If multiple members leave rapidly (2 or 3+), all are tagged together simultaneously!\n• Sent exclusively by connected Group Admin Bot.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*Sample Preview:*\n_👋 @user left SOLVATECH ACADEMY_\n\n_We hope you learned something valuable. You're always welcome back whenever you're ready to continue learning._\n\n_Keep building! 💻_\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
       };
@@ -1273,7 +1325,7 @@ Message successfully pinned for 7 days by Group Admin!
         if (isNaN(num) || num <= 0) {
           return { reply: `⚠️ *[WARN LIMIT USAGE]*\nPlease provide a valid number for warning limit.\nExample: *.warn limit 3* or *.warn limit 5*` };
         }
-        this.setWarnLimit(gid, num);
+        await this.setWarnLimit(gid, num);
         return {
           reply: `⚙️ *[WARN LIMIT UPDATED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nGroup warning limit set to *${num} warnings*.\nAccumulating ${num} warnings across Anti-Bot, Anti-Link, Anti-Status, Anti-Spam, or Admin warnings will automatically kick the member.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
         };
@@ -1282,7 +1334,12 @@ Message successfully pinned for 7 days by Group Admin!
       const targetUser = ctx.mentionedJids?.[0] || ctx.quotedParticipant || ctx.args[0] || ctx.senderNumber;
       const targetClean = targetUser.replace(/\D/g, '') || targetUser;
       const targetJid = targetUser.includes('@') ? targetUser : `${targetClean}@s.whatsapp.net`;
-      const warnResult = this.addWarning(gid, targetJid);
+      if (ctx.isGroupParticipantAdmin && await ctx.isGroupParticipantAdmin(gid, targetJid)) {
+        return {
+          reply: `🛡️ *[PROTECTED ADMINISTRATOR]*\nAdministrators cannot be warned. Warnings apply to regular group members only.`,
+        };
+      }
+      const warnResult = await this.addWarning(gid, targetJid);
 
       if (warnResult.count >= warnResult.max) {
         return {
@@ -1324,7 +1381,7 @@ Message successfully pinned for 7 days by Group Admin!
       const targetUser = ctx.mentionedJids?.[0] || ctx.quotedParticipant || ctx.args[0] || ctx.senderNumber;
       const targetClean = targetUser.replace(/\D/g, '') || targetUser;
       const targetJid = targetUser.includes('@') ? targetUser : `${targetClean}@s.whatsapp.net`;
-      this.clearWarnings(gid, targetJid);
+      await this.clearWarnings(gid, targetJid);
       return { reply: `✅ *[WARNINGS RESET]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nWarnings have been reset to *0* for @${targetClean}.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n> 🛡️ _SOLVATECH Group Defense_` };
     }
 
@@ -1336,7 +1393,7 @@ Message successfully pinned for 7 days by Group Admin!
         return { reply: `⛔ *[ACCESS DENIED]*\nOnly Group Administrators connected to the bot can reset all warnings.` };
       }
       const gid = ctx.groupJid || 'default';
-      this.resetAllWarnings(gid);
+      await this.resetAllWarnings(gid);
       return { reply: `🔄 *[ALL WARNINGS CLEARED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nAll group member warnings have been reset to 0 for this group.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n> 🛡️ _SOLVATECH Group Defense_` };
     }
 

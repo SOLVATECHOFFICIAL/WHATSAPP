@@ -1,1 +1,2 @@
 - [Paid license stacking](paid-license-stacking.md) — new keys preserve and add unused license time; do not discard an existing balance.
+- [Bot durability and admin roles](bot-durability-and-admin-roles.md) — keep durable bot state in Firebase; warning immunity applies only to current WhatsApp admins.

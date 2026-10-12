@@ -27,6 +27,16 @@ const MAX_PROCESS_MEDIA_CACHE_BYTES = 64 * 1024 * 1024;
 const processMediaCache = new Map<string, { size: number; evict: () => void }>();
 let processMediaCacheBytes = 0;
 
+function setBoundedCache<K, V>(cache: Map<K, V>, key: K, value: V, maxEntries: number): void {
+  cache.delete(key);
+  cache.set(key, value);
+  while (cache.size > maxEntries) {
+    const oldestKey = cache.keys().next().value;
+    if (oldestKey === undefined) break;
+    cache.delete(oldestKey);
+  }
+}
+
 const hashSessionContent = (content: string) =>
   createHash('sha256').update(content, 'utf8').digest('hex');
 
@@ -466,8 +476,6 @@ export class WhatsAppManager {
       body: `Baileys WhatsApp service initialized for user account ${this.userEmail || this.userId}.`,
     });
 
-    // Start 24/7 active heartbeat watchdog so bot stays alive continuously
-    this.start247Heartbeat();
   }
 
   public getAntiDeleteEnabled(): boolean {
@@ -613,6 +621,10 @@ export class WhatsAppManager {
 
   // Gracefully pause socket without wiping credentials (preserves pairing for life)
   public async pauseSocket(reason = 'License expired or paused'): Promise<void> {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
+    }
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -637,6 +649,35 @@ export class WhatsAppManager {
     this.currentStatus.pairingCode = undefined;
     await this.syncConnectionStatusToFirestore();
     console.log(`[Session ${this.userId}] WhatsApp socket paused (${reason}). Companion pairing credentials strictly preserved on disk & Firebase.`);
+  }
+
+  public dispose(): void {
+    if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
+    if (this.pairingCodeTimer) clearTimeout(this.pairingCodeTimer);
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    if (this.firebaseSyncTimer) clearTimeout(this.firebaseSyncTimer);
+    this.heartbeatInterval = null;
+    this.pairingCodeTimer = null;
+    this.reconnectTimer = null;
+    this.firebaseSyncTimer = null;
+    if (this.activeSpamSession) this.activeSpamSession.abort = true;
+    for (const pending of this.pendingGreetings.values()) clearTimeout(pending.timer);
+    this.pendingGreetings.clear();
+    for (const key of Array.from(this.mediaCache.keys())) this.forgetMediaBuffer(key);
+    this.messageCache.clear();
+    this.statusCache.clear();
+    this.viewOnceCache.clear();
+    this.lastViewOnceByChat.clear();
+    this.groupMetaCache.clear();
+    this.groupSubjectCache.clear();
+    this.groupPictureCache.clear();
+    this.groupInviteCodes.clear();
+    this.reverseLidMap.clear();
+    this.contactNames.clear();
+    this.userInteractions.clear();
+    this.userMessageHistory.clear();
+    this.userSpamPurgeState.clear();
+    this.greetingDedupCache.clear();
   }
 
   private async syncConnectionStatusToFirestore(): Promise<void> {
@@ -913,14 +954,19 @@ export class WhatsAppManager {
     const cleanUser = userPhone.replace(/\D/g, '');
     if (!cleanPeer || !cleanUser || cleanPeer === cleanUser) return;
     if (peerName) {
-      this.contactNames.set(cleanPeer, peerName);
+      setBoundedCache(this.contactNames, cleanPeer, peerName, 2000);
     }
     if (!this.userInteractions.has(cleanUser)) {
-      this.userInteractions.set(cleanUser, new Map());
+      setBoundedCache(this.userInteractions, cleanUser, new Map(), 100);
     }
     const map = this.userInteractions.get(cleanUser)!;
     const current = map.get(cleanPeer) || { count: 0, name: this.contactNames.get(cleanPeer) };
-    map.set(cleanPeer, { count: current.count + 1, name: peerName || current.name || this.contactNames.get(cleanPeer) });
+    setBoundedCache(
+      map,
+      cleanPeer,
+      { count: current.count + 1, name: peerName || current.name || this.contactNames.get(cleanPeer) },
+      500
+    );
   }
 
   public getTopChatted(userPhone: string): Array<{ phone: string; name?: string; count: number }> {
@@ -934,7 +980,7 @@ export class WhatsAppManager {
   }
 
   public setGroupInviteCode(groupJid: string, code: string) {
-    this.groupInviteCodes.set(groupJid, code);
+    setBoundedCache(this.groupInviteCodes, groupJid, code, 1000);
   }
 
   public getGroupInviteCode(groupJid: string): string | undefined {
@@ -973,7 +1019,7 @@ export class WhatsAppManager {
     try {
       const meta = await sock.groupMetadata(gid);
       if (meta) {
-        this.groupMetaCache.set(gid, { meta, timestamp: now });
+        setBoundedCache(this.groupMetaCache, gid, { meta, timestamp: now }, 250);
       }
       return meta;
     } catch (err) {
@@ -1381,6 +1427,13 @@ export class WhatsAppManager {
         this.isConnecting = true;
 
         const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
+        // Baileys may update signal keys without emitting creds.update. Mirror these
+        // file writes too, so a Railway disk replacement can restore the session.
+        const saveSignalKeys = (state.keys as any).set.bind(state.keys);
+        (state.keys as any).set = async (data: any) => {
+          await saveSignalKeys(data);
+          this.scheduleFirebaseCredsSync();
+        };
 
         let version: [number, number, number] = [2, 3000, 1043857760];
         try {
@@ -1419,6 +1472,7 @@ export class WhatsAppManager {
         } as any);
 
         this.sock = sock;
+        this.start247Heartbeat();
 
         sock.ev.on('creds.update', (creds) => {
           this.credentialsSavePromise = this.credentialsSavePromise
@@ -1815,7 +1869,7 @@ export class WhatsAppManager {
                 sock.groupMetadata(remoteJid)
                   .then((meta) => {
                     if (meta?.subject) {
-                      this.groupSubjectCache.set(remoteJid, meta.subject);
+                      setBoundedCache(this.groupSubjectCache, remoteJid, meta.subject, 1000);
                     }
                   })
                   .catch(() => {});
@@ -1977,7 +2031,7 @@ export class WhatsAppManager {
 
             if (sec.antibot && isBotDetected) {
               try { await sock.sendMessage(remoteJid, { delete: msg.key }); } catch {}
-              const warn = commandHandler.addWarning(remoteJid, senderJid);
+              const warn = await commandHandler.addWarning(remoteJid, senderJid);
               if (warn.count >= warn.max) {
                 try { await sock.groupParticipantsUpdate(remoteJid, [senderJid], 'remove'); } catch {}
                 await sock.sendMessage(remoteJid, {
@@ -1998,7 +2052,7 @@ export class WhatsAppManager {
             const hasLink = /(https?:\/\/[^\s]+|chat\.whatsapp\.com\/[^\s]+|wa\.me\/[^\s]+|t\.me\/[^\s]+)/i.test(textWithoutOfficialDomain);
             if (sec.antilink && hasLink) {
               try { await sock.sendMessage(remoteJid, { delete: msg.key }); } catch {}
-              const warn = commandHandler.addWarning(remoteJid, senderJid);
+              const warn = await commandHandler.addWarning(remoteJid, senderJid);
               if (warn.count >= warn.max) {
                 try { await sock.groupParticipantsUpdate(remoteJid, [senderJid], 'remove'); } catch {}
                 await sock.sendMessage(remoteJid, {
@@ -2024,7 +2078,7 @@ export class WhatsAppManager {
             );
             if (sec.antistatus && isStatusMention) {
               try { await sock.sendMessage(remoteJid, { delete: msg.key }); } catch {}
-              const warn = commandHandler.addWarning(remoteJid, senderJid);
+              const warn = await commandHandler.addWarning(remoteJid, senderJid);
               if (warn.count >= warn.max) {
                 try { await sock.groupParticipantsUpdate(remoteJid, [senderJid], 'remove'); } catch {}
                 await sock.sendMessage(remoteJid, {
@@ -2106,7 +2160,10 @@ export class WhatsAppManager {
                 if (isFloodSpam) keysToPurge.push(...rapidMessages.map((m) => m.key));
 
                 // Mark user in active purge state
-                this.userSpamPurgeState.set(spamUserKey, { detectedAt: now, isPurging: true });
+                for (const [key, state] of this.userSpamPurgeState) {
+                  if (now - state.detectedAt >= 30000) this.userSpamPurgeState.delete(key);
+                }
+                setBoundedCache(this.userSpamPurgeState, spamUserKey, { detectedAt: now, isPurging: true }, 1000);
 
                 // Delete current message and previous original messages in batch
                 for (const k of keysToPurge) {
@@ -2114,10 +2171,10 @@ export class WhatsAppManager {
                 }
 
                 // Reset user history
-                this.userMessageHistory.set(spamUserKey, []);
+                setBoundedCache(this.userMessageHistory, spamUserKey, [], 1000);
 
                 // Unified warning increment
-                const warn = commandHandler.addWarning(remoteJid, senderJid);
+                const warn = await commandHandler.addWarning(remoteJid, senderJid);
                 if (warn.count >= warn.max) {
                   try { await sock.groupParticipantsUpdate(remoteJid, [senderJid], 'remove'); } catch {}
                   this.userSpamPurgeState.delete(spamUserKey);
@@ -2136,7 +2193,7 @@ export class WhatsAppManager {
 
               // Normal legitimate message: save to history
               recentHistory.push({ key: msg.key, text: cleanText, type: msgKind, timestamp: now });
-              this.userMessageHistory.set(spamUserKey, recentHistory.slice(-12));
+              setBoundedCache(this.userMessageHistory, spamUserKey, recentHistory.slice(-12), 1000);
             }
           }
         }
@@ -2973,7 +3030,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
               if (!isGroup || !isAuthorizedAdmin) return;
               try {
                 const val = args[0]?.toLowerCase() === 'off' ? false : true;
-                commandHandler.setSecuritySetting(remoteJid, 'antilink', val);
+                await commandHandler.setSecuritySetting(remoteJid, 'antilink', val);
                 reactDone();
                 await sock.sendMessage(remoteJid, {
                   text: `🛡️ *[ANTI-LINK SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED & ENFORCED*' : '❌ *DISABLED*'}\nPolicy: Unauthorized external links will be auto-deleted with security warning issued to sender.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
@@ -2990,7 +3047,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
               if (!isGroup || !isAuthorizedAdmin) return;
               try {
                 const val = args[0]?.toLowerCase() === 'off' ? false : true;
-                commandHandler.setSecuritySetting(remoteJid, 'antibot', val);
+                await commandHandler.setSecuritySetting(remoteJid, 'antibot', val);
                 reactDone();
                 await sock.sendMessage(remoteJid, {
                   text: `🤖 *[ANTI-BOT SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED & ENFORCED*' : '❌ *DISABLED*'}\nPolicy: Non-admin members using bot prefix commands (*.*) will have their message auto-deleted and receive a security warning.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
@@ -3007,7 +3064,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
               if (!isGroup || !isAuthorizedAdmin) return;
               try {
                 const val = args[0]?.toLowerCase() === 'off' ? false : true;
-                commandHandler.setSecuritySetting(remoteJid, 'antistatus', val);
+                await commandHandler.setSecuritySetting(remoteJid, 'antistatus', val);
                 reactDone();
                 await sock.sendMessage(remoteJid, {
                   text: `📱 *[ANTI-STATUS MENTION SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED & ENFORCED*' : '❌ *DISABLED*'}\nPolicy: Non-admin members mentioning this group in their personal WhatsApp status will have the alert deleted and receive a security warning.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
@@ -3024,7 +3081,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
               if (!isGroup || !isAuthorizedAdmin) return;
               try {
                 const val = args[0]?.toLowerCase() === 'off' ? false : true;
-                commandHandler.setSecuritySetting(remoteJid, 'antispam', val);
+                await commandHandler.setSecuritySetting(remoteJid, 'antispam', val);
                 reactDone();
                 await sock.sendMessage(remoteJid, {
                   text: `🚫 *[ANTI-SPAM DEFENSE SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED & ENFORCED*' : '❌ *DISABLED*'}\nPolicy: Flood messages, rapid stickers/media spam, and repetitive text/words will be automatically purged (including original spam messages). If a member continues sending messages while deletion is underway, they are *INSTANTLY KICKED*!\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
@@ -3041,7 +3098,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
               if (!isGroup || !isAuthorizedAdmin) return;
               try {
                 const val = args[0]?.toLowerCase() === 'off' ? false : true;
-                commandHandler.setSecuritySetting(remoteJid, 'autowelcome', val);
+                await commandHandler.setSecuritySetting(remoteJid, 'autowelcome', val);
                 reactDone();
                 await sock.sendMessage(remoteJid, {
                   text: `👋 *[AUTO-WELCOME SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED*' : '❌ *DISABLED*'}\nPolicy: Automatically greets anyone who enters the group.\nRule: Strictly sent only by connected admin bots.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
@@ -3058,7 +3115,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
               if (!isGroup || !isAuthorizedAdmin) return;
               try {
                 const val = args[0]?.toLowerCase() === 'off' ? false : true;
-                commandHandler.setSecuritySetting(remoteJid, 'autogoodbye', val);
+                await commandHandler.setSecuritySetting(remoteJid, 'autogoodbye', val);
                 reactDone();
                 await sock.sendMessage(remoteJid, {
                   text: `🚪 *[AUTO-GOODBYE SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED*' : '❌ *DISABLED*'}\nPolicy: Automatically acknowledges departing or removed participants.\nRule: Strictly sent only by connected admin bots.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
@@ -3099,7 +3156,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                     }, { quoted: msg });
                     return;
                   }
-                  commandHandler.setWarnLimit(remoteJid, num);
+                  await commandHandler.setWarnLimit(remoteJid, num);
                   reactDone();
                   await sock.sendMessage(remoteJid, {
                     text: `⚙️ *[WARN LIMIT UPDATED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nGroup warning limit set to *${num} warnings*.\nAccumulating ${num} warnings across Anti-Bot, Anti-Link, Anti-Status, Anti-Spam, or Admin warnings will automatically kick the member.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
@@ -3147,7 +3204,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                     return;
                   }
                   const targetClean = targetJid.split('@')[0].replace(/\D/g, '');
-                  commandHandler.clearWarnings(remoteJid, targetJid);
+                  await commandHandler.clearWarnings(remoteJid, targetJid);
                   reactDone();
                   await sock.sendMessage(remoteJid, {
                     text: `✅ *[WARNINGS RESET]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nWarnings have been reset to *0* for @${targetClean}.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n> 🛡️ _SOLVATECH Group Defense_`,
@@ -3158,7 +3215,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
 
                 // D) Reset all warnings for group: .resetwarns
                 if (command === 'resetwarns') {
-                  commandHandler.resetAllWarnings(remoteJid);
+                  await commandHandler.resetAllWarnings(remoteJid);
                   reactDone();
                   await sock.sendMessage(remoteJid, {
                     text: `🔄 *[ALL WARNINGS CLEARED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nAll group member warnings have been reset to 0 for this group.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n> 🛡️ _SOLVATECH Group Defense_`,
@@ -3231,7 +3288,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                   }
 
                   // Increment warning count (+1)
-                  const warnResult = commandHandler.addWarning(remoteJid, targetInGroup.id);
+                  const warnResult = await commandHandler.addWarning(remoteJid, targetInGroup.id);
                   const reason = args.filter((a: string) => !a.startsWith('@') && a.replace(/\D/g, '') !== targetClean).join(' ').trim() || 'Rule violation / Disobeying group instructions';
 
                   // Check if warning threshold reached
@@ -3240,7 +3297,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                     try {
                       await sock.groupParticipantsUpdate(remoteJid, [targetInGroup.id], 'remove');
                       kickSuccess = true;
-                      commandHandler.clearWarnings(remoteJid, targetInGroup.id);
+                      await commandHandler.clearWarnings(remoteJid, targetInGroup.id);
                     } catch (kickErr: any) {
                       console.error('Failed to kick warned user:', kickErr);
                     }
@@ -3532,7 +3589,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
         try {
           groupMeta = await this.getCachedGroupMetadata(sock, groupId);
           if (groupMeta?.subject) {
-            this.groupSubjectCache.set(groupId, groupMeta.subject);
+            setBoundedCache(this.groupSubjectCache, groupId, groupMeta.subject, 1000);
           }
         } catch (fetchErr) {
           console.warn(`[Auto-Greeting] Could not fetch live groupMetadata for ${groupId}:`, fetchErr);
@@ -3641,7 +3698,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
           if (Date.now() - lastSent < 8000) {
             return;
           }
-          this.greetingDedupCache.set(dedupKey, Date.now());
+          setBoundedCache(this.greetingDedupCache, dedupKey, Date.now(), 2000);
 
           // Build tags for all participants (tag 3 at the same time if 3 joined/left)
           const pTags = allBatchJids.map((jid) => {
@@ -3698,7 +3755,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
       try {
         for (const upd of updates) {
           if (upd.id && upd.subject) {
-            this.groupSubjectCache.set(upd.id, upd.subject);
+            setBoundedCache(this.groupSubjectCache, upd.id, upd.subject, 1000);
           }
           if (upd.id) {
             // Evict old cached picture to ensure live update
@@ -3976,7 +4033,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
       ]).catch(() => null);
 
       if (hdUrl) {
-        this.groupPictureCache.set(groupId, hdUrl);
+        setBoundedCache(this.groupPictureCache, groupId, hdUrl, 500);
         return hdUrl;
       }
 
@@ -3987,7 +4044,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
       ]).catch(() => null);
 
       if (previewUrl) {
-        this.groupPictureCache.set(groupId, previewUrl);
+        setBoundedCache(this.groupPictureCache, groupId, previewUrl, 500);
         return previewUrl;
       }
     } catch {
@@ -4012,7 +4069,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
         const phone = JSON.parse(fs.readFileSync(filePath, 'utf8'));
         const cleanPhone = String(phone).replace(/\D/g, '');
         if (cleanPhone) {
-          this.reverseLidMap.set(cleanLid, cleanPhone);
+          setBoundedCache(this.reverseLidMap, cleanLid, cleanPhone, 2000);
           return cleanPhone;
         }
       }
@@ -4097,6 +4154,32 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
       const meta = await this.getCachedGroupMetadata(this.sock, groupId);
       if (!meta) return false;
       return this.isBotAdminInGroup(meta);
+    } catch {
+      return false;
+    }
+  }
+
+  public async isGroupParticipantAdmin(groupId: string, participantJid: string): Promise<boolean> {
+    if (!groupId || !participantJid || !this.sock || !this.currentStatus.isConnected) return false;
+    try {
+      const meta = await this.getCachedGroupMetadata(this.sock, groupId);
+      if (!meta) return false;
+      const targetId = participantJid.split('@')[0].split(':')[0].replace(/\D/g, '');
+      const targetIds = new Set<string>();
+      if (targetId) targetIds.add(targetId);
+      const mappedTarget = this.getLidReverseMapping(targetId);
+      if (mappedTarget) targetIds.add(mappedTarget);
+      const matches = (rawId: unknown): boolean => {
+        if (typeof rawId !== 'string' || !rawId) return false;
+        const clean = rawId.split('@')[0].split(':')[0].replace(/\D/g, '');
+        const mapped = this.getLidReverseMapping(clean);
+        return targetIds.has(clean) || Boolean(mapped && targetIds.has(mapped));
+      };
+      if (matches(meta.owner) || matches(meta.ownerPn) || matches(meta.creator)) return true;
+      return Array.isArray(meta.participants) && meta.participants.some((participant: any) =>
+        (participant.admin === 'admin' || participant.admin === 'superadmin') &&
+        [participant.id, participant.phoneNumber, participant.lid].some(matches)
+      );
     } catch {
       return false;
     }
@@ -4201,7 +4284,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
 
       for (const [gid, meta] of Object.entries(allGroups)) {
         const realSubject = meta.subject || this.groupSubjectCache.get(gid) || 'WhatsApp Group';
-        this.groupSubjectCache.set(gid, realSubject);
+          setBoundedCache(this.groupSubjectCache, gid, realSubject, 1000);
 
         // Check 1: Is user the group creator/owner? (In WhatsApp, the group creator is always admin)
         const isGroupOwner = isAccountMatch(meta.owner) || isAccountMatch((meta as any).ownerPn) || isAccountMatch((meta as any).creator);
@@ -4297,6 +4380,7 @@ export class WhatsAppSessionManager {
     if (session) {
       if (unlinkPermanent) {
         await session.logout(true);
+        session.dispose();
         this.sessions.delete(cleanId);
       } else {
         await session.pauseSocket('User paused bot');
