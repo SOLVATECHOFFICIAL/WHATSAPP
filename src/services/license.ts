@@ -1,4 +1,5 @@
 import { auth, db, isFirestoreQuotaExhausted, reportFirestoreError } from './firebase';
+import { OWNER_EMAIL } from './admin-config';
 import {
   collection,
   doc,
@@ -58,7 +59,7 @@ export interface LicenseRecord {
   expiresAt?: string;
 }
 
-export const OWNER_EMAIL = 'awoyinfasolomon1@gmail.com';
+export { OWNER_EMAIL };
 
 const pendingLicenseWrites = new Map<string, LicenseRecord>();
 const LICENSE_WRITE_TIMEOUT_MS = 15_000;

@@ -14,7 +14,7 @@ import {
   isFirestoreQuotaExhausted,
   reportFirestoreError,
 } from './src/services/firebase.ts';
-import { OWNER_EMAIL } from './src/services/license.ts';
+import { OWNER_EMAIL } from './src/services/admin-config.ts';
 
 dotenv.config();
 

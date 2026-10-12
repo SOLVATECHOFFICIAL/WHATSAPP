@@ -1,3 +1,4 @@
 - [Paid license stacking](paid-license-stacking.md) — new keys preserve and add unused license time; do not discard an existing balance.
 - [Bot durability and admin roles](bot-durability-and-admin-roles.md) — keep durable bot state in Firebase; warning immunity applies only to current WhatsApp admins.
 - [GitHub release target](github-release-target.md) — changes belong on GitHub; do not publish this project to Replit.
+- [Railway Node ESM imports](railway-node-esm-imports.md) — keep server imports explicit and separate from Vite/browser modules to avoid startup resolution crashes.
