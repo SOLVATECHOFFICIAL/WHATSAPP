@@ -47,14 +47,14 @@ PORT=3000
 NODE_ENV=production
 NIXPACKS_NODE_VERSION=22
 APP_URL=https://solvatech.up.railway.app
-VITE_FIREBASE_API_KEY=AIzaSyBl0rplCgVmTyTsQQ2-yhp-aNdkWpoGXks
-VITE_FIREBASE_AUTH_DOMAIN=solvatech-academy.firebaseapp.com
-VITE_FIREBASE_PROJECT_ID=solvatech-academy
-VITE_FIREBASE_STORAGE_BUCKET=solvatech-academy.firebasestorage.app
-VITE_FIREBASE_MESSAGING_SENDER_ID=102061431394
-VITE_FIREBASE_APP_ID=1:102061431394:web:78b21e5f9878b3c85f4f3b
-VITE_FIREBASE_DATABASE_URL=https://solvatech-academy-default-rtdb.europe-west1.firebasedatabase.app
-FIREBASE_SERVICE_ACCOUNT_JSON=PASTE_SERVICE_ACCOUNT_JSON_HERE`;
+VITE_FIREBASE_API_KEY=AIzaSyDCVp_T6gO6HeTDeevls9MSb9quEzU5YiM
+VITE_FIREBASE_AUTH_DOMAIN=solvatechbot.firebaseapp.com
+VITE_FIREBASE_PROJECT_ID=solvatechbot
+VITE_FIREBASE_STORAGE_BUCKET=solvatechbot.firebasestorage.app
+VITE_FIREBASE_MESSAGING_SENDER_ID=1094113371408
+VITE_FIREBASE_APP_ID=1:1094113371408:web:fdf3cbdef31413a703b195
+VITE_FIREBASE_DATABASE_URL=https://solvatechbot-default-rtdb.firebaseio.com
+FIREBASE_SERVICE_ACCOUNT_JSON=`;
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
