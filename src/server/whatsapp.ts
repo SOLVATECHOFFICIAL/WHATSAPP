@@ -4167,11 +4167,27 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
       cleanPhone = cleanPhone.slice(2);
     }
     // Automatically detect and fix accidental double country codes (e.g., 234234..., 4444..., 11...)
-    const commonCodes = ['234', '233', '254', '256', '255', '27', '1', '44', '91', '62', '55', '92', '20', '212', '213', '216', '218', '220', '221', '222', '223', '224', '225', '226', '227', '228', '229'];
+    // AND automatically detect and fix domestic trunk zero after country code (e.g. 234080... -> 23480..., 4407... -> 447...)
+    const commonCodes = [
+      '234', '233', '254', '256', '255', '27', '1', '44', '91', '62', '55', '92',
+      '20', '212', '213', '216', '218', '220', '221', '222', '223', '224', '225',
+      '226', '227', '228', '229', '230', '231', '232', '235', '236', '237', '238',
+      '239', '240', '241', '242', '243', '244', '245', '246', '248', '249', '250',
+      '251', '252', '253', '257', '258', '260', '261', '262', '263', '264', '265',
+      '266', '267', '268', '269', '33', '49', '34', '39', '7', '81', '82', '86',
+      '966', '971'
+    ];
+    commonCodes.sort((a, b) => b.length - a.length);
+
     for (const prefix of commonCodes) {
       if (cleanPhone.startsWith(prefix + prefix) && cleanPhone.length > prefix.length * 2 + 5) {
         cleanPhone = cleanPhone.slice(prefix.length);
         console.log(`[Baileys Pairing] Auto-corrected double dial code from +${rawPhoneNumber} to +${cleanPhone}`);
+        break;
+      }
+      if (cleanPhone.startsWith(prefix + '0') && cleanPhone.length > prefix.length + 7) {
+        cleanPhone = prefix + cleanPhone.slice(prefix.length + 1);
+        console.log(`[Baileys Pairing] Auto-corrected leading 0 after dial code from +${rawPhoneNumber} to +${cleanPhone}`);
         break;
       }
     }

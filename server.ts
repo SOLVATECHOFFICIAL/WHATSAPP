@@ -429,6 +429,35 @@ async function startServer() {
     }
   });
 
+  app.post('/api/whatsapp/qr-code', async (req, res) => {
+    try {
+      const userId = (req.body?.userId as string) || (req.query?.userId as string) || (req.headers['x-user-id'] as string) || '';
+      if (!userId) {
+        return res.status(400).json({ success: false, error: 'User ID is required.' });
+      }
+      const session = getSessionForReq(req);
+      if (session.isLicenseExpired()) {
+        return res.status(403).json({
+          success: false,
+          error: 'Cannot connect to bot: License key has expired! Please renew your license to connect.',
+        });
+      }
+      await session.initSocket(true);
+      let attempts = 0;
+      while (!session.getStatus().qrCodeUrl && attempts < 8) {
+        await new Promise((r) => setTimeout(r, 500));
+        attempts++;
+      }
+      res.json({
+        success: true,
+        qrCodeUrl: session.getStatus().qrCodeUrl || null,
+        status: session.getStatus(),
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message || 'Failed to generate QR code' });
+    }
+  });
+
   app.post('/api/whatsapp/send-message', async (req, res) => {
     try {
       const { to, message } = req.body;
