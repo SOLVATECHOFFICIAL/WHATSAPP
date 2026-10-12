@@ -364,6 +364,9 @@ export class WhatsAppManager {
   };
   private pairingCodeTimer: NodeJS.Timeout | null = null;
   private isConnecting = false;
+  private firebaseSyncTimer: NodeJS.Timeout | null = null;
+  private firebaseSyncPromise: Promise<void> | null = null;
+  private firebaseSyncPending = false;
   private isIntentionalClosure = false;
   private connectedAt: number | null = null;
   private initPromise: Promise<WASocket> | null = null;
@@ -1065,6 +1068,29 @@ export class WhatsAppManager {
   }
 
   // Persist session credentials to Firebase Firestore so restarts/new host deployments retain connection
+  private scheduleFirebaseCredsSync() {
+    if (this.firebaseSyncTimer) clearTimeout(this.firebaseSyncTimer);
+    this.firebaseSyncTimer = setTimeout(() => {
+      this.firebaseSyncTimer = null;
+      if (this.firebaseSyncPromise) {
+        this.firebaseSyncPending = true;
+        return;
+      }
+
+      const syncPromise = this.syncCredsToFirebase();
+      this.firebaseSyncPromise = syncPromise;
+      syncPromise.finally(() => {
+        if (this.firebaseSyncPromise === syncPromise) {
+          this.firebaseSyncPromise = null;
+        }
+        if (this.firebaseSyncPending) {
+          this.firebaseSyncPending = false;
+          this.scheduleFirebaseCredsSync();
+        }
+      }).catch(() => {});
+    }, 1000);
+  }
+
   private async syncCredsToFirebase() {
     try {
       if (!fs.existsSync(this.authDir)) return;
@@ -1072,18 +1098,39 @@ export class WhatsAppManager {
       if (!fs.existsSync(credsPath)) return;
 
       const credsContent = fs.readFileSync(credsPath, 'utf-8');
-      const fileNames = fs.readdirSync(this.authDir);
-      const sessionFiles: Record<string, string> = {
-        'creds.json': credsContent,
-      };
+      const fileNames = fs.readdirSync(this.authDir)
+        .filter((filename) => filename !== 'creds.json' && filename.endsWith('.json') && !filename.endsWith('.tmp'))
+        .sort((a, b) => {
+          const priority = (filename: string) => {
+            if (filename.startsWith('session-') || filename.startsWith('pre-key-')) return 0;
+            if (filename.startsWith('app-state-sync-key-')) return 1;
+            if (filename.startsWith('identity-key-') || filename.startsWith('lid-mapping-')) return 2;
+            if (filename.startsWith('sender-key-')) return 3;
+            return 4;
+          };
+          return priority(a) - priority(b) || a.localeCompare(b);
+        });
+      const sessionFiles: Record<string, string> = {};
 
-      // Firestore 1MB Guard: Prioritize essential keys and skip bloated app-state caches
-      let currentPayloadSize = credsContent.length;
-      const MAX_FIREBASE_PAYLOAD = 750000; // Stay safely below 1,048,487 bytes limit
+      // Firestore's limit applies to the whole document. Estimate the encoded
+      // JSON field (including escaping), the duplicate creds field, and metadata.
+      const MAX_FIRESTORE_DOCUMENT_BYTES = 900_000;
+      const documentOverheadBytes = 4096;
+      const fixedDocumentBytes =
+        Buffer.byteLength(credsContent, 'utf8') +
+        Buffer.byteLength(this.userId, 'utf8') +
+        Buffer.byteLength(this.userEmail, 'utf8') +
+        documentOverheadBytes;
+      if (fixedDocumentBytes + 2 > MAX_FIRESTORE_DOCUMENT_BYTES) {
+        console.warn(`[WhatsApp Auth (${this.userId})] Firebase session save skipped: core credentials exceed the safe Firestore document budget.`);
+        return;
+      }
 
-      // Priority 1: session-*, app-state-sync-key-*, identity-key-*, lid-mapping-*
+      let serializedSessionBytes = 2; // Empty JSON object: {}
+      let includedFileCount = 0;
+      let skippedFileCount = 0;
+
       for (const f of fileNames) {
-        if (f === 'creds.json' || !f.endsWith('.json') || f.endsWith('.tmp')) continue;
         if (
           f.startsWith('app-state-sync-version-') ||
           f.startsWith('sender-key-status@')
@@ -1094,22 +1141,41 @@ export class WhatsAppManager {
 
         try {
           const content = fs.readFileSync(path.join(this.authDir, f), 'utf-8');
-          if (currentPayloadSize + content.length < MAX_FIREBASE_PAYLOAD) {
+          const entryBytes =
+            Buffer.byteLength(JSON.stringify(f), 'utf8') +
+            1 + // colon between the JSON key and value
+            Buffer.byteLength(JSON.stringify(content), 'utf8') +
+            (includedFileCount > 0 ? 1 : 0); // comma between entries
+          if (fixedDocumentBytes + serializedSessionBytes + entryBytes <= MAX_FIRESTORE_DOCUMENT_BYTES) {
             sessionFiles[f] = content;
-            currentPayloadSize += content.length;
+            serializedSessionBytes += entryBytes;
+            includedFileCount += 1;
+          } else {
+            skippedFileCount += 1;
           }
         } catch {}
       }
+      const rawSessionData = JSON.stringify(sessionFiles);
+      const estimatedDocumentBytes =
+        fixedDocumentBytes + Buffer.byteLength(rawSessionData, 'utf8');
+      if (estimatedDocumentBytes > MAX_FIRESTORE_DOCUMENT_BYTES) {
+        console.warn(`[WhatsApp Auth (${this.userId})] Firebase session save skipped: serialized document estimate is ${estimatedDocumentBytes} bytes.`);
+        return;
+      }
+      if (skippedFileCount > 0) {
+        console.warn(`[WhatsApp Auth (${this.userId})] Firebase session save omitted ${skippedFileCount} lower-priority auth files to stay under Firestore's document limit.`);
+      }
 
       const sessionDocId = `session_${this.sanitizedUserId}`;
-      // Save credsData directly + session files safely under 1MB
+      // credsData is stored once; Baileys' multi-file keys are kept in the
+      // bounded rawSessionData field.
       await setDoc(
         doc(db, 'whatsapp_sessions', sessionDocId),
         {
           userId: this.userId,
           userEmail: this.userEmail,
-          credsData: credsContent, // Always preserved independently
-          rawSessionData: JSON.stringify(sessionFiles),
+          credsData: credsContent,
+          rawSessionData,
           updatedAt: new Date().toISOString()
         },
         { merge: true }
@@ -1120,7 +1186,7 @@ export class WhatsAppManager {
           doc(db, 'whatsapp_sessions', 'current_session'),
           {
             credsData: credsContent,
-            rawSessionData: JSON.stringify(sessionFiles),
+            rawSessionData,
             updatedAt: new Date().toISOString()
           },
           { merge: true }
@@ -1247,8 +1313,9 @@ export class WhatsAppManager {
         this.sock = sock;
 
         sock.ev.on('creds.update', (creds) => {
-          saveCreds();
-          this.syncCredsToFirebase().catch(() => {});
+          saveCreds()
+            .then(() => this.scheduleFirebaseCredsSync())
+            .catch((err) => console.warn('[WhatsApp Auth] Local credential save failed:', err));
           // Registration confirms the companion is paired; only connection.update("open")
           // confirms that the bot socket is currently online.
           if (

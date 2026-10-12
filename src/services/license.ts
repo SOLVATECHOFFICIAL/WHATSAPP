@@ -137,10 +137,14 @@ export async function redeemKey(
   const newExpiresAt = String(data.expiresAt);
   const addedDays = Number(data.addedDays);
   const addedMinutes = Number(data.addedMinutes || 0);
-  const currentRemainingMs = Number(data.currentRemainingMs || 0);
+  const serverRemainingMs = Number(data.currentRemainingMs || 0);
+  const currentRemainingMs = Number.isFinite(serverRemainingMs) ? Math.max(0, serverRemainingMs) : 0;
   const prevHours = Math.floor(currentRemainingMs / 3600000);
   const prevMins = Math.floor((currentRemainingMs % 3600000) / 60000);
-  const totalRemainingMs = Math.max(0, new Date(newExpiresAt).getTime() - Date.now());
+  const totalRemainingMs =
+    currentRemainingMs +
+    addedDays * 24 * 60 * 60 * 1000 +
+    addedMinutes * 60 * 1000;
   const newDays = Math.floor(totalRemainingMs / 86400000);
   const remHours = Math.floor((totalRemainingMs % 86400000) / 3600000);
   const remMins = Math.floor((totalRemainingMs % 3600000) / 60000);

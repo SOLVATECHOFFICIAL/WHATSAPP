@@ -1,13 +1,7 @@
-modules = ["web", "nodejs-24"]
+modules = ["nodejs-20", "web"]
 
 [nix]
 channel = "stable-25_05"
 
 [agent]
 expertMode = true
-
-[workflows]
-
-[[ports]]
-localPort = 5000
-externalPort = 80
