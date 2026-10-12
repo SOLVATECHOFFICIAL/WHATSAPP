@@ -49,6 +49,9 @@ export interface GroupItem {
 
 interface GroupAdminPanelProps {
   isConnected: boolean;
+  isPaired: boolean;
+  isReconnecting?: boolean;
+  isLicenseExpired?: boolean;
   targetPhone?: string;
   userId?: string;
   onShowToast?: (notification: WhatsAppNotification) => void;
@@ -125,6 +128,9 @@ const GroupAvatar: React.FC<{
 
 export const GroupAdminPanel: React.FC<GroupAdminPanelProps> = ({
   isConnected,
+  isPaired,
+  isReconnecting = false,
+  isLicenseExpired = false,
   targetPhone,
   userId,
   onShowToast,
@@ -141,7 +147,6 @@ export const GroupAdminPanel: React.FC<GroupAdminPanelProps> = ({
   const fetchGroups = async (isManualSync = false) => {
     // If not connected, do not attempt to fetch or show groups
     if (!isConnected) {
-      setGroups([]);
       setLoading(false);
       return;
     }
@@ -175,9 +180,7 @@ export const GroupAdminPanel: React.FC<GroupAdminPanelProps> = ({
           // STRICT REQUIREMENT: Keep only groups where the account is an Admin
           // Remove all non-admin groups so members cannot modify protection
           const adminOnlyGroups = data.groups.filter((g) => g.isAdmin);
-          if (data.connected === false) {
-            setGroups([]);
-          } else {
+          if (data.connected !== false) {
             setGroups(adminOnlyGroups);
           }
 
@@ -208,10 +211,9 @@ export const GroupAdminPanel: React.FC<GroupAdminPanelProps> = ({
       }, 15000);
       return () => clearInterval(interval);
     } else {
-      setGroups([]);
       setLoading(false);
     }
-  }, [isConnected]);
+  }, [isConnected, userId]);
 
   // Handle single switch toggle
   const handleToggleSetting = async (
@@ -407,7 +409,7 @@ export const GroupAdminPanel: React.FC<GroupAdminPanelProps> = ({
   // "Once your button not linked to the account, the group that will show, don't let it show any group.
   // Say link account first to show your groups that you are in. Link account first to show you the group you are in.
   // So for you to know the group the person is in, they have to link account first."
-  if (!isConnected) {
+  if (!isConnected && !isPaired) {
     return (
       <div className="space-y-6">
         <div className="p-8 sm:p-10 rounded-3xl bg-gradient-to-br from-slate-900 via-slate-900/90 to-amber-950/30 border border-amber-500/30 shadow-2xl relative overflow-hidden text-center">
@@ -523,7 +525,7 @@ export const GroupAdminPanel: React.FC<GroupAdminPanelProps> = ({
             <button
               type="button"
               onClick={() => fetchGroups(true)}
-              disabled={syncing}
+              disabled={syncing || !isConnected}
               className="px-4 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 active:scale-95 text-slate-950 font-bold text-xs flex items-center gap-2 transition-all shadow-lg shadow-emerald-500/20 disabled:opacity-50 cursor-pointer"
             >
               <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />
@@ -535,7 +537,7 @@ export const GroupAdminPanel: React.FC<GroupAdminPanelProps> = ({
         {/* Live sync banner */}
         <div className="mt-4 pt-4 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-3 text-xs">
           <div className="flex items-center gap-2 text-slate-300">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+            <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-400' : 'bg-amber-400'}`} />
             <span>
               Connected Account:{' '}
               <strong className="text-white">
@@ -570,6 +572,19 @@ export const GroupAdminPanel: React.FC<GroupAdminPanelProps> = ({
         </div>
       </div>
 
+      {!isConnected && (
+        <div
+          role="status"
+          className="rounded-xl border border-amber-500/40 bg-amber-950/30 px-3 py-2 text-xs text-amber-200"
+        >
+          {isLicenseExpired
+            ? 'Your WhatsApp device is still linked, but license access is paused. Your last loaded groups are kept here.'
+            : isReconnecting
+            ? 'WhatsApp is reconnecting in the background. Your last loaded groups are kept here; group changes will be available when the connection is back.'
+            : 'Your WhatsApp device is linked but paused. Your last loaded groups are kept here; group changes are available after you resume the bot.'}
+        </div>
+      )}
+
       {/* Loading Skeleton */}
       {loading && groups.length === 0 ? (
         <div className="p-12 text-center rounded-2xl bg-slate-900/50 border border-slate-800 text-slate-400 flex flex-col items-center justify-center gap-3">
@@ -597,7 +612,11 @@ export const GroupAdminPanel: React.FC<GroupAdminPanelProps> = ({
         </div>
       ) : (
         <div className="space-y-5">
-          {filteredGroups.map((group) => {
+          <div
+            aria-disabled={!isConnected}
+            className={`space-y-4 ${!isConnected ? 'pointer-events-none opacity-60' : ''}`}
+          >
+            {filteredGroups.map((group) => {
             const sec = group.settings || {
               autowelcome: true,
               autogoodbye: true,
@@ -962,7 +981,8 @@ export const GroupAdminPanel: React.FC<GroupAdminPanelProps> = ({
                 </div>
               </div>
             );
-          })}
+            })}
+          </div>
         </div>
       )}
 

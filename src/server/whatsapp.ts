@@ -942,9 +942,15 @@ export class WhatsAppManager {
   }
 
   private reconnectSocketSafely() {
-    if (this.isIntentionalClosure || this.isLicenseExpired()) return;
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    if (
+      this.isIntentionalClosure ||
+      this.isLicenseExpired() ||
+      this.isConnecting ||
+      this.initPromise ||
+      this.reconnectTimer
+    ) return;
     this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
       if (this.isIntentionalClosure || this.isLicenseExpired()) return;
       this.initSocket().catch((err) => {
         console.warn(`[24/7 Watchdog] Auto-reconnect note for ${this.userId}:`, err?.message);
@@ -1233,13 +1239,9 @@ export class WhatsAppManager {
     } else if (hasLocalCreds) {
       // Credentials are fully registered, but socket dropped or is reconnecting
       this.currentStatus.isConnected = false;
-      this.currentStatus.state = this.isConnecting ? 'connecting' : 'disconnected';
+      this.currentStatus.state = this.isIntentionalClosure ? 'disconnected' : 'connecting';
       this.currentStatus.pairingStage = 'connected';
       this.currentStatus.pairingCode = undefined;
-      // Auto-reconnect 24/7 if not currently connecting or paused
-      if (!this.isConnecting && !this.isIntentionalClosure) {
-        this.reconnectSocketSafely();
-      }
     } else if (!this.isConnecting && this.currentStatus.state !== 'awaiting_pairing') {
       this.currentStatus.isConnected = false;
       this.currentStatus.state = 'disconnected';

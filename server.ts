@@ -142,7 +142,17 @@ async function startServer() {
         const savedEmail = typeof user.email === 'string' ? user.email.trim().toLowerCase() : '';
         if (savedEmail !== email) throw new Error('ACCOUNT_EMAIL_MISMATCH');
         if (license.status === 'revoked') throw new Error('KEY_REVOKED');
-        if (license.status !== 'unclaimed' || license.claimedBy) throw new Error('KEY_ALREADY_USED');
+        if (license.status !== 'unclaimed' || license.claimedBy) {
+          if (
+            license.status === 'active' &&
+            license.claimedBy === userId &&
+            license.claimedEmail === email &&
+            typeof license.expiresAt === 'string'
+          ) {
+            throw new Error('KEY_ALREADY_REDEEMED_BY_THIS_ACCOUNT');
+          }
+          throw new Error('KEY_ALREADY_USED');
+        }
 
         const addedDays = Number(license.durationDays);
         const addedMinutes = Number(license.durationMinutes || 0);
@@ -201,12 +211,21 @@ async function startServer() {
       });
 
       const session = sessionManager.getSession(userId);
+      // The transaction result is authoritative. Apply it immediately so a
+      // newly renewed paired device can reconnect even if a follow-up read is slow.
+      session.setSessionLicense(result.expiresAt, false);
       await session.syncLicenseFromFirestore();
       res.json({ success: true, ...result });
     } catch (err: any) {
       const code = String(err?.message || '');
       if (code === 'INVALID_KEY') return res.status(404).json({ success: false, message: 'Invalid license key. No matching key found in the system.' });
       if (code === 'KEY_REVOKED') return res.status(403).json({ success: false, message: 'This license key has been revoked by administration.' });
+      if (code === 'KEY_ALREADY_REDEEMED_BY_THIS_ACCOUNT') {
+        return res.status(409).json({
+          success: false,
+          message: 'This key was already redeemed by your account. It was not applied again, so no extra time was added.',
+        });
+      }
       if (code === 'KEY_ALREADY_USED') return res.status(409).json({ success: false, message: 'This license key has already been used and cannot be redeemed again.' });
       if (code === 'KEY_DURATION_INVALID') return res.status(422).json({ success: false, message: 'This license key has an invalid duration. No time was added.' });
       if (code === 'ACCOUNT_UNLIMITED') return res.status(409).json({ success: false, message: 'This account already has unlimited access. Its access was not changed and the key remains unused.' });

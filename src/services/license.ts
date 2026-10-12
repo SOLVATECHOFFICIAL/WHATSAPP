@@ -90,6 +90,7 @@ export async function createLicense(plan: LicensePlan, createdBy: string = OWNER
     await setDoc(docRef, record);
   } catch (err) {
     console.warn('Firestore license write:', err);
+    throw new Error('The license key could not be saved. No usable key was issued; please retry.');
   }
 
   return record;
@@ -108,7 +109,7 @@ export async function redeemKey(
   stacked?: boolean;
 }> {
   if (!userUid || !userEmail || !keyToRedeem.trim()) {
-    return { success: false, message: 'Please enter a valid license key.' };
+    return { success: false, message: 'Sign in and enter a valid license key before redeeming.' };
   }
 
   let data: any;

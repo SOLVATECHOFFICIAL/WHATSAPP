@@ -43,6 +43,7 @@ import { AuthModal } from './components/AuthModal';
 import { UserAccountNav } from './components/UserAccountNav';
 import { AdminDashboard } from './components/AdminDashboard';
 import { GroupAdminPanel } from './components/GroupAdminPanel';
+import { LicenseCountdown } from './components/LicenseCountdown';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import {
@@ -71,6 +72,7 @@ interface WhatsAppStatus {
   lastError?: string;
   latestHandshakeTime?: string;
   isExpired?: boolean;
+  licenseExpiresAt?: string | null;
   user?: {
     id: string;
     name?: string;
@@ -89,6 +91,24 @@ export async function safeParseJson<T = any>(res: Response | null | undefined): 
   } catch {
     return null;
   }
+}
+
+function sameWhatsAppStatus(a: WhatsAppStatus, b: WhatsAppStatus): boolean {
+  return (
+    a.state === b.state &&
+    a.isConnected === b.isConnected &&
+    a.isPaired === b.isPaired &&
+    a.pairingStage === b.pairingStage &&
+    a.pairingCode === b.pairingCode &&
+    a.qrCodeUrl === b.qrCodeUrl &&
+    a.targetPhone === b.targetPhone &&
+    a.lastError === b.lastError &&
+    a.isExpired === b.isExpired &&
+    a.licenseExpiresAt === b.licenseExpiresAt &&
+    a.user?.id === b.user?.id &&
+    a.user?.name === b.user?.name &&
+    a.user?.phone === b.user?.phone
+  );
 }
 
 export default function App() {
@@ -136,7 +156,6 @@ export default function App() {
     key: null,
   });
 
-  const [remainingTimeDisplay, setRemainingTimeDisplay] = useState<string>('Checking...');
   const [serverClockOffsetMs, setServerClockOffsetMs] = useState(0);
   const [inTabKeyInput, setInTabKeyInput] = useState('');
   const [inTabRedeeming, setInTabRedeeming] = useState(false);
@@ -226,7 +245,9 @@ export default function App() {
 
       const data = await safeParseJson(resStatus);
       if (data?.status) {
-        setStatus(data.status);
+        setStatus((previous) =>
+          sameWhatsAppStatus(previous, data.status) ? previous : data.status
+        );
         if (data.status.isConnected || data.status.state === 'connected' || data.status.pairingStage === 'connected') {
           setPairingCode(null);
         } else if (data.status.pairingCode) {
@@ -276,7 +297,6 @@ export default function App() {
         pairingStage: 'idle',
       });
       setNotifications([]);
-      setRemainingTimeDisplay('Checking...');
       setUserLicenseData({
         expiresAt: null,
         isUnlimited: false,
@@ -345,7 +365,6 @@ export default function App() {
         // Clean account reset on logout
         setHasClaimedTrial(false);
         setAntiDeleteEnabled(true);
-        setRemainingTimeDisplay('No Key Active');
       }
     });
 
@@ -356,50 +375,6 @@ export default function App() {
       }
     };
   }, []);
-
-  // Real-time Countdown Timer (down to seconds & accurate stacking)
-  useEffect(() => {
-    const updateTime = () => {
-      const isActuallyUnlimited = isOwner || (!userLicenseData.expiresAt && userLicenseData.isUnlimited);
-      const info = calculateRemainingTime(
-        userLicenseData.expiresAt,
-        isActuallyUnlimited,
-        Date.now() + serverClockOffsetMs
-      );
-      setRemainingTimeDisplay(info.formatted);
-
-      // Automatic disconnect ONLY if a verified active license finishes (expiresAt is non-null and reached 0)
-      const hasRealExpiry = Boolean(userLicenseData.expiresAt);
-      const isPastExpiry = hasRealExpiry && new Date(userLicenseData.expiresAt!).getTime() <= Date.now() + serverClockOffsetMs;
-
-      if (
-        hasRealExpiry &&
-        isPastExpiry &&
-        !isOwner &&
-        status.isConnected &&
-        currentUser?.uid
-      ) {
-        console.warn('Active license time elapsed down to the minute. Pausing bot...');
-        fetch('/api/whatsapp/disconnect', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ userId: currentUser.uid, unlink: false }),
-        }).catch(() => {});
-        setStatus((prev) => ({ ...prev, isConnected: false, state: 'expired', pairingStage: 'expired' }));
-        setToastNotification({
-          id: 'lic_exp_' + Date.now(),
-          type: 'error',
-          title: '⚠️ License Expired',
-          body: 'Your active license duration has elapsed down to the minute. The bot was automatically paused.',
-          timestamp: new Date().toLocaleTimeString(),
-        });
-      }
-    };
-
-    updateTime();
-    const interval = setInterval(updateTime, 1000);
-    return () => clearInterval(interval);
-  }, [userLicenseData, isOwner, status.isConnected, currentUser?.uid, serverClockOffsetMs]);
 
   // Sync active license state to server 24/7 heartbeat watchdog per user session
   useEffect(() => {
@@ -428,6 +403,12 @@ export default function App() {
   }, [userLicenseData.expiresAt, userLicenseData.isUnlimited, isOwner, currentUser?.uid, currentUser?.email]);
 
   // Polling backend status and real-time notifications (isolated per user account)
+  const isPairingActive =
+    Boolean(pairingCode) ||
+    status.pairingStage === 'code_generated' ||
+    status.pairingStage === 'pairing_handshake' ||
+    status.state === 'awaiting_pairing';
+
   useEffect(() => {
     if (!currentUser?.uid) {
       return;
@@ -436,11 +417,8 @@ export default function App() {
     const userId = currentUser.uid;
     fetchAntiDeleteStatus(userId);
 
-    const isPairingActive =
-      Boolean(pairingCode) ||
-      status.pairingStage === 'code_generated' ||
-      status.pairingStage === 'pairing_handshake' ||
-      status.state === 'awaiting_pairing';
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let stopped = false;
 
     const fetchData = async () => {
       try {
@@ -448,10 +426,13 @@ export default function App() {
           fetch(`/api/whatsapp/status?userId=${encodeURIComponent(userId)}`).catch(() => null),
           fetch(`/api/whatsapp/notifications?userId=${encodeURIComponent(userId)}`).catch(() => null),
         ]);
+        if (stopped) return;
 
         const data = await safeParseJson(resStatus);
         if (data?.status) {
-          setStatus(data.status);
+          setStatus((previous) =>
+            sameWhatsAppStatus(previous, data.status) ? previous : data.status
+          );
           if (data.status.isConnected || data.status.state === 'connected' || data.status.pairingStage === 'connected') {
             setPairingCode(null);
           } else if (data.status.pairingCode) {
@@ -462,6 +443,12 @@ export default function App() {
         const dataNotifs = await safeParseJson(resNotifs);
         if (dataNotifs && Array.isArray(dataNotifs.notifications)) {
           setNotifications((prev) => {
+            if (
+              prev.length === dataNotifs.notifications.length &&
+              prev.every((notification, index) => notification.id === dataNotifs.notifications[index]?.id)
+            ) {
+              return prev;
+            }
             if (prev.length > 0 && dataNotifs.notifications.length > prev.length) {
               const newest = dataNotifs.notifications[0];
               if (newest && newest.id !== prev[0]?.id) {
@@ -474,15 +461,19 @@ export default function App() {
         }
       } catch (err) {
         console.debug('Polling WhatsApp note (offline resilient):', err);
+      } finally {
+        if (!stopped) {
+          timer = setTimeout(fetchData, isPairingActive ? 4000 : 15000);
+        }
       }
     };
 
-    fetchData();
-    // High-frequency polling (1000ms - "listen every seconds") during pairing handshake, 2500ms when idle
-    const pollIntervalMs = isPairingActive ? 1000 : 2500;
-    const interval = setInterval(fetchData, pollIntervalMs);
-    return () => clearInterval(interval);
-  }, [currentUser?.uid, pairingCode, status.pairingStage, status.state, status.isConnected]);
+    void fetchData();
+    return () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [currentUser?.uid, isPairingActive]);
 
   // Countdown timer for pairing code (120s)
   useEffect(() => {
@@ -503,7 +494,9 @@ export default function App() {
           .then((r) => safeParseJson(r))
           .then((data) => {
             if (data?.status) {
-              setStatus(data.status);
+              setStatus((previous) =>
+                sameWhatsAppStatus(previous, data.status) ? previous : data.status
+              );
               if (data.status.isConnected || data.status.state === 'connected' || data.status.pairingStage === 'connected') {
                 setPairingCode(null);
               } else if (data.status.pairingCode) {
@@ -731,6 +724,10 @@ export default function App() {
   const handleRedeemInTab = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!inTabKeyInput.trim() || inTabRedeeming) return;
+    if (!currentUser?.uid || !currentUser.email) {
+      setInTabError('Please sign in with your account before redeeming a license key.');
+      return;
+    }
 
     setInTabRedeeming(true);
     setInTabSuccess(null);
@@ -738,8 +735,8 @@ export default function App() {
 
     try {
       const res = await redeemKey(
-        currentUser?.uid || 'user_guest',
-        currentUser?.email || 'guest@solvatech.com',
+        currentUser.uid,
+        currentUser.email,
         inTabKeyInput
       );
 
@@ -750,6 +747,7 @@ export default function App() {
           ...prev,
           expiresAt: res.expiresAt || prev.expiresAt,
           plan: 'Active Paid Plan',
+          key: inTabKeyInput.trim().toUpperCase(),
           isUnlimited: false,
         }));
       } else {
@@ -776,10 +774,8 @@ export default function App() {
     };
 
     check();
-    const interval = setInterval(check, 3500);
     window.addEventListener('focus', check);
     return () => {
-      clearInterval(interval);
       window.removeEventListener('focus', check);
     };
   }, [currentUser]);
@@ -1127,9 +1123,11 @@ export default function App() {
                   <span
                     className={`w-2 h-2 rounded-full shrink-0 ${
                       status.isConnected
-                        ? 'bg-emerald-400 animate-pulse'
+                        ? 'bg-emerald-400'
                         : status.pairingStage === 'pairing_handshake'
-                        ? 'bg-amber-400 animate-ping'
+                        ? 'bg-amber-400'
+                        : status.isPaired && status.state === 'connecting'
+                        ? 'bg-amber-400'
                         : 'bg-rose-500'
                     }`}
                   />
@@ -1137,6 +1135,10 @@ export default function App() {
                 <p className="text-[9px] sm:text-[10px] text-slate-400 font-mono truncate">
                   {status.isConnected
                     ? 'WhatsApp Linked'
+                    : status.isPaired && status.state === 'connecting'
+                    ? 'Reconnecting in background'
+                    : status.isPaired
+                    ? 'WhatsApp Linked · Paused'
                     : status.pairingStage === 'pairing_handshake'
                     ? 'Handshake Confirmed'
                     : 'Baileys Multi-Device'}
@@ -1205,18 +1207,16 @@ export default function App() {
             <div className="flex items-center gap-2 min-w-0">
               <Clock
                 className={`w-3.5 h-3.5 shrink-0 ${
-                  isLicenseActive ? 'text-emerald-400 animate-pulse' : 'text-rose-400'
+                  isLicenseActive ? 'text-emerald-400' : 'text-rose-400'
                 }`}
               />
               <div className="truncate">
                 <span className="text-[9px] text-slate-400 block leading-tight">License Time:</span>
-                <span
-                  className={`text-xs font-bold font-mono ${
-                    isLicenseActive ? 'text-emerald-300' : 'text-rose-300'
-                  }`}
-                >
-                  {remainingTimeDisplay}
-                </span>
+                <LicenseCountdown
+                  expiresAt={userLicenseData.expiresAt}
+                  isUnlimited={isOwner || userLicenseData.isUnlimited}
+                  nowOffsetMs={serverClockOffsetMs}
+                />
               </div>
             </div>
             <div className="flex items-center gap-1 shrink-0 text-[10px] font-bold text-slate-300 bg-slate-900/90 px-2 py-0.5 rounded-md border border-slate-700/60">
@@ -1337,7 +1337,11 @@ export default function App() {
                         <div className="flex items-center gap-2">
                           <h3 className="font-bold text-sm text-white">WhatsApp Linked for Life</h3>
                           <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[9px] font-bold uppercase tracking-wider">
-                            {status.state === 'expired' || !isLicenseActive ? 'PAUSED (EXPIRED)' : 'CONNECTING 24/7'}
+                            {status.state === 'expired' || !isLicenseActive
+                              ? 'PAUSED (EXPIRED)'
+                              : status.state === 'connecting'
+                              ? 'RECONNECTING 24/7'
+                              : 'PAUSED'}
                           </span>
                         </div>
                         <p className="text-[11px] text-amber-300/80 font-mono">
@@ -1357,7 +1361,9 @@ export default function App() {
                   <p className="text-[11px] text-slate-300">
                     {status.state === 'expired' || !isLicenseActive
                       ? 'Your WhatsApp companion device is linked. 24/7 automation is currently paused because your active license duration has elapsed. Redeem a license key below to resume immediately.'
-                      : 'Your device is linked. Re-establishing 24/7 cloud connection in background...'}
+                      : status.state === 'connecting'
+                      ? 'Your device is linked. Re-establishing the 24/7 cloud connection in the background...'
+                      : 'Your device is linked but the bot is paused. Resume the connection from this page when you are ready.'}
                   </p>
                   {(!isLicenseActive || status.state === 'expired') && (
                     <button
@@ -1821,6 +1827,9 @@ export default function App() {
           {activeTab === 'groups' && (
             <GroupAdminPanel
               isConnected={status.isConnected}
+              isPaired={Boolean(status.isPaired || status.user?.phone)}
+              isReconnecting={status.state === 'connecting'}
+              isLicenseExpired={status.state === 'expired' || !isLicenseActive}
               targetPhone={status.user?.phone || status.targetPhone}
               userId={currentUser?.uid}
               onShowToast={setToastNotification}

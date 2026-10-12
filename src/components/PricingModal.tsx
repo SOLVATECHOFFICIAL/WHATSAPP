@@ -88,6 +88,10 @@ export const PricingModal: React.FC<PricingModalProps> = ({
   const handleRedeem = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!keyInput.trim() || redeeming) return;
+    if (!userUid || !userEmail) {
+      setRedeemError('Please sign in with your account before redeeming a license key.');
+      return;
+    }
 
     setRedeeming(true);
     setRedeemSuccess(null);
@@ -95,8 +99,8 @@ export const PricingModal: React.FC<PricingModalProps> = ({
 
     try {
       const res = await redeemKey(
-        userUid || 'anonymous_user',
-        userEmail || 'user@example.com',
+        userUid,
+        userEmail,
         keyInput
       );
       if (res.success) {
