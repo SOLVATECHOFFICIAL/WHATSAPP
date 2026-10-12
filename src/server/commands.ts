@@ -13,12 +13,15 @@ export interface CommandContext {
   groupJid?: string;
   pushName?: string;
   isOwner: boolean;
+  isMasterOwner?: boolean;
   isGroupAdmin?: boolean;
   securityScope?: string;
+  userId?: string;
   linkedSince?: number | null;
   linkedPhone?: string | null;
   licenseExpiresAt?: string | null;
   licensePlan?: string | null;
+  licenseKey?: string | null;
   quotedParticipant?: string;
   mentionedJids?: string[];
   sock?: any;
@@ -29,7 +32,6 @@ export interface CommandContext {
 }
 
 export const GROUP_ONLY_COMMANDS = new Set([
-  'anti',
   'warn',
   'warnlimit',
   'warns',
@@ -724,7 +726,8 @@ _Need a custom website of any kind? Developer Solomon builds high-performance we
     }
 
     if (cmd === 'expire') {
-      if (ctx.isOwner) {
+      // ONLY the official master developer (Solomon Oladimeji) has unlimited lifetime master clearance
+      if (ctx.isMasterOwner) {
         return {
           reply: `📜 *SOLVATECH LICENSE DETAILS*
 
@@ -737,34 +740,93 @@ _Need a custom website of any kind? Developer Solomon builds high-performance we
         };
       }
 
-      let remainingText = 'Active Standard Plan';
-      if (ctx.licenseExpiresAt) {
-        const expDate = new Date(ctx.licenseExpiresAt);
-        const now = new Date();
-        const diffMs = expDate.getTime() - now.getTime();
-        if (diffMs <= 0) {
-          return {
-            reply: `⚠️ *SOLVATECH LICENSE EXPIRED*
+      // Fetch user's real expiring license code and expiry from context or Firestore
+      let expiresAt = ctx.licenseExpiresAt;
+      let planName = ctx.licensePlan;
+      let licenseKey = ctx.licenseKey;
+
+      if ((!expiresAt || !licenseKey) && ctx.userId && ctx.userId !== 'default') {
+        try {
+          const userDoc = await getDoc(doc(db, 'users', ctx.userId));
+          if (userDoc.exists()) {
+            const ud = userDoc.data();
+            if (!expiresAt && ud.licenseExpiresAt) expiresAt = ud.licenseExpiresAt;
+            if (!planName && ud.licensePlan) planName = ud.licensePlan;
+            if (!licenseKey && (ud.licenseKey || ud.activeKey)) licenseKey = ud.licenseKey || ud.activeKey;
+          }
+        } catch {}
+      }
+
+      const keyDisplay = licenseKey
+        ? licenseKey
+        : (planName && planName.includes('30-Minute') ? '30-MIN-FREE-TRIAL' : 'NO-ACTIVE-KEY');
+      const planDisplay = planName || (licenseKey ? 'Premium Subscription' : 'Free Trial / Standard');
+
+      if (!expiresAt) {
+        return {
+          reply: `📜 *SOLVATECH LICENSE DETAILS*
+
+🔑 License Code: *${keyDisplay}*
+📋 Plan: *${planDisplay}*
+⏳ Time Remaining: *No Active License*
+🔴 Status: *EXPIRED / UNCLAIMED*
+💳 Renew / Upgrade: Type *.plans* or *.buy*
+📞 Developer Contact: *wa.me/2349049979183*`,
+        };
+      }
+
+      const expDate = new Date(expiresAt);
+      const now = new Date();
+      const diffMs = expDate.getTime() - now.getTime();
+
+      if (diffMs <= 0) {
+        return {
+          reply: `⚠️ *SOLVATECH LICENSE EXPIRED*
+
+🔑 License Code: *${keyDisplay}*
+📋 Plan: *${planDisplay}*
+⏳ Time Remaining: *0 Minutes (Validity Ended)*
+🔴 Status: *EXPIRED*
 
 Your license validity has ended!
 To restore full bot execution:
-Type *.plans* or *.buy* to select a duration and pay to OPay *9049979183*.`,
-          };
-        }
-        const days = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-        const hours = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
-        const mins = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
-        remainingText = `${days} Days, ${hours} Hours, ${mins} Minutes`;
+Type *.plans* or *.buy* to select a duration and pay to OPay *9049979183*.
+📞 Developer: *wa.me/2349049979183*`,
+        };
+      }
+
+      const days = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+      const hours = Math.floor((diffMs % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+      const mins = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+      const secs = Math.floor((diffMs % (1000 * 60)) / 1000);
+
+      const remainingText = days > 0
+        ? `${days} Days, ${hours} Hours, ${mins} Mins`
+        : hours > 0
+        ? `${hours} Hours, ${mins} Mins, ${secs} Secs`
+        : `${mins} Minutes, ${secs} Seconds`;
+
+      let formattedExpiry = 'Active';
+      try {
+        formattedExpiry = expDate.toLocaleString('en-US', {
+          timeZone: 'Africa/Lagos',
+          dateStyle: 'medium',
+          timeStyle: 'short',
+        });
+      } catch {
+        formattedExpiry = expDate.toISOString();
       }
 
       return {
         reply: `📜 *SOLVATECH LICENSE DETAILS*
 
-🔑 Plan: *${ctx.licensePlan || 'Active User License'}*
+🔑 License Code: *${keyDisplay}*
+📋 Plan: *${planDisplay}*
 ⏳ Time Remaining: *${remainingText}*
+📅 Expires At: *${formattedExpiry} (WAT)*
 🟢 Status: *ACTIVE*
 💳 Renew / Upgrade: Type *.plans* or *.buy*
-📞 Help / Verification: *wa.me/2349049979183*`,
+📞 Developer Support: *wa.me/2349049979183*`,
       };
     }
 
@@ -1505,18 +1567,20 @@ Message successfully pinned for 7 days by Group Admin!
     }
 
     if (cmd === 'anti') {
-      if (!ctx.isGroup || (!ctx.isOwner && !ctx.isGroupAdmin)) {
+      // STRICT PRIVACY: Only the bot owner can view or configure the defense matrix!
+      // Other admins or members never receive a response.
+      if (!ctx.isOwner) {
         return { reply: '' };
       }
       const gid = ctx.groupJid || 'default';
       const sec = this.getSecuritySettings(gid, ctx.securityScope);
       return {
         reply: `╭━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╮
-┃  🛡️ *SOLVATECH GROUP DEFENSE MATRIX* 🛡️  ┃
+┃  🛡️ *SOLVATECH DEFENSE MATRIX* 🛡️  ┃
 ╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯
 
 ⚡ *STATUS:*  🟢 *ARMED & OPERATIONAL*
-👑 *ACCESS:*  👑 *ADMINISTRATORS ONLY*
+👑 *ACCESS:*  👑 *BOT OWNER EXCLUSIVE*
 🌐 *DOMAIN:* solvatech.up.railway.app
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

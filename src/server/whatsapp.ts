@@ -404,6 +404,8 @@ export class WhatsAppManager {
   private isFreshNewPairing = false;
   private heartbeatInterval: NodeJS.Timeout | null = null;
   private sessionLicenseExpiresAt: string | null = null;
+  private sessionLicenseKey: string | null = null;
+  private sessionLicensePlan: string | null = null;
   private isSessionUnlimited: boolean = false;
   private userInteractions = new Map<string, Map<string, { count: number; name?: string }>>();
   private contactNames = new Map<string, string>();
@@ -516,6 +518,8 @@ export class WhatsAppManager {
         JSON.stringify({
           expiresAt: this.sessionLicenseExpiresAt,
           isUnlimited: this.isSessionUnlimited,
+          licenseKey: this.sessionLicenseKey,
+          licensePlan: this.sessionLicensePlan,
           updatedAt: new Date().toISOString(),
         }),
         'utf-8'
@@ -534,6 +538,12 @@ export class WhatsAppManager {
         if (parsed.expiresAt) {
           this.sessionLicenseExpiresAt = parsed.expiresAt;
         }
+        if (parsed.licenseKey) {
+          this.sessionLicenseKey = parsed.licenseKey;
+        }
+        if (parsed.licensePlan) {
+          this.sessionLicensePlan = parsed.licensePlan;
+        }
         // Strict rule: if user is not the owner and has an explicit expiresAt, they are timed (NOT unlimited)
         if (this.isOwnerEmail()) {
           this.isSessionUnlimited = true;
@@ -545,6 +555,8 @@ export class WhatsAppManager {
         console.log('[Baileys Startup] Restored active session license:', {
           expiresAt: this.sessionLicenseExpiresAt,
           isUnlimited: this.isSessionUnlimited,
+          licenseKey: this.sessionLicenseKey,
+          licensePlan: this.sessionLicensePlan,
         });
       }
     } catch (e) {
@@ -563,10 +575,31 @@ export class WhatsAppManager {
           this.userEmail = d.email.trim();
         }
         const expAt = typeof d?.licenseExpiresAt === 'string' ? d.licenseExpiresAt : null;
+        if (typeof d?.licenseKey === 'string' && d.licenseKey.trim()) {
+          this.sessionLicenseKey = d.licenseKey.trim();
+        } else if (typeof d?.activeKey === 'string' && d.activeKey.trim()) {
+          this.sessionLicenseKey = d.activeKey.trim();
+        }
+        if (typeof d?.licensePlan === 'string' && d.licensePlan.trim()) {
+          this.sessionLicensePlan = d.licensePlan.trim();
+        } else if (typeof d?.plan === 'string' && d.plan.trim()) {
+          this.sessionLicensePlan = d.plan.trim();
+        }
+        // If still missing key, check user_licenses collection
+        if (!this.sessionLicenseKey) {
+          try {
+            const ulSnap = await getDoc(doc(db, 'user_licenses', this.userId));
+            if (ulSnap.exists()) {
+              const uld = ulSnap.data();
+              if (uld?.activeKey) this.sessionLicenseKey = uld.activeKey;
+              if (uld?.plan && !this.sessionLicensePlan) this.sessionLicensePlan = uld.plan;
+            }
+          } catch {}
+        }
         // A saved finite expiry always wins over an unlimited flag.
         const isUnlim = this.isOwnerEmail() || (!expAt && Boolean(d?.isUnlimited));
         this.setSessionLicense(expAt, isUnlim);
-        console.log(`[License Sync (${this.userId})] Synced from Firestore: expiresAt=${this.sessionLicenseExpiresAt}, isUnlimited=${this.isSessionUnlimited}`);
+        console.log(`[License Sync (${this.userId})] Synced from Firestore: expiresAt=${this.sessionLicenseExpiresAt}, key=${this.sessionLicenseKey}, plan=${this.sessionLicensePlan}`);
         return true;
       }
     } catch (err) {
@@ -580,10 +613,12 @@ export class WhatsAppManager {
     return email === 'awoyinfasolomon1@gmail.com';
   }
 
-  public getLicenseDetails(): { expiresAt: string | null; isUnlimited: boolean } {
+  public getLicenseDetails(): { expiresAt: string | null; isUnlimited: boolean; licenseKey?: string | null; licensePlan?: string | null } {
     return {
       expiresAt: this.sessionLicenseExpiresAt,
       isUnlimited: this.isSessionUnlimited,
+      licenseKey: this.sessionLicenseKey,
+      licensePlan: this.sessionLicensePlan,
     };
   }
 
@@ -2220,6 +2255,13 @@ export class WhatsAppManager {
             const command = parts[0]?.toLowerCase();
             const args = parts.slice(1);
 
+            // STRICT PRIVACY & ACCESS CONTROL:
+            // Under NO condition should the bot ever reply to any other person (other admins, regular members, or 1v1 contacts).
+            // Commands MUST only be executed by the bot's own linked owner/controller!
+            if (!isOwner) {
+              return;
+            }
+
             const isGroupCmd = GROUP_ONLY_COMMANDS.has(command);
 
             // STRICT RULE: Group commands NEVER answer in 1v1 chat! (Silent ignore, no reply, no reactions)
@@ -2227,20 +2269,12 @@ export class WhatsAppManager {
               return;
             }
 
-            // STRICT RULE: In groups: Group commands can ONLY be executed by an Admin connected to the bot!
+            // In groups: Group commands require the bot to be an admin in that group
             if (isGroup && isGroupCmd) {
-              if (!isAuthorizedAdmin) {
-                return; // Non-admin members in group get no response
-              }
               const isBotAdmin = await this.isBotAdminInGroupById(remoteJid);
               if (!isBotAdmin) {
-                return; // Bot account is not an admin: on NO occasion should a member bot send admin/warn responses to groups!
+                return; // Bot account is not an admin: cannot execute group admin commands
               }
-            }
-
-            // For non-group commands: strictly owner/controller execution only
-            if (!isOwner && !isGroupCmd) {
-              return;
             }
 
             // Determine bot user's private DM chat
@@ -3454,6 +3488,17 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
               return;
             }
 
+            // If expire command, ensure latest license data is fetched fresh from Firestore
+            if (command === 'expire') {
+              await this.syncLicenseFromFirestore().catch(() => {});
+            }
+
+            const isMasterOwner = Boolean(
+              senderNum === '2349049979183' ||
+              this.isOwnerEmail() ||
+              (this.currentStatus.user?.phone && this.currentStatus.user.phone.replace(/\D/g, '') === '2349049979183')
+            );
+
             const res = await commandHandler.handle({
               command,
               args,
@@ -3464,10 +3509,15 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
               groupJid: isGroup ? remoteJid : undefined,
               pushName: msg.pushName || undefined,
               isOwner,
+              isMasterOwner,
               isGroupAdmin: isAuthorizedAdmin,
               securityScope: this.userId,
+              userId: this.userId,
               linkedSince: this.connectedAt,
               linkedPhone: this.currentStatus.user?.phone,
+              licenseExpiresAt: this.sessionLicenseExpiresAt,
+              licensePlan: this.sessionLicensePlan,
+              licenseKey: this.sessionLicenseKey,
               quotedParticipant: quotedParticipant || undefined,
               mentionedJids: mentionedJids || [],
               sock: sock,
