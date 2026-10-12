@@ -1,6 +1,6 @@
 # Railway Nixpacks configuration for SOLVATECH
 [phases.setup]
-nixPkgs = ["nodejs_22", "ffmpeg"]
+nixPkgs = ["nodejs_24", "ffmpeg"]
 
 [phases.install]
 cmds = ["npm install --legacy-peer-deps"]
@@ -9,4 +9,4 @@ cmds = ["npm install --legacy-peer-deps"]
 cmds = ["npm run build"]
 
 [start]
-cmd = "node server.ts"
+cmd = "npm start"

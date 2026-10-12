@@ -5,21 +5,28 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
+import { doc, runTransaction } from 'firebase/firestore';
 import { sessionManager, whatsappManager } from './src/server/whatsapp.ts';
 import { commandHandler, SOLVATECH_MENU } from './src/server/commands.ts';
+import { db } from './src/services/firebase.ts';
 
 dotenv.config();
 
-// Production Resilience Safeguards: Prevent uncaught Baileys event errors from crashing the server
-process.on('uncaughtException', (err) => {
-  console.error('[SOLVATECH Process Safeguard] Uncaught exception prevented server crash:', err?.message || err);
-});
-process.on('unhandledRejection', (reason) => {
-  console.error('[SOLVATECH Process Safeguard] Unhandled rejection prevented server crash:', reason);
+// Preserve the fatal stack trace, then let Node exit so Railway can restart a
+// process that may be in an unsafe state instead of continuing silently.
+process.on('uncaughtExceptionMonitor', (err, origin) => {
+  console.error('[SOLVATECH Fatal Process Error] Node will exit; process supervisor should restart it:', origin, err);
 });
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+const expiryMillis = (value: any): number => {
+  if (typeof value === 'number') return value;
+  if (typeof value === 'string') return new Date(value).getTime();
+  if (value && typeof value.toDate === 'function') return value.toDate().getTime();
+  return 0;
+};
 
 async function startServer() {
   const app = express();
@@ -36,12 +43,8 @@ async function startServer() {
       (req.body?.userId as string) ||
       (req.headers['x-user-id'] as string) ||
       '';
-    const userEmail =
-      (req.query.userEmail as string) ||
-      (req.body?.userEmail as string) ||
-      (req.headers['x-user-email'] as string) ||
-      '';
-    return sessionManager.getSession(userId, userEmail);
+    // Email and license fields supplied by the browser are not trusted for server-side identity.
+    return sessionManager.getSession(userId);
   };
 
   // Serve solva.webp from root folder or public folder
@@ -61,21 +64,29 @@ async function startServer() {
   });
 
   // Sync user license with 24/7 heartbeat watchdog
-  app.post('/api/whatsapp/sync-license', (req, res) => {
+  app.post('/api/whatsapp/sync-license', async (req, res) => {
     try {
-      const { expiresAt, isUnlimited, userId, userEmail } = req.body;
-      const session = getSessionForReq(req);
-      session.setSessionLicense(expiresAt || null, Boolean(isUnlimited));
-
-      const cleanUid = userId || (req.query.userId as string) || (req.headers['x-user-id'] as string) || session.userId;
-      if (cleanUid) {
-        const store = getTrialStore();
-        if (store[cleanUid]) {
-          store[cleanUid].expiresAt = expiresAt || null;
-          saveTrialStore(store);
-        }
+      const userId = (req.body?.userId as string) || (req.query.userId as string) || (req.headers['x-user-id'] as string) || '';
+      if (!userId) {
+        return res.status(400).json({ success: false, error: 'User ID is required.' });
       }
-      res.json({ success: true, message: 'Session license synchronized with 24/7 heartbeat watchdog' });
+      const session = sessionManager.getSession(userId);
+      const verified = await session.syncLicenseFromFirestore();
+      if (!verified) {
+        return res.status(503).json({ success: false, error: 'Could not verify this account license from Firebase.' });
+      }
+      const store = getTrialStore();
+      if (store[userId]) {
+        store[userId].expiresAt = session.getStatus().licenseExpiresAt || null;
+        saveTrialStore(store);
+      }
+      res.json({
+        success: true,
+        isExpired: session.isLicenseExpired(),
+        expiresAt: session.getStatus().licenseExpiresAt || null,
+        serverTime: new Date().toISOString(),
+        message: 'License synchronized from Firebase.',
+      });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
     }
@@ -107,6 +118,107 @@ async function startServer() {
       stats: sessionManager.getSyncStats(),
       serverTime: new Date().toISOString(),
     });
+  });
+
+  // Redeem keys on the server so the expiry is based on server time, not the
+  // browser clock, and key + account records commit atomically.
+  app.post('/api/license/redeem', async (req, res) => {
+    const userId = typeof req.body?.userId === 'string' ? req.body.userId.trim() : '';
+    const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+    const key = typeof req.body?.key === 'string' ? req.body.key.trim().toUpperCase() : '';
+    if (!userId || !email || !key) {
+      return res.status(400).json({ success: false, message: 'A signed-in user, email, and license key are required.' });
+    }
+
+    try {
+      const result = await runTransaction(db, async (transaction) => {
+        const licenseRef = doc(db, 'licenses', key);
+        const userRef = doc(db, 'users', userId);
+        const userLicenseRef = doc(db, 'user_licenses', userId);
+        const [licenseSnap, userSnap] = await Promise.all([
+          transaction.get(licenseRef),
+          transaction.get(userRef),
+        ]);
+
+        if (!licenseSnap.exists()) throw new Error('INVALID_KEY');
+        if (!userSnap.exists()) throw new Error('ACCOUNT_NOT_FOUND');
+        const license = licenseSnap.data();
+        const user = userSnap.data();
+        const savedEmail = typeof user.email === 'string' ? user.email.trim().toLowerCase() : '';
+        if (savedEmail !== email) throw new Error('ACCOUNT_EMAIL_MISMATCH');
+        if (license.status === 'revoked') throw new Error('KEY_REVOKED');
+        if (license.status !== 'unclaimed' || license.claimedBy) throw new Error('KEY_ALREADY_USED');
+
+        const addedDays = Number(license.durationDays);
+        const addedMinutes = Number(license.durationMinutes || 0);
+        if (!Number.isFinite(addedDays) || addedDays <= 0 || !Number.isFinite(addedMinutes) || addedMinutes < 0) {
+          throw new Error('KEY_DURATION_INVALID');
+        }
+
+        const now = Date.now();
+        const currentExpiryTime = expiryMillis(user.licenseExpiresAt);
+        const isOwner = savedEmail === 'awoyinfasolomon1@gmail.com';
+        if (isOwner || (user.isUnlimited && currentExpiryTime <= now)) {
+          throw new Error('ACCOUNT_UNLIMITED');
+        }
+        const currentRemainingMs = Number.isFinite(currentExpiryTime) && currentExpiryTime > now
+          ? currentExpiryTime - now
+          : 0;
+        const expiresAt = new Date(
+          now + currentRemainingMs + addedDays * 24 * 60 * 60 * 1000 + addedMinutes * 60 * 1000
+        ).toISOString();
+        const claimedAt = new Date(now).toISOString();
+
+        transaction.set(licenseRef, {
+          ...license,
+          status: 'active',
+          claimedBy: userId,
+          claimedEmail: email,
+          claimedAt,
+          expiresAt,
+        });
+        transaction.set(userRef, {
+          email,
+          licenseKey: key,
+          licensePlan: license.planName,
+          licenseExpiresAt: expiresAt,
+          licenseStatus: 'active',
+          isUnlimited: false,
+          updatedAt: claimedAt,
+        }, { merge: true });
+        transaction.set(userLicenseRef, {
+          userId,
+          email,
+          activeKey: key,
+          plan: license.planName,
+          durationDays: addedDays,
+          expiresAt,
+          updatedAt: claimedAt,
+        }, { merge: true });
+
+        return {
+          planName: String(license.planName || 'License'),
+          addedDays,
+          addedMinutes,
+          expiresAt,
+          currentRemainingMs,
+        };
+      });
+
+      const session = sessionManager.getSession(userId);
+      await session.syncLicenseFromFirestore();
+      res.json({ success: true, ...result });
+    } catch (err: any) {
+      const code = String(err?.message || '');
+      if (code === 'INVALID_KEY') return res.status(404).json({ success: false, message: 'Invalid license key. No matching key found in the system.' });
+      if (code === 'KEY_REVOKED') return res.status(403).json({ success: false, message: 'This license key has been revoked by administration.' });
+      if (code === 'KEY_ALREADY_USED') return res.status(409).json({ success: false, message: 'This license key has already been used and cannot be redeemed again.' });
+      if (code === 'KEY_DURATION_INVALID') return res.status(422).json({ success: false, message: 'This license key has an invalid duration. No time was added.' });
+      if (code === 'ACCOUNT_UNLIMITED') return res.status(409).json({ success: false, message: 'This account already has unlimited access. Its access was not changed and the key remains unused.' });
+      if (code === 'ACCOUNT_NOT_FOUND' || code === 'ACCOUNT_EMAIL_MISMATCH') return res.status(403).json({ success: false, message: 'Could not verify this signed-in account. Please sign in again.' });
+      console.error('Atomic license redemption failed:', err);
+      res.status(503).json({ success: false, message: 'License could not be saved. No time was added and the key was not consumed; please retry.' });
+    }
   });
 
   // WhatsApp Baileys API endpoints (per-user session)
@@ -156,24 +268,31 @@ async function startServer() {
 
   app.post('/api/whatsapp/pair-code', async (req, res) => {
     try {
-      const { phoneNumber, isExpired = false, isUnlimited = false, force = false } = req.body;
+      const { phoneNumber, force = false } = req.body;
       if (!phoneNumber) {
         return res.status(400).json({
           success: false,
           error: 'Phone number is required',
         });
       }
-
-      // STRICT RULE: Never should a user be connected to bot while license is expired (except unlimited or active trial)
-      if (isExpired && !isUnlimited) {
+      const userId = (req.body?.userId as string) || '';
+      if (!userId) {
+        return res.status(400).json({ success: false, error: 'User ID is required.' });
+      }
+      const session = sessionManager.getSession(userId);
+      const licenseVerified = await session.syncLicenseFromFirestore();
+      if (!licenseVerified) {
+        return res.status(503).json({
+          success: false,
+          error: 'Could not verify this account license from Firebase. Please retry when the license service is available.',
+        });
+      }
+      if (session.isLicenseExpired()) {
         return res.status(403).json({
           success: false,
           error: 'Cannot connect to bot: License key has expired! Please renew your license to connect.',
         });
       }
-
-      const session = getSessionForReq(req);
-      session.setSessionLicense(req.body.licenseExpiresAt || null, Boolean(isUnlimited));
 
       const pairingCode = await session.requestPairingCode(phoneNumber, Boolean(force));
       res.json({
@@ -481,57 +600,112 @@ async function startServer() {
   });
 
   // 2. Claim 30-Minute Trial (Once in a lifetime permanent lock per user/email)
-  app.post('/api/trial/claim', (req, res) => {
+  app.post('/api/trial/claim', async (req, res) => {
     try {
-      const { uid, email, currentExpiresAt } = req.body;
-      if (!uid && !email) {
-        return res.status(400).json({ success: false, message: 'User ID or Email is required.' });
+      const uid = typeof req.body?.uid === 'string' ? req.body.uid.trim() : '';
+      const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+      if (!uid || !email) {
+        return res.status(400).json({ success: false, message: 'A signed-in user ID and email are required.' });
       }
 
-      const cleanEmail = (email || '').toLowerCase().trim();
-      const cleanUid = uid || cleanEmail;
+      const cleanEmail = email;
+      const cleanUid = uid;
+      const cleanEmailKey = cleanEmail.replace(/[^a-z0-9]/g, '_');
       const store = getTrialStore();
 
       const existing = store[cleanUid] || (cleanEmail && store[cleanEmail]);
       if (existing && existing.hasUsedTrial) {
-        return res.status(400).json({
+        return res.status(409).json({
           success: false,
           message: 'The 30-minute test is strictly once in a lifetime per user. It is permanently linked to your email in Firebase and cannot be claimed again.',
         });
       }
 
-      const now = Date.now();
-      const existingExpiryMs = currentExpiresAt ? new Date(currentExpiresAt).getTime() : 0;
-      const baseTime = existingExpiryMs > now ? existingExpiryMs : now;
-      const newExpiryMs = baseTime + 30 * 60 * 1000;
-      const newExpiresAt = new Date(newExpiryMs).toISOString();
+      const trialRef = doc(db, 'claimed_trials', cleanEmailKey);
+      const userRef = doc(db, 'users', cleanUid);
+      const claim = await runTransaction(db, async (transaction) => {
+        const [trialSnap, userSnap] = await Promise.all([
+          transaction.get(trialRef),
+          transaction.get(userRef),
+        ]);
+        if (trialSnap.exists()) {
+          throw new Error('TRIAL_ALREADY_CLAIMED');
+        }
+        if (!userSnap.exists()) {
+          throw new Error('ACCOUNT_NOT_FOUND');
+        }
+
+        const userData = userSnap.data();
+        const savedEmail = typeof userData.email === 'string' ? userData.email.trim().toLowerCase() : '';
+        if (savedEmail !== cleanEmail) {
+          throw new Error('ACCOUNT_EMAIL_MISMATCH');
+        }
+        if (userData.hasUsedTrial || userData.lifetimeTrialLocked) {
+          throw new Error('TRIAL_ALREADY_CLAIMED');
+        }
+        const now = Date.now();
+        const savedExpiryMs = expiryMillis(userData.licenseExpiresAt);
+        if (userData.isUnlimited || savedExpiryMs > now) {
+          throw new Error('ACTIVE_LICENSE_EXISTS');
+        }
+
+        const expiry = new Date(now + 30 * 60 * 1000).toISOString();
+        const claimedAt = new Date(now).toISOString();
+        transaction.set(trialRef, {
+          userUid: cleanUid,
+          userEmail: cleanEmail,
+          claimedAt,
+          expiresAt: expiry,
+          lifetimeLocked: true,
+        });
+        transaction.set(userRef, {
+          licenseExpiresAt: expiry,
+          licensePlan: '⚡ 30-Minute Test (Active)',
+          licenseStatus: 'active',
+          isUnlimited: false,
+          hasUsedTrial: true,
+          trialClaimedAt: claimedAt,
+          trialEmail: cleanEmail,
+          lifetimeTrialLocked: true,
+          updatedAt: claimedAt,
+        }, { merge: true });
+        return { expiresAt: expiry, claimedAt };
+      });
+      const { expiresAt: newExpiresAt, claimedAt } = claim;
 
       const record = {
         uid: cleanUid,
         email: cleanEmail,
         hasUsedTrial: true,
         lifetimeLocked: true,
-        claimedAt: new Date(now).toISOString(),
+        claimedAt,
         expiresAt: newExpiresAt,
       };
-
       store[cleanUid] = record;
-      if (cleanEmail) store[cleanEmail] = record;
+      store[cleanEmail] = record;
       saveTrialStore(store);
 
-      // Immediately synchronize WhatsApp session with the new 30-minute expiry
-      try {
-        const session = sessionManager.getSession(cleanUid, cleanEmail);
-        session.setSessionLicense(newExpiresAt, false);
-      } catch {}
+      const session = sessionManager.getSession(cleanUid);
+      await session.syncLicenseFromFirestore();
 
-      return res.json({
+      res.json({
         success: true,
         message: '🎉 30-minute test activated! Your countdown has begun.',
         expiresAt: newExpiresAt,
       });
     } catch (err: any) {
-      res.status(500).json({ success: false, message: err.message });
+      const message = String(err?.message || '');
+      if (message === 'TRIAL_ALREADY_CLAIMED') {
+        return res.status(409).json({ success: false, message: 'The 30-minute trial has already been claimed for this account.' });
+      }
+      if (message === 'ACTIVE_LICENSE_EXISTS') {
+        return res.status(409).json({ success: false, message: 'This account already has active paid or unlimited access. Your existing access was not changed.' });
+      }
+      if (message === 'ACCOUNT_NOT_FOUND' || message === 'ACCOUNT_EMAIL_MISMATCH') {
+        return res.status(403).json({ success: false, message: 'Could not verify this signed-in account. Please sign in again.' });
+      }
+      console.error('Trial claim failed; no trial was activated:', err);
+      res.status(503).json({ success: false, message: 'The trial could not be saved securely. No trial time was activated; please retry.' });
     }
   });
 
@@ -640,7 +814,15 @@ async function startServer() {
   // Reconnect/Resume bot without needing new QR or pairing code
   app.post('/api/whatsapp/reconnect', async (req, res) => {
     try {
-      const session = getSessionForReq(req);
+      const userId = (req.body?.userId as string) || '';
+      if (!userId) {
+        return res.status(400).json({ success: false, error: 'User ID is required.' });
+      }
+      const session = sessionManager.getSession(userId);
+      const licenseVerified = await session.syncLicenseFromFirestore();
+      if (!licenseVerified) {
+        return res.status(503).json({ success: false, error: 'Could not verify this account license from Firebase.' });
+      }
       if (session.isLicenseExpired()) {
         return res.status(403).json({
           success: false,

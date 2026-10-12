@@ -294,7 +294,7 @@ export function buildGoodbyeMessage(
 
 export class WhatsAppManager {
   public readonly userId: string;
-  public readonly userEmail: string;
+  public userEmail: string;
   public readonly sanitizedUserId: string;
   private sock: WASocket | null = null;
   private authDir: string;
@@ -379,6 +379,40 @@ export class WhatsAppManager {
   private userSpamPurgeState = new Map<string, { detectedAt: number; isPurging: boolean }>();
   private greetingDedupCache = new Map<string, number>();
   private pendingGreetings = new Map<string, { timer: NodeJS.Timeout; participants: Set<string>; action: 'add' | 'remove'; groupId: string }>();
+  private mediaCacheBytes = 0;
+  private mediaCache = new Map<string, { buffer: Buffer; evict: () => void }>();
+
+  private rememberMediaBuffer(key: string, buffer: Buffer, evict: () => void): boolean {
+    const maxCacheBytes = 32 * 1024 * 1024;
+    if (!buffer.length || buffer.length > maxCacheBytes) return false;
+    this.forgetMediaBuffer(key);
+    while (this.mediaCacheBytes + buffer.length > maxCacheBytes && this.mediaCache.size > 0) {
+      const oldestKey = this.mediaCache.keys().next().value;
+      if (!oldestKey) break;
+      this.forgetMediaBuffer(oldestKey);
+    }
+    this.mediaCache.set(key, { buffer, evict });
+    this.mediaCacheBytes += buffer.length;
+    return true;
+  }
+
+  private forgetMediaBuffer(key: string) {
+    const cached = this.mediaCache.get(key);
+    if (!cached) return;
+    this.mediaCache.delete(key);
+    this.mediaCacheBytes = Math.max(0, this.mediaCacheBytes - cached.buffer.length);
+    cached.evict();
+  }
+
+  private deleteCachedMessage(id: string) {
+    this.forgetMediaBuffer(`message:${id}`);
+    this.messageCache.delete(id);
+  }
+
+  private deleteCachedStatus(id: string) {
+    this.forgetMediaBuffer(`status:${id}`);
+    this.statusCache.delete(id);
+  }
 
   constructor(userId: string = 'default', userEmail: string = '') {
     this.userId = userId || 'default';
@@ -386,31 +420,14 @@ export class WhatsAppManager {
     this.sanitizedUserId = (userId || 'default').replace(/[^a-zA-Z0-9_-]/g, '_');
     this.authDir = path.resolve(process.cwd(), '.baileys_auth', `session_${this.sanitizedUserId}`);
     this.ensureAuthDir();
+    this.loadSessionLicense();
+    this.loadAntiDeleteSetting();
 
     this.addNotification({
       type: 'system',
       title: 'SOLVATECH Engine Initialized',
       body: `Baileys WhatsApp service initialized for user account ${this.userEmail || this.userId}.`,
     });
-
-    // If valid registered session credentials exist in auth dir, restore connection smoothly
-    const credsFile = path.join(this.authDir, 'creds.json');
-    if (fs.existsSync(credsFile)) {
-      try {
-        const raw = fs.readFileSync(credsFile, 'utf-8');
-        const parsed = JSON.parse(raw);
-        if (parsed.registered) {
-          console.log(`[Baileys Startup] Found registered session for ${this.userId}, reconnecting...`);
-          this.initSocket().catch((err) => console.warn(`Auto-reconnect note for ${this.userId}:`, err));
-        }
-      } catch (e) {
-        console.warn(`Error reading existing creds.json for ${this.userId}:`, e);
-      }
-    }
-
-    // Restore persistent session license from disk
-    this.loadSessionLicense();
-    this.loadAntiDeleteSetting();
 
     // Start 24/7 active heartbeat watchdog so bot stays alive continuously
     this.start247Heartbeat();
@@ -490,35 +507,39 @@ export class WhatsAppManager {
     }
   }
 
-  public async syncLicenseFromFirestore(): Promise<void> {
+  public async syncLicenseFromFirestore(): Promise<boolean> {
     try {
       if (this.userId && this.userId !== 'default') {
         const snap = await getDoc(doc(db, 'users', this.userId));
-        if (snap.exists()) {
-          const d = snap.data();
-          const isOwner = this.isOwnerEmail() || Boolean(d?.email && d.email.toLowerCase() === 'awoyinfasolomon1@gmail.com');
-          const expAt = d?.licenseExpiresAt || null;
-          // If account has an expiration timestamp (e.g. 30m trial or 1-day key), it is NOT unlimited
-          const isUnlim = isOwner || (!expAt && Boolean(d?.isUnlimited));
-          this.sessionLicenseExpiresAt = expAt;
-          this.isSessionUnlimited = isUnlim;
-          this.saveSessionLicense();
-          console.log(`[License Sync (${this.userId})] Synced from Firestore: expiresAt=${this.sessionLicenseExpiresAt}, isUnlimited=${this.isSessionUnlimited}`);
+        if (!snap.exists()) return false;
+
+        const d = snap.data();
+        if (typeof d?.email === 'string' && d.email.trim()) {
+          this.userEmail = d.email.trim();
         }
+        const expAt = typeof d?.licenseExpiresAt === 'string' ? d.licenseExpiresAt : null;
+        // A saved finite expiry always wins over an unlimited flag.
+        const isUnlim = this.isOwnerEmail() || (!expAt && Boolean(d?.isUnlimited));
+        this.setSessionLicense(expAt, isUnlim);
+        console.log(`[License Sync (${this.userId})] Synced from Firestore: expiresAt=${this.sessionLicenseExpiresAt}, isUnlimited=${this.isSessionUnlimited}`);
+        return true;
       }
     } catch (err) {
       console.debug(`Firestore license sync note for ${this.userId}:`, err);
     }
+    return false;
   }
 
   public isOwnerEmail(): boolean {
     const email = (this.userEmail || '').trim().toLowerCase();
-    const id = (this.userId || '').trim().toLowerCase();
-    return (
-      email === 'awoyinfasolomon1@gmail.com' ||
-      id === 'owner_solomon' ||
-      id === 'awoyinfasolomon1_gmail_com'
-    );
+    return email === 'awoyinfasolomon1@gmail.com';
+  }
+
+  public getLicenseDetails(): { expiresAt: string | null; isUnlimited: boolean } {
+    return {
+      expiresAt: this.sessionLicenseExpiresAt,
+      isUnlimited: this.isSessionUnlimited,
+    };
   }
 
   public setSessionLicense(expiresAt: string | null, isUnlimited: boolean) {
@@ -577,7 +598,27 @@ export class WhatsAppManager {
     this.currentStatus.state = isExpired ? 'expired' : 'disconnected';
     this.currentStatus.pairingStage = isExpired ? 'expired' : 'idle';
     this.currentStatus.pairingCode = undefined;
+    await this.syncConnectionStatusToFirestore();
     console.log(`[Session ${this.userId}] WhatsApp socket paused (${reason}). Companion pairing credentials strictly preserved on disk & Firebase.`);
+  }
+
+  private async syncConnectionStatusToFirestore(): Promise<void> {
+    if (!this.userId || this.userId === 'default') return;
+    try {
+      await setDoc(
+        doc(db, 'users', this.userId),
+        {
+          whatsappConnected: Boolean(this.sock && this.currentStatus.isConnected),
+          botConnected: Boolean(this.sock && this.currentStatus.isConnected),
+          connectionState: this.currentStatus.state,
+          linkedPhone: this.currentStatus.user?.phone || this.currentStatus.targetPhone || null,
+          updatedAt: new Date().toISOString(),
+        },
+        { merge: true }
+      );
+    } catch (err) {
+      console.warn(`[WhatsApp Status] Could not persist connection state for ${this.userId}:`, err);
+    }
   }
 
   // 24/7 Active Heartbeat & Self-Healing Connection Watchdog
@@ -1009,7 +1050,8 @@ export class WhatsAppManager {
           }
         } catch {}
 
-        if (!this.isLicenseExpired() && !this.sock && !this.isConnecting) {
+        const licenseVerified = await this.syncLicenseFromFirestore();
+        if (licenseVerified && !this.isLicenseExpired() && !this.sock && !this.isConnecting) {
           console.log(`[WhatsApp Auth (${this.userId})] Valid license detected! Reconnecting socket immediately...`);
           this.initSocket().catch((err) => console.warn('Auto-reconnect note after restore:', err));
         }
@@ -1091,7 +1133,9 @@ export class WhatsAppManager {
           doc(db, 'users', this.userId),
           {
             linkedPhone: this.currentStatus.user?.phone || this.currentStatus.targetPhone || null,
+            whatsappConnected: Boolean(this.sock && this.currentStatus.isConnected),
             botConnected: this.currentStatus.isConnected,
+            connectionState: this.currentStatus.state,
             updatedAt: new Date().toISOString(),
           },
           { merge: true }
@@ -1115,7 +1159,9 @@ export class WhatsAppManager {
           doc(db, 'users', this.userId),
           {
             linkedPhone: null,
+            whatsappConnected: false,
             botConnected: false,
+            connectionState: 'disconnected',
             updatedAt: new Date().toISOString(),
           },
           { merge: true }
@@ -1125,6 +1171,9 @@ export class WhatsAppManager {
   }
 
   public async initSocket(isFreshPairing = false): Promise<WASocket> {
+    if (this.isLicenseExpired()) {
+      throw new Error('Cannot connect WhatsApp: this account has no active license.');
+    }
     if (this.sock && this.currentStatus.isConnected) {
       return this.sock;
     }
@@ -1132,6 +1181,8 @@ export class WhatsAppManager {
       return this.initPromise;
     }
 
+    // A license pause is intentional, but a later valid renewal must be allowed to reconnect.
+    this.isIntentionalClosure = false;
     this.initPromise = (async () => {
       try {
         if (this.sock) {
@@ -1198,7 +1249,8 @@ export class WhatsAppManager {
         sock.ev.on('creds.update', (creds) => {
           saveCreds();
           this.syncCredsToFirebase().catch(() => {});
-          // Detect genuine WhatsApp companion confirmation immediately when WhatsApp registers
+          // Registration confirms the companion is paired; only connection.update("open")
+          // confirms that the bot socket is currently online.
           if (
             creds.registered === true &&
             Boolean((creds as any).me?.id || (creds as any).account?.details)
@@ -1207,10 +1259,11 @@ export class WhatsAppManager {
             const phone = meId
               ? (meId.split(':')[0] || meId.split('@')[0])
               : this.currentStatus.targetPhone?.replace(/\D/g, '') || '';
-            this.connectedAt = this.connectedAt || Date.now();
-            this.currentStatus.isConnected = true;
-            this.currentStatus.state = 'connected';
-            this.currentStatus.pairingStage = 'connected';
+            this.currentStatus.isPaired = true;
+            if (!this.currentStatus.isConnected) {
+              this.currentStatus.state = 'pairing_handshake';
+              this.currentStatus.pairingStage = 'pairing_handshake';
+            }
             this.currentStatus.pairingCode = undefined;
             this.currentStatus.qrCodeUrl = undefined;
             this.currentStatus.latestHandshakeTime = new Date().toLocaleTimeString();
@@ -1223,8 +1276,8 @@ export class WhatsAppManager {
             }
             this.addNotification({
               type: 'connection',
-              title: 'WhatsApp Handshake Confirmed',
-              body: `Companion device connected and active with +${phone || 'phone'}! All 35+ commands armed.`,
+              title: 'WhatsApp Pairing Confirmed',
+              body: `WhatsApp accepted the companion link for +${phone || 'phone'}. The bot is connecting.`,
             });
           }
         });
@@ -1235,9 +1288,9 @@ export class WhatsAppManager {
 
             // Detect companion link confirmation on explicit new login event
             if (update.isNewLogin) {
+              this.currentStatus.isPaired = true;
               this.currentStatus.pairingStage = 'connected';
-              this.currentStatus.state = 'connected';
-              this.currentStatus.isConnected = true;
+              this.currentStatus.state = 'connecting';
               this.currentStatus.pairingCode = undefined;
               this.currentStatus.latestHandshakeTime = new Date().toLocaleTimeString();
               this.addNotification({
@@ -1284,9 +1337,10 @@ export class WhatsAppManager {
               // Only trigger logout if the user was previously connected and WhatsApp explicitly logged them out (401 / loggedOut).
               const wasEverConnected = Boolean(this.connectedAt || this.currentStatus.isConnected);
               const shouldLogout = !isAwaitingPairing && wasEverConnected && (statusCode === DisconnectReason.loggedOut || statusCode === 401 || reason === '401');
+              this.connectedAt = null;
+              this.currentStatus.isConnected = false;
 
               if (shouldLogout) {
-                this.currentStatus.isConnected = false;
                 this.currentStatus.state = 'disconnected';
                 this.currentStatus.pairingStage = 'idle';
                 this.currentStatus.pairingCode = undefined;
@@ -1297,45 +1351,46 @@ export class WhatsAppManager {
                 });
                 await this.logout(true);
               } else {
-                // Transient network drop (408, 428, 515 restartRequired, cloud network blip):
-                // STRICT RULE: If account has paired credentials and license is unexpired, IT STAYS LINKED FOR LIFE!
+                // Keep the saved pairing, but never report a closed socket as online.
                 if (hasLocalCreds && !this.isLicenseExpired()) {
-                  this.currentStatus.isConnected = true;
-                  this.currentStatus.state = 'connected';
+                  this.currentStatus.state = 'connecting';
                   this.currentStatus.pairingStage = 'connected';
                 } else {
-                  this.currentStatus.isConnected = false;
                   if (!isAwaitingPairing) {
-                    this.currentStatus.state = 'disconnected';
+                    this.currentStatus.state = this.isLicenseExpired() ? 'expired' : 'disconnected';
                   }
                 }
+                await this.syncConnectionStatusToFirestore();
 
                 if (statusCode === 515 || statusCode === DisconnectReason.restartRequired) {
                   console.log('[Baileys Connection] Connection closed (code: 515 restartRequired). Device pairing accepted by phone, restarting connection immediately...');
                   this.currentStatus.pairingStage = 'connected';
-                  this.currentStatus.state = 'connected';
-                  this.currentStatus.isConnected = true;
+                  this.currentStatus.state = 'connecting';
                   this.currentStatus.pairingCode = undefined;
                   this.currentStatus.latestHandshakeTime = new Date().toLocaleTimeString();
                   this.addNotification({
                     type: 'pairing',
                     title: 'WhatsApp Handshake Confirmed',
-                    body: 'Handshake received from WhatsApp phone! Companion link accepted. Finalizing connection...',
+                    body: 'WhatsApp accepted the companion link. Reconnecting to finish setup...',
                   });
-                  if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-                  this.reconnectTimer = setTimeout(() => {
-                    this.initSocket().catch((err) => {
-                      console.warn('Auto-restart note:', err);
-                    });
-                  }, 800);
+                  if (!this.isLicenseExpired()) {
+                    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+                    this.reconnectTimer = setTimeout(() => {
+                      this.initSocket().catch((err) => {
+                        console.warn('Auto-restart note:', err);
+                      });
+                    }, 800);
+                  }
                 } else {
                   console.log(`[Baileys Connection] Connection closed (code: ${statusCode || 'unknown'}). Keeping session and credentials intact, auto-reconnecting 24/7 in background...`);
-                  if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-                  this.reconnectTimer = setTimeout(() => {
-                    this.initSocket().catch((err) => {
-                      console.warn('Auto-reconnect note:', err);
-                    });
-                  }, 2000);
+                  if (!this.isLicenseExpired() && (hasLocalCreds || isAwaitingPairing)) {
+                    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+                    this.reconnectTimer = setTimeout(() => {
+                      this.initSocket().catch((err) => {
+                        console.warn('Auto-reconnect note:', err);
+                      });
+                    }, 2000);
+                  }
                 }
               }
             } else if (connection === 'open') {
@@ -1356,6 +1411,8 @@ export class WhatsAppManager {
               name: sock.user?.name || 'SOLVATECH Linked Phone',
               phone: `+${phone}`,
             };
+            this.currentStatus.isPaired = true;
+            this.syncConnectionStatusToFirestore().catch(() => {});
 
             this.addNotification({
               type: 'connection',
@@ -1499,15 +1556,22 @@ export class WhatsAppManager {
             if (media && (media.type === 'image' || media.type === 'video' || media.type === 'audio' || media.type === 'sticker' || media.type === 'document')) {
               downloadMediaBuffer(media.target, media.type)
                 .then((buf) => {
-                  (cachedEntry as any).mediaBuffer = buf;
+                  if (this.messageCache.get(msg.key.id!) !== cachedEntry) return;
+                  const cached = this.rememberMediaBuffer(`message:${msg.key.id}`, buf, () => {
+                    (cachedEntry as any).mediaBuffer = undefined;
+                  });
+                  if (cached) {
+                    (cachedEntry as any).mediaBuffer = buf;
+                  }
                 })
                 .catch(() => {});
             }
 
+            this.deleteCachedMessage(msg.key.id);
             this.messageCache.set(msg.key.id, cachedEntry);
             if (this.messageCache.size > 1000) {
               const firstKey = this.messageCache.keys().next().value;
-              if (firstKey) this.messageCache.delete(firstKey);
+              if (firstKey) this.deleteCachedMessage(firstKey);
             }
           }
 
@@ -1518,18 +1582,24 @@ export class WhatsAppManager {
             if (msg.key.id) {
               if (sMedia && (sMedia.type === 'image' || sMedia.type === 'video' || sMedia.type === 'audio')) {
                 downloadMediaBuffer(sMedia.target, sMedia.type).then(buf => {
-                  this.statusCache.set(msg.key.id!, {
+                  const statusEntry = {
                     id: msg.key.id!,
                     senderJid: msg.key.participant || senderJid,
                     senderNum,
                     type: sMedia.type as 'image' | 'video' | 'audio',
-                    buffer: buf,
+                    buffer: undefined as Buffer | undefined,
                     caption: sText,
                     timestamp: Date.now(),
+                  };
+                  this.statusCache.set(msg.key.id!, statusEntry);
+                  const cached = this.rememberMediaBuffer(`status:${msg.key.id}`, buf, () => {
+                    const cachedStatus = this.statusCache.get(msg.key.id!);
+                    if (cachedStatus) cachedStatus.buffer = undefined;
                   });
+                  if (cached) statusEntry.buffer = buf;
                   if (this.statusCache.size > 100) {
                     const first = this.statusCache.keys().next().value;
-                    if (first) this.statusCache.delete(first);
+                    if (first) this.deleteCachedStatus(first);
                   }
                 }).catch(() => {});
               } else if (sText) {
@@ -1543,7 +1613,7 @@ export class WhatsAppManager {
                 });
                 if (this.statusCache.size > 100) {
                   const first = this.statusCache.keys().next().value;
-                  if (first) this.statusCache.delete(first);
+                  if (first) this.deleteCachedStatus(first);
                 }
               }
             }
@@ -1592,11 +1662,26 @@ export class WhatsAppManager {
                       caption: voMedia.target.caption || '',
                       timestamp: Date.now(),
                     };
+                    const cached = this.rememberMediaBuffer(`view-once:${msg.key.id}`, buf, () => {
+                      cachedVO.buffer = Buffer.alloc(0);
+                    });
+                    if (!cached) return;
                     this.viewOnceCache.set(msg.key.id!, cachedVO);
                     this.lastViewOnceByChat.set(remoteJid, cachedVO);
                     if (this.viewOnceCache.size > 200) {
                       const firstKey = this.viewOnceCache.keys().next().value;
-                      if (firstKey) this.viewOnceCache.delete(firstKey);
+                      if (firstKey) {
+                        const evicted = this.viewOnceCache.get(firstKey);
+                        this.viewOnceCache.delete(firstKey);
+                        this.forgetMediaBuffer(`view-once:${firstKey}`);
+                        if (evicted && this.lastViewOnceByChat.get(evicted.remoteJid) === evicted) {
+                          this.lastViewOnceByChat.delete(evicted.remoteJid);
+                        }
+                      }
+                    }
+                    if (this.lastViewOnceByChat.size > 100) {
+                      const oldestChat = this.lastViewOnceByChat.keys().next().value;
+                      if (oldestChat) this.lastViewOnceByChat.delete(oldestChat);
                     }
                     this.addNotification({
                       type: 'system',
@@ -2259,7 +2344,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                     if (isAdmin || entry.sender === senderNum) {
                       try {
                         await sock.sendMessage(remoteJid, { delete: entry.key });
-                        this.messageCache.delete(msgId);
+                        this.deleteCachedMessage(msgId);
                         deleted++;
                         if (deleted >= targetCount) break;
                       } catch (delErr) {
@@ -3667,6 +3752,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
       targetPhone: undefined,
       connectedAt: undefined,
     };
+    await this.syncConnectionStatusToFirestore();
 
     this.addNotification({
       type: 'system',
@@ -4183,23 +4269,16 @@ export class WhatsAppSessionManager {
         totalChecked++;
         try {
           const session = this.getSession(uid);
-
-          // Synchronize latest license from Firestore users/{uid}
-          let licenseExpiresAt: string | null = null;
-          let isUnlimited = false;
-
-          try {
-            const userSnap = await getDoc(doc(db, 'users', uid));
-            if (userSnap.exists()) {
-              const uData = userSnap.data();
-              licenseExpiresAt = uData.licenseExpiresAt || null;
-              isUnlimited = !!uData.isUnlimited;
+          const licenseVerified = await session.syncLicenseFromFirestore();
+          if (!licenseVerified) {
+            // Do not keep an active socket running against an unverified license.
+            if (session.getStatus().isConnected) {
+              await session.pauseSocket('License could not be verified');
             }
-          } catch {}
-
-          if (licenseExpiresAt || isUnlimited) {
-            session.setSessionLicense(licenseExpiresAt, isUnlimited);
+            continue;
           }
+          const license = session.getLicenseDetails();
+          const isUnlimited = license.isUnlimited;
 
           // Strict license enforcement
           const isExpired = session.isLicenseExpired();
@@ -4220,6 +4299,7 @@ export class WhatsAppSessionManager {
                 whatsappConnected: false,
                 botConnected: false,
                 licenseStatus: 'expired',
+                connectionState: 'expired',
                 updatedAt: new Date().toISOString(),
               }, { merge: true });
             } catch {}
@@ -4239,6 +4319,7 @@ export class WhatsAppSessionManager {
                 botConnected: true,
                 linkedPhone: status.user?.phone || status.targetPhone || null,
                 licenseStatus: isUnlimited ? 'unlimited' : 'active',
+                connectionState: status.state,
                 updatedAt: new Date().toISOString(),
               }, { merge: true });
             } catch {}
@@ -4252,17 +4333,20 @@ export class WhatsAppSessionManager {
                 session.initSocket().catch((err) => {
                   console.warn(`[Global 5-Min Sync] Reconnect error for ${uid}:`, err?.message);
                 });
-                try {
-                  await setDoc(doc(db, 'users', uid), {
-                    whatsappConnected: true,
-                    botConnected: true,
-                    licenseStatus: isUnlimited ? 'unlimited' : 'active',
-                    updatedAt: new Date().toISOString(),
-                  }, { merge: true });
-                } catch {}
               }
             } catch {}
           }
+          const connectingStatus = session.getStatus();
+          try {
+            await setDoc(doc(db, 'users', uid), {
+              whatsappConnected: connectingStatus.isConnected,
+              botConnected: connectingStatus.isConnected,
+              linkedPhone: connectingStatus.user?.phone || connectingStatus.targetPhone || null,
+              connectionState: connectingStatus.state,
+              licenseStatus: isUnlimited ? 'unlimited' : 'active',
+              updatedAt: new Date().toISOString(),
+            }, { merge: true });
+          } catch {}
         } catch (uErr) {
           console.warn(`[Global 5-Min Sync] Error auditing user ${uid}:`, uErr);
         }
@@ -4300,8 +4384,8 @@ export class WhatsAppSessionManager {
         state: status.state,
         phone: status.user?.phone || status.targetPhone || null,
         isExpired: session.isLicenseExpired(),
-        expiresAt: (session as any).sessionLicenseExpiresAt || null,
-        isUnlimited: Boolean((session as any).isSessionUnlimited),
+        expiresAt: session.getLicenseDetails().expiresAt,
+        isUnlimited: session.getLicenseDetails().isUnlimited,
       };
     }
 

@@ -95,7 +95,7 @@ export async function createLicense(plan: LicensePlan, createdBy: string = OWNER
   return record;
 }
 
-// Redeem key with ACCURATE TIME STACKING & STRICT SINGLE-USE ENFORCEMENT
+// Redemption time and key consumption are authoritative on the server.
 export async function redeemKey(
   userUid: string,
   userEmail: string,
@@ -107,173 +107,51 @@ export async function redeemKey(
   durationAdded?: number;
   stacked?: boolean;
 }> {
-  const cleanKey = keyToRedeem.trim().toUpperCase();
-
-  if (!cleanKey) {
+  if (!userUid || !userEmail || !keyToRedeem.trim()) {
     return { success: false, message: 'Please enter a valid license key.' };
   }
 
-  let matchedLicense: LicenseRecord | null = null;
-
-  // 1. Check Firestore licenses collection
+  let data: any;
   try {
-    const docRef = doc(db, 'licenses', cleanKey);
-    const snap = await getDoc(docRef);
-    if (snap.exists()) {
-      matchedLicense = snap.data() as LicenseRecord;
+    const response = await fetch('/api/license/redeem', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: userUid,
+        email: userEmail.trim().toLowerCase(),
+        key: keyToRedeem.trim().toUpperCase(),
+      }),
+    });
+    data = await response.json();
+    if (!response.ok || !data.success) {
+      return {
+        success: false,
+        message: data?.message || 'License could not be saved. No time was added; please retry.',
+      };
     }
-  } catch (e) {
-    console.warn('Firestore license read warning:', e);
+  } catch (err) {
+    console.warn('License redemption service note:', err);
+    return { success: false, message: 'License service is unavailable. No time was added; please retry.' };
   }
 
-  if (!matchedLicense) {
-    return {
-      success: false,
-      message: 'Invalid license key. No matching key found in the system. Please obtain an official key from Solomon.',
-    };
-  }
-
-  // STRICT SINGLE-USE RULE: NEVER A KEY CAN BE USED TWICE!
-  // If the key has already been redeemed, claimed, or expired, REJECT IT IMMEDIATELY!
-  if (
-    matchedLicense.status === 'active' ||
-    matchedLicense.status === 'expired' ||
-    Boolean(matchedLicense.claimedBy)
-  ) {
-    return {
-      success: false,
-      message: '⛔ This license key has already been used and cannot be redeemed again! Each key is strictly single-use.',
-    };
-  }
-
-  if (matchedLicense.status === 'revoked') {
-    return {
-      success: false,
-      message: 'This license key has been revoked by administration.',
-    };
-  }
-
-  if (matchedLicense.status !== 'unclaimed') {
-    return {
-      success: false,
-      message: 'This license key is not available for activation.',
-    };
-  }
-
-  // 100% ACCURATE TIME STACKING LOGIC
-  // Retrieve user's current expiry
-  let currentExpiryTime = 0;
-  try {
-    const userRef = doc(db, 'users', userUid);
-    const userSnap = await getDoc(userRef);
-    if (userSnap.exists()) {
-      const userData = userSnap.data();
-      if (userData.licenseExpiresAt) {
-        const parsed = new Date(userData.licenseExpiresAt).getTime();
-        if (parsed > Date.now()) {
-          currentExpiryTime = parsed; // Stack on top of remaining time
-        }
-      }
-    }
-  } catch (e) {
-    console.warn('Firestore user expiry read note:', e);
-  }
-
-  const now = Date.now();
-  const currentRemainingMs = currentExpiryTime > now ? currentExpiryTime - now : 0;
-  const addedDays = matchedLicense.durationDays || 1;
-  const addedMinutes = matchedLicense.durationMinutes || 0;
-  const addedDurationMs = addedDays * 24 * 60 * 60 * 1000 + addedMinutes * 60 * 1000;
-  
-  // Exact milliseconds stacked!
-  const newExpiryMs = now + currentRemainingMs + addedDurationMs;
-  const newExpiresAt = new Date(newExpiryMs).toISOString();
-
-  // Compute breakdown for user feedback
+  const newExpiresAt = String(data.expiresAt);
+  const addedDays = Number(data.addedDays);
+  const addedMinutes = Number(data.addedMinutes || 0);
+  const currentRemainingMs = Number(data.currentRemainingMs || 0);
   const prevHours = Math.floor(currentRemainingMs / 3600000);
   const prevMins = Math.floor((currentRemainingMs % 3600000) / 60000);
-  const totalRemainingMs = newExpiryMs - now;
+  const totalRemainingMs = Math.max(0, new Date(newExpiresAt).getTime() - Date.now());
   const newDays = Math.floor(totalRemainingMs / 86400000);
   const remHours = Math.floor((totalRemainingMs % 86400000) / 3600000);
   const remMins = Math.floor((totalRemainingMs % 3600000) / 60000);
-
-  // Update license document
-  try {
-    const docRef = doc(db, 'licenses', cleanKey);
-    await setDoc(
-      docRef,
-      {
-        ...matchedLicense,
-        status: 'active',
-        claimedBy: userUid,
-        claimedEmail: userEmail,
-        claimedAt: new Date().toISOString(),
-        expiresAt: newExpiresAt,
-      },
-      { merge: true }
-    );
-
-    // Update user document
-    const userRef = doc(db, 'users', userUid);
-    await setDoc(
-      userRef,
-      {
-        email: userEmail,
-        licenseKey: cleanKey,
-        licensePlan: matchedLicense.planName,
-        licenseExpiresAt: newExpiresAt,
-        licenseStatus: 'active',
-        isUnlimited: false,
-        updatedAt: serverTimestamp(),
-      },
-      { merge: true }
-    );
-
-    // Update user_licenses
-    const userLicRef = doc(db, 'user_licenses', userUid);
-    await setDoc(
-      userLicRef,
-      {
-        userId: userUid,
-        email: userEmail,
-        activeKey: cleanKey,
-        plan: matchedLicense.planName,
-        durationDays: addedDays,
-        expiresAt: newExpiresAt,
-        updatedAt: serverTimestamp(),
-      },
-      { merge: true }
-    );
-    // Synchronize server license watchdog immediately
-    try {
-      await fetch('/api/whatsapp/sync-license', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId: userUid,
-          userEmail,
-          expiresAt: newExpiresAt,
-          isUnlimited: false,
-        }),
-      });
-      // Resume connection immediately if socket was previously paused
-      await fetch('/api/whatsapp/reconnect', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId: userUid,
-          userEmail,
-        }),
-      });
-    } catch {}
-  } catch (e) {
-    console.warn('Firestore write warning:', e);
-  }
-
   const isStacked = currentRemainingMs > 0;
+  const addedTimeLabel = [
+    addedDays > 0 ? `${addedDays} day${addedDays === 1 ? '' : 's'}` : '',
+    addedMinutes > 0 ? `${addedMinutes} minute${addedMinutes === 1 ? '' : 's'}` : '',
+  ].filter(Boolean).join(' + ');
   const message = isStacked
-    ? `🎉 ${matchedLicense.planName} Activated! Added +${addedDays} Days (+${addedDays * 24}h) stacked on top of your existing ${prevHours}h ${prevMins}m balance. New total: ${newDays > 0 ? `${newDays}d ` : ''}${remHours}h ${remMins}m left!`
-    : `🎉 ${matchedLicense.planName} Activated! You have ${addedDays} Days of full 24/7 WhatsApp bot access. Timer is running!`;
+    ? `🎉 ${data.planName} Activated! Added ${addedTimeLabel} on top of your existing ${prevHours}h ${prevMins}m balance. New total: ${newDays > 0 ? `${newDays}d ` : ''}${remHours}h ${remMins}m left!`
+    : `🎉 ${data.planName} Activated! You have ${addedTimeLabel} of full 24/7 WhatsApp bot access. Timer is running!`;
 
   return {
     success: true,
@@ -702,7 +580,7 @@ export async function fetchAllUsers(): Promise<any[]> {
 }
 
 // Countdown time calculator down to exact days, hours, minutes, seconds
-export function calculateRemainingTime(expiresAt?: string | null, isUnlimited?: boolean): {
+export function calculateRemainingTime(expiresAt?: string | null, isUnlimited?: boolean, now = Date.now()): {
   isUnlimited: boolean;
   isExpired: boolean;
   days: number;
@@ -735,7 +613,7 @@ export function calculateRemainingTime(expiresAt?: string | null, isUnlimited?: 
     };
   }
 
-  const diffMs = new Date(expiresAt).getTime() - Date.now();
+  const diffMs = new Date(expiresAt).getTime() - now;
   if (diffMs <= 0) {
     return {
       isUnlimited: false,
@@ -867,31 +745,9 @@ export async function claim30MinuteTrial(
     console.warn('Direct Firestore trial race check:', e);
   }
 
-  // Retrieve user's current expiry so we STACK instead of reset!
-  let currentExpiryTime = 0;
-  try {
-    const userRef = doc(db, 'users', userUid);
-    const userSnap = await getDoc(userRef);
-    if (userSnap.exists()) {
-      const userData = userSnap.data();
-      if (userData.licenseExpiresAt) {
-        const parsed = new Date(userData.licenseExpiresAt).getTime();
-        if (parsed > Date.now()) {
-          currentExpiryTime = parsed;
-        }
-      }
-    }
-  } catch (err) {
-    console.warn('Firestore read current trial expiry note:', err);
-  }
-
-  const now = Date.now();
-  const TRIAL_DURATION_MS = 30 * 60 * 1000; // 30 Minutes
-  const baseTime = currentExpiryTime > now ? currentExpiryTime : now;
-  const newExpiresAt = new Date(baseTime + TRIAL_DURATION_MS).toISOString();
-
-  let serverExpiresAt: string | null = null;
-  // 1. Claim on backend persistent trial store
+  // The server owns the trial start time, enforces a lifetime claim, and writes
+  // the resulting expiry atomically. Never extend a trial from a browser clock.
+  let finalExpiresAt: string;
   try {
     const res = await fetch('/api/trial/claim', {
       method: 'POST',
@@ -899,75 +755,39 @@ export async function claim30MinuteTrial(
       body: JSON.stringify({
         uid: userUid,
         email: cleanEmail,
-        currentExpiresAt: currentExpiryTime > now ? new Date(currentExpiryTime).toISOString() : undefined,
       }),
     });
     const data = await res.json();
-    if (!res.ok || !data.success) {
+    if (!res.ok || !data.success || typeof data.expiresAt !== 'string') {
       return {
         success: false,
-        message: data.message || 'Trial already claimed or unavailable.',
+        message: data.message || 'Trial could not be saved; no trial time was activated.',
       };
     }
-    serverExpiresAt = data.expiresAt;
+    finalExpiresAt = data.expiresAt;
   } catch (apiErr) {
     console.debug('Backend trial claim network note:', apiErr);
+    return {
+      success: false,
+      message: 'Trial service is unavailable. No trial time was activated; please retry.',
+    };
   }
 
-  const finalExpiresAt = serverExpiresAt || newExpiresAt;
-
-  // 2. Persist to Firestore: users collection and claimed_trials collection (PERMANENT LIFETIME RECORD)
+  // The server transaction already persisted the canonical expiry and lifetime lock.
+  // Synchronization reads that saved record rather than accepting a client-supplied time.
   try {
-    const userRef = doc(db, 'users', userUid);
-    await setDoc(
-      userRef,
-      {
-        licenseExpiresAt: finalExpiresAt,
-        licensePlan: '⚡ 30-Minute Test (Active)',
-        licenseStatus: 'active',
-        isUnlimited: false,
-        hasUsedTrial: true,
-        trialClaimedAt: new Date().toISOString(),
-        trialEmail: cleanEmail,
-        lifetimeTrialLocked: true,
-        updatedAt: serverTimestamp(),
-      },
-      { merge: true }
-    );
-
-    const trialRef = doc(db, 'claimed_trials', cleanEmailKey);
-    await setDoc(trialRef, {
-      userUid,
-      userEmail: cleanEmail,
-      claimedAt: new Date().toISOString(),
-      expiresAt: finalExpiresAt,
-      lifetimeLocked: true,
+    await fetch('/api/whatsapp/sync-license', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: userUid }),
     });
-
-    // Immediately synchronize server 24/7 watchdog with the exact 30-minute expiry
-    try {
-      await fetch('/api/whatsapp/sync-license', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId: userUid,
-          userEmail: cleanEmail,
-          expiresAt: finalExpiresAt,
-          isUnlimited: false,
-        }),
-      });
-      // Resume bot connection if it was paused
-      await fetch('/api/whatsapp/reconnect', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId: userUid,
-          userEmail: cleanEmail,
-        }),
-      });
-    } catch {}
+    await fetch('/api/whatsapp/reconnect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: userUid }),
+    });
   } catch (err) {
-    console.warn('Error saving 30-minute trial to Firestore:', err);
+    console.warn('Trial saved, but live session synchronization will retry on the next status/license sync:', err);
   }
 
   return {

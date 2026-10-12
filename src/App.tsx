@@ -137,6 +137,7 @@ export default function App() {
   });
 
   const [remainingTimeDisplay, setRemainingTimeDisplay] = useState<string>('Checking...');
+  const [serverClockOffsetMs, setServerClockOffsetMs] = useState(0);
   const [inTabKeyInput, setInTabKeyInput] = useState('');
   const [inTabRedeeming, setInTabRedeeming] = useState(false);
   const [inTabSuccess, setInTabSuccess] = useState<string | null>(null);
@@ -351,13 +352,14 @@ export default function App() {
       const isActuallyUnlimited = isOwner || (!userLicenseData.expiresAt && userLicenseData.isUnlimited);
       const info = calculateRemainingTime(
         userLicenseData.expiresAt,
-        isActuallyUnlimited
+        isActuallyUnlimited,
+        Date.now() + serverClockOffsetMs
       );
       setRemainingTimeDisplay(info.formatted);
 
       // Automatic disconnect ONLY if a verified active license finishes (expiresAt is non-null and reached 0)
       const hasRealExpiry = Boolean(userLicenseData.expiresAt);
-      const isPastExpiry = hasRealExpiry && new Date(userLicenseData.expiresAt!).getTime() <= Date.now();
+      const isPastExpiry = hasRealExpiry && new Date(userLicenseData.expiresAt!).getTime() <= Date.now() + serverClockOffsetMs;
 
       if (
         hasRealExpiry &&
@@ -386,11 +388,12 @@ export default function App() {
     updateTime();
     const interval = setInterval(updateTime, 1000);
     return () => clearInterval(interval);
-  }, [userLicenseData, isOwner, status.isConnected, currentUser?.uid]);
+  }, [userLicenseData, isOwner, status.isConnected, currentUser?.uid, serverClockOffsetMs]);
 
   // Sync active license state to server 24/7 heartbeat watchdog per user session
   useEffect(() => {
     if (currentUser?.uid && (userLicenseData.expiresAt || isOwner || userLicenseData.isUnlimited)) {
+      const requestStartedAt = Date.now();
       fetch('/api/whatsapp/sync-license', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -400,6 +403,15 @@ export default function App() {
           expiresAt: userLicenseData.expiresAt,
           isUnlimited: isOwner || (!userLicenseData.expiresAt && userLicenseData.isUnlimited),
         }),
+      }).then(async (response) => {
+        if (!response.ok) return;
+        const data = await response.json();
+        const serverMs = Date.parse(data.serverTime);
+        if (Number.isFinite(serverMs)) {
+          const responseReceivedAt = Date.now();
+          const midpoint = (requestStartedAt + responseReceivedAt) / 2;
+          setServerClockOffsetMs(serverMs - midpoint);
+        }
       }).catch(() => {});
     }
   }, [userLicenseData.expiresAt, userLicenseData.isUnlimited, isOwner, currentUser?.uid, currentUser?.email]);
@@ -615,7 +627,7 @@ export default function App() {
 
     // Check License: NEVER should a user be connected to bot while license key is expired
     const isActuallyUnlimited = isOwner || (!userLicenseData.expiresAt && userLicenseData.isUnlimited);
-    const licenseCheck = calculateRemainingTime(userLicenseData.expiresAt, isActuallyUnlimited);
+    const licenseCheck = calculateRemainingTime(userLicenseData.expiresAt, isActuallyUnlimited, Date.now() + serverClockOffsetMs);
     if (!isActuallyUnlimited && licenseCheck.isExpired) {
       setActiveTab('license');
       setInTabError('🚨 Pairing Blocked: Your license key has expired! Users can NEVER connect to the WhatsApp bot while their license is expired. Please redeem a valid key or choose a plan below.');
@@ -804,7 +816,7 @@ export default function App() {
   const isLicenseActive =
     isOwner ||
     userLicenseData.isUnlimited ||
-    !calculateRemainingTime(userLicenseData.expiresAt, false).isExpired;
+    !calculateRemainingTime(userLicenseData.expiresAt, false, Date.now() + serverClockOffsetMs).isExpired;
 
   // 3-Step Live Confirmation Flags
   const isStep1Active =
