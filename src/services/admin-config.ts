@@ -1,6 +1,7 @@
 export const OWNER_EMAILS = [
   'awoyinfasolomon1@gmail.com',
   'awoyinfasunday40@gmail.com',
+  'awoyinfataiwo20@gmail.com',
 ];
 
 export const isOwnerEmail = (email?: string | null): boolean => {

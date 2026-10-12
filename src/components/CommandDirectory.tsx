@@ -20,6 +20,7 @@ export const CommandDirectory: React.FC<CommandDirectoryProps> = ({ onRunCommand
         { cmd: '.uptime', desc: 'Show how long your WhatsApp account has been linked' },
         { cmd: '.owner', desc: 'Official SOLVATECH BOT developer contact' },
         { cmd: '.expire', desc: 'Real-time license validity countdown & key status' },
+        { cmd: '.ai <prompt>', desc: 'Ask Google Gemini AI assistant questions or code' },
         { cmd: '.menu', desc: 'Display full command directory' },
         { cmd: '.plans / .buy', desc: 'Official license duration plans & OPay payment details' },
         { cmd: '.signature', desc: 'Official verified developer signature & credentials' },

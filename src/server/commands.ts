@@ -114,6 +114,7 @@ export const SOLVATECH_MENU = `╭━━━〔 ⚡ *SOLVATECH BOT COMMAND DIRECT
 │ • *.uptime* — _Show how long your account has been linked_
 │ • *.owner* — _Official SOLVATECH BOT developer contact & web services_
 │ • *.expire* — _Real-time license validity & countdown_
+│ • *.ai [prompt]* — _Google Gemini AI question answering & coding_
 │ • *.menu* / *.help* — _Display this command directory_
 │
 ╰────────────────────────────────
@@ -846,6 +847,51 @@ Type *.plans* or *.buy* to select a duration and pay to OPay *9049979183*.
 💳 Renew / Upgrade: Type *.plans* or *.buy*
 📞 Developer Support: *wa.me/2349049979183*`,
       };
+    }
+
+    if (cmd === 'ai' || cmd === 'ask' || cmd === 'gemini') {
+      const prompt = ctx.args.join(' ').trim();
+      if (!prompt) {
+        return {
+          reply: `🤖 *SOLVATECH GEMINI AI ASSISTANT*\n\nUsage: *.ai <your question or prompt>*\nExample: *.ai explain quantum computing in simple terms*\n\n> ⚡ Powered by Google Gemini AI`,
+        };
+      }
+      try {
+        const apiKey = process.env.GEMINI_API_KEY;
+        if (!apiKey) {
+          return {
+            reply: `🤖 *SOLVATECH GEMINI AI ASSISTANT*\n\n⚠️ Gemini API key is not configured. Please set *GEMINI_API_KEY* in your environment variables.`,
+          };
+        }
+        const { GoogleGenAI } = await import('@google/genai');
+        const ai = new GoogleGenAI();
+        const model = process.env.GEMINI_MODEL || 'gemini-3.8-flash';
+        let response: any = null;
+        let lastError: any = null;
+        for (let attempt = 1; attempt <= 2; attempt++) {
+          try {
+            response = await ai.models.generateContent({
+              model,
+              contents: prompt,
+            });
+            if (response?.text) break;
+          } catch (err: any) {
+            lastError = err;
+            if (attempt < 2) {
+              await new Promise((r) => setTimeout(r, 1200));
+            }
+          }
+        }
+        if (!response && lastError) throw lastError;
+        const text = response?.text?.trim() || 'No response generated.';
+        return {
+          reply: `🤖 *SOLVATECH GEMINI AI*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n${text}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n> ⚡ *SOLVATECH Multi-Device Engine*`,
+        };
+      } catch (err: any) {
+        return {
+          reply: `⚠️ *AI Generation Error:* ${err?.message || 'Could not reach Gemini API'}`,
+        };
+      }
     }
 
     if (cmd === 'plans' || cmd === 'buy' || cmd === 'price' || cmd === 'license') {
