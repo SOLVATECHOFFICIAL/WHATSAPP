@@ -45,6 +45,16 @@ async function startServer() {
 
   app.use(express.json());
 
+  app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-user-id, x-user-email');
+    if (req.method === 'OPTIONS') {
+      return res.sendStatus(204);
+    }
+    next();
+  });
+
   const requireOwnerAuth = async (req: express.Request, res: express.Response): Promise<boolean> => {
     res.setHeader('Cache-Control', 'private, no-store');
     res.setHeader('Vary', 'Authorization');
@@ -993,8 +1003,21 @@ async function startServer() {
   }
 
   server.listen(PORT, '0.0.0.0', () => {
-    console.log(`[SOLVATECH] Server listening on port ${PORT}`);
+    console.log(`[SOLVATECH] Primary server listening on port ${PORT}`);
   });
+
+  if (PORT !== 8080) {
+    try {
+      const secondaryServer = http.createServer(app);
+      secondaryServer.on('error', (err: any) => {
+        // Normal in AI Studio where nginx uses 8080; activates on Railway where 8080 is free
+        console.debug('[SOLVATECH] Secondary port 8080 adapter note:', err?.code || err?.message);
+      });
+      secondaryServer.listen(8080, '0.0.0.0', () => {
+        console.log('[SOLVATECH] Secondary server listening on port 8080 for Railway routing');
+      });
+    } catch {}
+  }
 
   let shutdownStarted = false;
   const shutdown = (signal: NodeJS.Signals) => {
