@@ -4730,6 +4730,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
       }
     } catch (err) {
       console.warn('Error fetching live participating groups:', err);
+      throw new Error('WhatsApp did not return a complete group list. Try syncing groups again.');
     }
 
     // STRICT REQUIREMENT: Absolutely no mock or sample groups!

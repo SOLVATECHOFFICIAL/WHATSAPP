@@ -5,6 +5,7 @@ import {
   setDoc,
   getDoc,
   getDocs,
+  getDocsFromServer,
   deleteDoc,
   updateDoc,
   serverTimestamp,
@@ -59,6 +60,9 @@ export interface LicenseRecord {
 
 export const OWNER_EMAIL = 'awoyinfasolomon1@gmail.com';
 
+const pendingLicenseWrites = new Map<string, LicenseRecord>();
+const LICENSE_WRITE_TIMEOUT_MS = 15_000;
+
 // STRICT SECURITY RULE: ZERO PRELOADED KEYS.
 // Every single license key must be genuinely minted by the admin through the dashboard.
 // There are no backdoor codes, no default keys, and no reuse permitted!
@@ -75,22 +79,44 @@ export function generateKeyString(planPrefix: string): string {
 }
 
 export async function createLicense(plan: LicensePlan, createdBy: string = OWNER_EMAIL): Promise<LicenseRecord> {
-  const key = generateKeyString(plan.id);
-  const record: LicenseRecord = {
-    key,
-    planId: plan.id,
-    planName: plan.name,
-    durationDays: plan.durationDays,
-    status: 'unclaimed',
-    createdAt: new Date().toISOString(),
-  };
+  const attemptId = [createdBy, plan.id, plan.name, plan.durationDays, plan.durationMinutes || 0].join(':');
+  let record = pendingLicenseWrites.get(attemptId);
+  if (!record) {
+    record = {
+      key: generateKeyString(plan.id),
+      planId: plan.id,
+      planName: plan.name,
+      durationDays: plan.durationDays,
+      status: 'unclaimed',
+      createdAt: new Date().toISOString(),
+    };
+    pendingLicenseWrites.set(attemptId, record);
+  }
 
+  let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
-    const docRef = doc(db, 'licenses', key);
-    await setDoc(docRef, record);
+    const docRef = doc(db, 'licenses', record.key);
+    await Promise.race([
+      setDoc(docRef, record),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error('LICENSE_SAVE_TIMEOUT')),
+          LICENSE_WRITE_TIMEOUT_MS
+        );
+      }),
+    ]);
+    pendingLicenseWrites.delete(attemptId);
   } catch (err) {
     console.warn('Firestore license write:', err);
+    if (err instanceof Error && err.message === 'LICENSE_SAVE_TIMEOUT') {
+      throw new Error(
+        'Firebase has not confirmed the save yet. Tap “Mint 1 Key” again to safely retry the same key.'
+      );
+    }
+    pendingLicenseWrites.delete(attemptId);
     throw new Error('The license key could not be saved. No usable key was issued; please retry.');
+  } finally {
+    if (timeout) clearTimeout(timeout);
   }
 
   return record;
@@ -499,14 +525,17 @@ export async function fetchAllUsers(): Promise<any[]> {
   // Query live multi-user WhatsApp sessions from the server
   try {
     const res = await fetch('/api/admin/users-status');
-    if (res.ok) {
-      const data = await res.json();
-      if (data?.statuses) {
-        serverStatuses = data.statuses;
-      }
+    if (!res.ok) {
+      throw new Error(`Live status request failed (${res.status}).`);
     }
+    const data = await res.json();
+    if (!data?.success || !data.statuses || typeof data.statuses !== 'object') {
+      throw new Error('Live status response was incomplete.');
+    }
+    serverStatuses = data.statuses;
   } catch (err) {
     console.debug('Could not fetch server live user statuses:', err);
+    throw new Error('Could not confirm WhatsApp user statuses from the server.');
   }
 
   const now = Date.now();
@@ -514,7 +543,7 @@ export async function fetchAllUsers(): Promise<any[]> {
   // 1. Fetch from Firestore users collection
   try {
     const colRef = collection(db, 'users');
-    const snap = await getDocs(colRef);
+    const snap = await getDocsFromServer(colRef);
     snap.forEach((d) => {
       const data = d.data() || {};
       const uid = d.id;
@@ -558,27 +587,7 @@ export async function fetchAllUsers(): Promise<any[]> {
     });
   } catch (err) {
     console.warn('Firestore fetch users:', err);
-  }
-
-  // 2. Ensure Master Founder Account is always listed
-  if (!usersMap.has('owner_solomon')) {
-    const ownerLive = serverStatuses['owner_solomon'] || serverStatuses['default'] || {};
-    usersMap.set('owner_solomon', {
-      uid: 'owner_solomon',
-      email: OWNER_EMAIL,
-      displayName: 'Solomon Oladimeji (Owner)',
-      linkedPhone: ownerLive.phone || '2349049979183',
-      whatsappConnected: Boolean(ownerLive.isConnected),
-      licenseKey: 'SOLVA-OWNER-UNLIMITED-MASTER',
-      licensePlan: '👑 Unlimited Lifetime (Owner Master)',
-      licenseStatus: 'unlimited',
-      isUnlimited: true,
-      isOwner: true,
-      hasUsedTrial: true,
-      commandsRun: 428,
-      lastLogin: new Date().toISOString(),
-      memberSince: '2026-09-15',
-    });
+    throw new Error('Could not confirm the registered user list from Firestore.');
   }
 
   return Array.from(usersMap.values());

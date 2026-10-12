@@ -10,7 +10,7 @@ export const OfflineIndicator: React.FC = () => {
   return (
     <div className="fixed bottom-4 left-4 right-4 sm:left-auto sm:right-4 z-50 flex items-center gap-3 rounded-xl bg-amber-950/90 border border-amber-500/50 px-4 py-3 text-xs font-medium text-amber-200 shadow-2xl backdrop-blur-md animate-bounce">
       <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-amber-500/20 text-amber-400 shrink-0">
-        <WifiOff className="w-4 h-4 animate-pulse" />
+        <WifiOff className="w-4 h-4" />
       </div>
       <div>
         <div className="font-bold text-white flex items-center gap-1.5">

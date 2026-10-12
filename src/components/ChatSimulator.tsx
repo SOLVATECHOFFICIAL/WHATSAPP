@@ -129,7 +129,7 @@ export const ChatSimulator: React.FC<ChatSimulatorProps> = ({
               alt="SOLVATECH"
               className="w-9 h-9 rounded-full object-cover ring-2 ring-emerald-500/50 shadow-md"
             />
-            <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 border-2 border-slate-900 absolute -bottom-0.5 -right-0.5 animate-pulse" />
+            <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 border-2 border-slate-900 absolute -bottom-0.5 -right-0.5" />
           </div>
           <div>
             <h4 className="text-sm font-bold text-white leading-tight flex items-center gap-1.5">

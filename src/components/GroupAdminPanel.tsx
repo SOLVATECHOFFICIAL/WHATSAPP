@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Shield,
   Users,
@@ -142,6 +142,8 @@ export const GroupAdminPanel: React.FC<GroupAdminPanelProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [pendingToggles, setPendingToggles] = useState<Record<string, boolean>>({});
+  const [groupSyncWarning, setGroupSyncWarning] = useState<string | null>(null);
+  const groupsRequestInFlight = useRef(false);
 
   // Fetch real groups from server (Admin groups only)
   const fetchGroups = async (isManualSync = false) => {
@@ -150,6 +152,8 @@ export const GroupAdminPanel: React.FC<GroupAdminPanelProps> = ({
       setLoading(false);
       return;
     }
+    if (groupsRequestInFlight.current) return;
+    groupsRequestInFlight.current = true;
 
     if (isManualSync) {
       setSyncing(true);
@@ -179,9 +183,18 @@ export const GroupAdminPanel: React.FC<GroupAdminPanelProps> = ({
         if (data && Array.isArray(data.groups)) {
           // STRICT REQUIREMENT: Keep only groups where the account is an Admin
           // Remove all non-admin groups so members cannot modify protection
-          const adminOnlyGroups = data.groups.filter((g) => g.isAdmin);
-          if (data.connected !== false) {
+          const adminOnlyGroups = data.groups.filter((group) => group.isAdmin);
+          if (data.connected === false) {
+            setGroupSyncWarning(
+              'WhatsApp could not confirm the connection. The last confirmed groups are being kept.'
+            );
+          } else if (!isManualSync && adminOnlyGroups.length === 0 && groups.length > 0) {
+            setGroupSyncWarning(
+              'This background check returned no groups. Your last confirmed groups are still shown; use Sync & Detect Groups to verify them.'
+            );
+          } else {
             setGroups(adminOnlyGroups);
+            setGroupSyncWarning(null);
           }
 
           if (isManualSync) {
@@ -193,11 +206,17 @@ export const GroupAdminPanel: React.FC<GroupAdminPanelProps> = ({
               timestamp: new Date().toLocaleTimeString(),
             });
           }
+        } else {
+          setGroupSyncWarning('The group list could not be confirmed. Use Sync & Detect Groups to retry.');
         }
+      } else {
+        setGroupSyncWarning('The group list could not be loaded. Use Sync & Detect Groups to retry.');
       }
     } catch (err) {
       console.error('Failed to fetch groups:', err);
+      setGroupSyncWarning('The group list could not be loaded. Use Sync & Detect Groups to retry.');
     } finally {
+      groupsRequestInFlight.current = false;
       setLoading(false);
       setSyncing(false);
     }
@@ -205,11 +224,7 @@ export const GroupAdminPanel: React.FC<GroupAdminPanelProps> = ({
 
   useEffect(() => {
     if (isConnected) {
-      fetchGroups();
-      const interval = setInterval(() => {
-        fetchGroups(false);
-      }, 15000);
-      return () => clearInterval(interval);
+      void fetchGroups();
     } else {
       setLoading(false);
     }
@@ -572,6 +587,15 @@ export const GroupAdminPanel: React.FC<GroupAdminPanelProps> = ({
         </div>
       </div>
 
+      {groupSyncWarning && (
+        <div
+          role="status"
+          className="rounded-xl border border-amber-500/40 bg-amber-950/30 px-3 py-2 text-xs text-amber-200"
+        >
+          {groupSyncWarning}
+        </div>
+      )}
+
       {!isConnected && (
         <div
           role="status"
@@ -590,6 +614,21 @@ export const GroupAdminPanel: React.FC<GroupAdminPanelProps> = ({
         <div className="p-12 text-center rounded-2xl bg-slate-900/50 border border-slate-800 text-slate-400 flex flex-col items-center justify-center gap-3">
           <RefreshCw className="w-7 h-7 text-emerald-400 animate-spin" />
           <p className="text-sm font-medium">Fetching live WhatsApp groups where you are an admin...</p>
+        </div>
+      ) : groupSyncWarning && groups.length === 0 ? (
+        <div className="p-12 text-center rounded-2xl bg-slate-900/50 border border-amber-500/30 text-slate-400 space-y-3">
+          <AlertTriangle className="w-10 h-10 text-amber-400/80 mx-auto" />
+          <h3 className="text-base font-bold text-white">Group list not confirmed</h3>
+          <p className="text-xs max-w-md mx-auto text-slate-400">{groupSyncWarning}</p>
+          <button
+            type="button"
+            onClick={() => fetchGroups(true)}
+            disabled={syncing || !isConnected}
+            className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-semibold text-xs inline-flex items-center gap-2 cursor-pointer transition-all disabled:opacity-50"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
+            <span>Sync & Detect Groups</span>
+          </button>
         </div>
       ) : filteredGroups.length === 0 ? (
         <div className="p-12 text-center rounded-2xl bg-slate-900/50 border border-slate-800 text-slate-400 space-y-3">

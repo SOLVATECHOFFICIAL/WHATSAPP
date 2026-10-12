@@ -44,6 +44,7 @@ import { UserAccountNav } from './components/UserAccountNav';
 import { AdminDashboard } from './components/AdminDashboard';
 import { GroupAdminPanel } from './components/GroupAdminPanel';
 import { LicenseCountdown } from './components/LicenseCountdown';
+import { PairingCountdown } from './components/PairingCountdown';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { OfflineIndicator } from './components/OfflineIndicator';
 import {
@@ -141,7 +142,6 @@ export default function App() {
   });
   const [pairingCode, setPairingCode] = useState<string | null>(null);
   const [pairingError, setPairingError] = useState<string | null>(null);
-  const [countdown, setCountdown] = useState<number>(120);
 
   // License state with time stacking
   const [userLicenseData, setUserLicenseData] = useState<{
@@ -475,17 +475,6 @@ export default function App() {
     };
   }, [currentUser?.uid, isPairingActive]);
 
-  // Countdown timer for pairing code (120s)
-  useEffect(() => {
-    let timer: NodeJS.Timeout;
-    if (pairingCode && countdown > 0 && !status.isConnected) {
-      timer = setInterval(() => {
-        setCountdown((prev) => (prev > 0 ? prev - 1 : 0));
-      }, 1000);
-    }
-    return () => clearInterval(timer);
-  }, [pairingCode, countdown, status.isConnected]);
-
   // Tab visibility change: auto-refresh status when user switches back from WhatsApp
   useEffect(() => {
     const onVisibilityChange = () => {
@@ -677,7 +666,6 @@ export default function App() {
       const data = await safeParseJson(res);
       if (data && data.success) {
         setPairingCode(data.pairingCode);
-        setCountdown(120);
         setStatus((prev) => ({
           ...prev,
           state: 'awaiting_pairing',
@@ -886,7 +874,7 @@ export default function App() {
       <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-4">
         <div className="flex flex-col items-center gap-4 text-center max-w-xs">
           <div className="relative">
-            <div className="absolute -inset-2 bg-gradient-to-r from-emerald-500 to-teal-500 rounded-3xl blur-xl opacity-40 animate-pulse" />
+            <div className="absolute -inset-2 bg-gradient-to-r from-emerald-500 to-teal-500 rounded-3xl blur-xl opacity-40" />
             <img
               src="/solva.webp"
               alt="SOLVATECH BOT"
@@ -1397,7 +1385,7 @@ export default function App() {
                         <span
                           className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
                             antiDeleteEnabled
-                              ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40 animate-pulse'
+                              ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
                               : 'bg-slate-800 text-slate-400 border border-slate-700'
                           }`}
                         >
@@ -1445,7 +1433,7 @@ export default function App() {
                 <div className="p-3.5 rounded-2xl bg-slate-950 border border-slate-800 space-y-3">
                   <div className="flex items-center justify-between pb-2 border-b border-slate-800/80">
                     <div className="flex items-center gap-2">
-                      <Radio className="w-4 h-4 text-emerald-400 animate-pulse" />
+                      <Radio className="w-4 h-4 text-emerald-400" />
                       <h3 className="font-bold text-xs text-white uppercase tracking-wider">
                         3-Step Live Link Confirmation
                       </h3>
@@ -1490,7 +1478,7 @@ export default function App() {
                         </div>
                         {pairingCode && (
                           <span className="text-[10px] font-mono text-slate-400">
-                            {countdown}s remaining
+                            <PairingCountdown pairingCode={pairingCode} />
                           </span>
                         )}
                       </div>
@@ -1530,7 +1518,7 @@ export default function App() {
                         isStep2Active
                           ? 'bg-emerald-950/25 border-emerald-500/60 shadow-xs'
                           : status.pairingStage === 'code_generated'
-                          ? 'bg-amber-950/15 border-amber-500/40 animate-pulse'
+                          ? 'bg-amber-950/15 border-amber-500/40'
                           : 'bg-slate-900/60 border-slate-800 opacity-60'
                       }`}
                     >
@@ -1601,7 +1589,7 @@ export default function App() {
                           </div>
                         </div>
                         {isStep3Active && (
-                          <span className="text-[10px] font-bold text-emerald-300 bg-emerald-950/90 px-2 py-0.5 rounded border border-emerald-400/40 animate-pulse">
+                          <span className="text-[10px] font-bold text-emerald-300 bg-emerald-950/90 px-2 py-0.5 rounded border border-emerald-400/40">
                             Live 🟢
                           </span>
                         )}
@@ -1616,7 +1604,7 @@ export default function App() {
                 <div className="p-4 rounded-2xl bg-slate-950 border border-slate-800 space-y-3">
                   <div className="flex items-center justify-between pb-2 border-b border-slate-800/80">
                     <div className="flex items-center gap-2">
-                      <Radio className="w-4 h-4 text-emerald-400 animate-pulse" />
+                      <Radio className="w-4 h-4 text-emerald-400" />
                       <h3 className="font-bold text-sm text-white">Link Your WhatsApp</h3>
                     </div>
                     <button
@@ -2256,6 +2244,7 @@ export default function App() {
       {isOwner && isAdminModalOpen && (
         <AdminDashboard
           currentUserEmail={currentUser?.email}
+          currentUserId={currentUser?.uid}
           onClose={() => setIsAdminModalOpen(false)}
         />
       )}

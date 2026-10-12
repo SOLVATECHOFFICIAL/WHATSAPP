@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Shield,
   Key,
@@ -61,7 +61,51 @@ import {
 
 interface AdminDashboardProps {
   currentUserEmail?: string | null;
+  currentUserId?: string | null;
   onClose: () => void;
+}
+
+function sameAdminUserSnapshot(previous: any[], next: any[]): boolean {
+  const snapshot = (user: any) => ({
+    uid: user.uid,
+    email: user.email,
+    displayName: user.displayName,
+    isUnlimited: user.isUnlimited,
+    licensePlan: user.licensePlan,
+    licenseStatus: user.licenseStatus,
+    licenseKey: user.licenseKey,
+    licenseExpiresAt: user.licenseExpiresAt,
+    linkedPhone: user.linkedPhone,
+    isPaired: user.isPaired,
+    whatsappConnected: user.whatsappConnected,
+    hasUsedTrial: user.hasUsedTrial,
+    trialClaimedAt: user.trialClaimedAt,
+    commandsRun: user.commandsRun,
+    memberSince: user.memberSince,
+  });
+
+  return (
+    previous.length === next.length &&
+    previous.every((user, index) => JSON.stringify(snapshot(user)) === JSON.stringify(snapshot(next[index])))
+  );
+}
+
+function sameWhatsAppStatus(previous: any, next: any): boolean {
+  return (
+    previous.state === next.state &&
+    previous.isConnected === next.isConnected &&
+    previous.isPaired === next.isPaired &&
+    previous.pairingStage === next.pairingStage &&
+    previous.pairingCode === next.pairingCode &&
+    previous.qrCodeUrl === next.qrCodeUrl &&
+    previous.targetPhone === next.targetPhone &&
+    previous.lastError === next.lastError &&
+    previous.isExpired === next.isExpired &&
+    previous.licenseExpiresAt === next.licenseExpiresAt &&
+    previous.user?.id === next.user?.id &&
+    previous.user?.name === next.user?.name &&
+    previous.user?.phone === next.user?.phone
+  );
 }
 
 // 2 MANDATORY CHANNELS STRICTLY FORCED FOR EVERY USER
@@ -72,7 +116,11 @@ export const OFFICIAL_CHANNELS = {
   communityGroupId: 'HKBAnW6XJmB9fBqSPJUN1F',
 };
 
-export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail, onClose }) => {
+export const AdminDashboard: React.FC<AdminDashboardProps> = ({
+  currentUserEmail,
+  currentUserId,
+  onClose,
+}) => {
   const isStudioEnv =
     typeof window !== 'undefined' &&
     (window.location.hostname.includes('europe-west2.run.app') ||
@@ -148,6 +196,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
 
   // Toast alert
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [usersRefreshFailed, setUsersRefreshFailed] = useState(false);
+  const usersRefreshInFlight = useRef(false);
+  const liveStatusRefreshInFlight = useRef(false);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
@@ -155,53 +206,98 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
   };
 
   useEffect(() => {
-    if (isOwner) {
-      loadAllData();
-      const interval = setInterval(loadLiveStatus, 5000);
-      return () => clearInterval(interval);
-    }
-  }, [isOwner]);
+    if (!isOwner) return;
+
+    let stopped = false;
+    let statusTimer: ReturnType<typeof setTimeout> | undefined;
+    let usersTimer: ReturnType<typeof setTimeout> | undefined;
+
+    const pollStatus = async () => {
+      await loadLiveStatus();
+      if (!stopped) statusTimer = setTimeout(pollStatus, 15_000);
+    };
+    const pollUsers = async () => {
+      await refreshAdminUsers();
+      if (!stopped) usersTimer = setTimeout(pollUsers, 60_000);
+    };
+
+    void loadAllData();
+    void loadLiveStatus();
+    statusTimer = setTimeout(pollStatus, 15_000);
+    usersTimer = setTimeout(pollUsers, 60_000);
+
+    return () => {
+      stopped = true;
+      if (statusTimer) clearTimeout(statusTimer);
+      if (usersTimer) clearTimeout(usersTimer);
+    };
+  }, [isOwner, currentUserId]);
 
   const loadLiveStatus = async () => {
+    if (!currentUserId || liveStatusRefreshInFlight.current) return;
+    liveStatusRefreshInFlight.current = true;
     try {
-      const ownerId = currentUserEmail || 'owner_solomon';
-      const [resStatus, resNotifs, latestUsers] = await Promise.all([
-        fetch(`/api/whatsapp/status?userId=${encodeURIComponent(ownerId)}`).catch(() => null),
-        fetch(`/api/whatsapp/notifications?userId=${encodeURIComponent(ownerId)}`).catch(() => null),
-        fetchAllUsers().catch(() => null),
+      const [resStatus, resNotifs] = await Promise.all([
+        fetch(`/api/whatsapp/status?userId=${encodeURIComponent(currentUserId)}`).catch(() => null),
+        fetch(`/api/whatsapp/notifications?userId=${encodeURIComponent(currentUserId)}`).catch(() => null),
       ]);
       if (resStatus && resStatus.ok) {
         const text = await resStatus.text();
         if (text && !text.trim().startsWith('<')) {
           const d = JSON.parse(text);
-          if (d?.status) setWhatsappStatus(d.status);
+          if (d?.status) {
+            setWhatsappStatus((previous: any) =>
+              sameWhatsAppStatus(previous, d.status) ? previous : d.status
+            );
+          }
         }
       }
       if (resNotifs && resNotifs.ok) {
         const text = await resNotifs.text();
         if (text && !text.trim().startsWith('<')) {
           const n = JSON.parse(text);
-          if (Array.isArray(n?.notifications)) setWhatsappNotifications(n.notifications);
+          if (Array.isArray(n?.notifications)) {
+            setWhatsappNotifications((previous) =>
+              previous.length === n.notifications.length &&
+              previous.every((notification, index) => notification.id === n.notifications[index]?.id)
+                ? previous
+                : n.notifications
+            );
+          }
         }
-      }
-      if (Array.isArray(latestUsers) && latestUsers.length > 0) {
-        setUsers(latestUsers);
       }
     } catch {
       // Ignore background fetch error
+    } finally {
+      liveStatusRefreshInFlight.current = false;
+    }
+  };
+
+  const refreshAdminUsers = async () => {
+    if (usersRefreshInFlight.current) return;
+    usersRefreshInFlight.current = true;
+    try {
+      const latestUsers = await fetchAllUsers();
+      setUsers((previous) =>
+        sameAdminUserSnapshot(previous, latestUsers) ? previous : latestUsers
+      );
+      setUsersRefreshFailed(false);
+    } catch (err) {
+      console.warn('Keeping the last confirmed admin user list after a refresh failure:', err);
+      setUsersRefreshFailed(true);
+    } finally {
+      usersRefreshInFlight.current = false;
     }
   };
 
   const loadAllData = async () => {
     setLoading(true);
     try {
-      const [allLic, allUsr] = await Promise.all([
+      const [allLic] = await Promise.all([
         fetchAllLicenses(),
-        fetchAllUsers(),
-        loadLiveStatus(),
+        refreshAdminUsers(),
       ]);
       setLicenses(allLic);
-      setUsers(allUsr);
     } catch (e) {
       console.error('Failed to load admin data:', e);
     } finally {
@@ -374,7 +470,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
       showToast(`Minted ${newLic.key}!`);
     } catch (err) {
       console.error(err);
-      showToast('Failed to generate license key.');
+      showToast(err instanceof Error ? err.message : 'Failed to generate license key.');
     } finally {
       setGenerating(false);
     }
@@ -741,7 +837,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
               <span className="text-amber-300 font-bold">awoyinfasolomon1@gmail.com</span>
               <span className="text-slate-600">•</span>
               <span className="text-emerald-400 flex items-center gap-1 font-semibold">
-                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                <span className="w-2 h-2 rounded-full bg-emerald-400" />
                 Live Engine
               </span>
             </p>
@@ -751,7 +847,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
         {/* Header Right Actions */}
         <div className="flex items-center gap-2">
           <button
-            onClick={loadAllData}
+            onClick={() => {
+              void loadAllData();
+              void loadLiveStatus();
+            }}
             title="Refresh All Telemetry"
             className="p-2 sm:px-3 sm:py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition-all flex items-center gap-1.5 text-xs font-semibold"
           >
@@ -819,7 +918,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
             <span>Bot Engine & Systems</span>
             <span
               className={`w-2 h-2 rounded-full ${
-                whatsappStatus.isConnected ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'
+                whatsappStatus.isConnected ? 'bg-emerald-400' : 'bg-rose-500'
               }`}
             />
           </button>
@@ -835,6 +934,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
       </div>
 
       {/* KPI TELEMETRY SUMMARY TICKER */}
+      {usersRefreshFailed && (
+        <div
+          role="status"
+          className="mx-3 mt-2 rounded-xl border border-amber-500/40 bg-amber-950/30 px-3 py-2 text-xs text-amber-200 sm:mx-6"
+        >
+          Could not confirm the account list. The dashboard is keeping the last confirmed user data.
+        </div>
+      )}
       <section className="px-3 sm:px-6 py-2.5 border-b border-slate-800 bg-slate-900/40 shrink-0">
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 sm:gap-3">
           {/* Card 1: Total Users */}
@@ -867,7 +974,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
           >
             <div className="flex items-center justify-between text-slate-400 text-[10px]">
               <span>WhatsApp Online</span>
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+              <span className="w-2 h-2 rounded-full bg-emerald-400" />
             </div>
             <p className="text-lg font-black text-emerald-400 font-mono leading-tight">{onlineUsersCount}</p>
             <span className="text-[9px] text-emerald-300 font-semibold">Active WhatsApp Socket</span>
@@ -978,7 +1085,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
                       : 'bg-slate-800 text-emerald-300 hover:text-white'
                   }`}
                 >
-                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                  <span className="w-2 h-2 rounded-full bg-emerald-400" />
                   <span>Online WhatsApp ({onlineUsersCount})</span>
                 </button>
                 <button
@@ -1173,7 +1280,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
                               {user.isOnline ? (
                                 <div className="space-y-0.5">
                                   <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-950/80 text-emerald-300 font-bold text-[10px] border border-emerald-500/40">
-                                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                                    <span className="w-2 h-2 rounded-full bg-emerald-400" />
                                     <span>ONLINE (WhatsApp Connected)</span>
                                   </span>
                                   {user.linkedPhone && (
@@ -1200,7 +1307,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
                                   {user.linkedPhone || user.isPaired ? (
                                     <>
                                       <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-amber-950/60 text-amber-300 text-[10px] border border-amber-500/30 font-medium">
-                                        <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                                        <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
                                         <span>LINKED (Reconnecting 24/7)</span>
                                       </span>
                                       <p className="text-[9px] text-amber-300/90 pl-1 font-mono">
@@ -2179,7 +2286,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ currentUserEmail
                   </span>
                   <span
                     className={`w-2.5 h-2.5 rounded-full ${
-                      whatsappStatus.isConnected ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'
+                      whatsappStatus.isConnected ? 'bg-emerald-400' : 'bg-rose-500'
                     }`}
                   />
                 </div>
