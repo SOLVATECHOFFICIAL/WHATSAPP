@@ -430,9 +430,19 @@ export default function App() {
 
         const data = await safeParseJson(resStatus);
         if (data?.status) {
-          setStatus((previous) =>
-            sameWhatsAppStatus(previous, data.status) ? previous : data.status
-          );
+          setStatus((previous) => {
+            if (!previous.isConnected && data.status.isConnected) {
+              setToastNotification({
+                id: 'conn_' + Date.now(),
+                type: 'connection',
+                title: 'WhatsApp Connected Successfully! 🟢',
+                body: `Your phone ${data.status.user?.phone || ''} is now paired and online 24/7!`,
+                timestamp: new Date().toLocaleTimeString(),
+              });
+              setTimeout(() => setToastNotification(null), 6000);
+            }
+            return sameWhatsAppStatus(previous, data.status) ? previous : data.status;
+          });
           if (data.status.isConnected || data.status.state === 'connected' || data.status.pairingStage === 'connected') {
             setPairingCode(null);
           } else if (data.status.pairingCode) {
@@ -673,6 +683,14 @@ export default function App() {
           pairingCode: data.pairingCode,
           targetPhone: `+${fullNumber}`,
         }));
+        setToastNotification({
+          id: 'pairing_code_' + Date.now(),
+          type: 'pairing',
+          title: 'Pairing Code Generated 💬',
+          body: `Code: ${data.pairingCode}. Enter this code in WhatsApp > Linked Devices > Link with phone number.`,
+          timestamp: new Date().toLocaleTimeString(),
+        });
+        setTimeout(() => setToastNotification(null), 8000);
       } else {
         setPairingError(
           data?.error ||
