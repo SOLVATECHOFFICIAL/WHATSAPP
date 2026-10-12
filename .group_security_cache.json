@@ -43,5 +43,23 @@
     "autowelcome": true,
     "autogoodbye": true,
     "warnLimit": 3
+  },
+  "120363412770774055@g.us": {
+    "antilink": true,
+    "antibot": true,
+    "antistatus": true,
+    "antispam": true,
+    "autowelcome": true,
+    "autogoodbye": true,
+    "warnLimit": 1
+  },
+  "120363428381412239@g.us": {
+    "antilink": true,
+    "antibot": true,
+    "antistatus": true,
+    "antispam": true,
+    "autowelcome": true,
+    "autogoodbye": true,
+    "warnLimit": 1
   }
 }

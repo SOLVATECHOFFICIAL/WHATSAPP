@@ -99,6 +99,8 @@ export function extractMediaFromMessage(msgObj: any): {
   target: any;
   type: 'image' | 'video' | 'audio' | 'sticker' | 'document';
   isViewOnce: boolean;
+  isGif?: boolean;
+  isPtv?: boolean;
 } | null {
   if (!msgObj) return null;
   const inner = unwrapMessage(msgObj);
@@ -108,7 +110,20 @@ export function extractMediaFromMessage(msgObj: any): {
     return { target: inner.imageMessage, type: 'image', isViewOnce: !!inner.imageMessage.viewOnce };
   }
   if (inner.videoMessage) {
-    return { target: inner.videoMessage, type: 'video', isViewOnce: !!inner.videoMessage.viewOnce };
+    return {
+      target: inner.videoMessage,
+      type: 'video',
+      isViewOnce: !!inner.videoMessage.viewOnce,
+      isGif: !!inner.videoMessage.gifPlayback,
+    };
+  }
+  if (inner.ptvMessage) {
+    return {
+      target: inner.ptvMessage,
+      type: 'video',
+      isViewOnce: false,
+      isPtv: true,
+    };
   }
   if (inner.audioMessage) {
     return { target: inner.audioMessage, type: 'audio', isViewOnce: !!inner.audioMessage.viewOnce };
@@ -118,6 +133,17 @@ export function extractMediaFromMessage(msgObj: any): {
   }
   if (inner.documentMessage) {
     return { target: inner.documentMessage, type: 'document', isViewOnce: false };
+  }
+  // Interactive message headers
+  const header = inner.interactiveMessage?.header || inner.templateMessage?.hydratedTemplate;
+  if (header?.imageMessage) {
+    return { target: header.imageMessage, type: 'image', isViewOnce: false };
+  }
+  if (header?.videoMessage) {
+    return { target: header.videoMessage, type: 'video', isViewOnce: false, isGif: !!header.videoMessage.gifPlayback };
+  }
+  if (header?.documentMessage) {
+    return { target: header.documentMessage, type: 'document', isViewOnce: false };
   }
   return null;
 }
@@ -129,7 +155,97 @@ export async function downloadMediaBuffer(target: any, type: any): Promise<Buffe
   for await (const chunk of stream) {
     chunks.push(Buffer.from(chunk));
   }
-  return Buffer.concat(chunks);
+  const buf = Buffer.concat(chunks);
+  if (!buf || buf.length === 0) {
+    throw new Error('Downloaded empty media buffer');
+  }
+  return buf;
+}
+
+// Helper: Download media buffer with automatic retries for maximum reliability
+export async function downloadMediaBufferWithRetry(target: any, type: any, maxRetries = 3): Promise<Buffer> {
+  let lastErr: any;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const buf = await downloadMediaBuffer(target, type);
+      if (buf && buf.length > 0) return buf;
+    } catch (err: any) {
+      lastErr = err;
+      if (attempt < maxRetries) {
+        await new Promise((res) => setTimeout(res, attempt * 600));
+      }
+    }
+  }
+  throw lastErr || new Error(`Failed to download media after ${maxRetries} attempts`);
+}
+
+// Helper: Sanitize and reformat video for 100% WhatsApp mobile playback (+faststart, H.264 Baseline, AAC)
+// Fixes WhatsApp error: "Can't view this video" / "Error: can't view"
+export async function sanitizeVideoForWhatsApp(inputBuf: Buffer): Promise<{ buffer: Buffer; mimetype: string }> {
+  if (!inputBuf || inputBuf.length === 0) {
+    return { buffer: inputBuf, mimetype: 'video/mp4' };
+  }
+  const tmpIn = path.join('/tmp', `v_in_${Date.now()}_${Math.random().toString(36).substring(7)}.mp4`);
+  const tmpOut = path.join('/tmp', `v_out_${Date.now()}_${Math.random().toString(36).substring(7)}.mp4`);
+
+  try {
+    fs.writeFileSync(tmpIn, inputBuf);
+
+    // Attempt 1: Ultra-fast stream-copy with +faststart (puts moov atom at beginning in ~15ms with 0 recompression)
+    try {
+      execSync(
+        `ffmpeg -y -v error -i "${tmpIn}" -c copy -movflags +faststart "${tmpOut}"`,
+        { stdio: 'pipe', timeout: 8000 }
+      );
+      if (fs.existsSync(tmpOut) && fs.statSync(tmpOut).size > 0) {
+        const outBuf = fs.readFileSync(tmpOut);
+        return { buffer: outBuf, mimetype: 'video/mp4' };
+      }
+    } catch {
+      // Stream-copy failed: codecs or container require transcoding
+    }
+
+    // Attempt 2: High-speed transcode to universal H.264 Baseline (yuv420p) + AAC with +faststart
+    try {
+      if (fs.existsSync(tmpOut)) fs.unlinkSync(tmpOut);
+      execSync(
+        `ffmpeg -y -v error -i "${tmpIn}" -c:v libx264 -preset ultrafast -crf 24 -pix_fmt yuv420p -c:a aac -b:a 128k -movflags +faststart "${tmpOut}"`,
+        { stdio: 'pipe', timeout: 25000 }
+      );
+      if (fs.existsSync(tmpOut) && fs.statSync(tmpOut).size > 0) {
+        const outBuf = fs.readFileSync(tmpOut);
+        return { buffer: outBuf, mimetype: 'video/mp4' };
+      }
+    } catch (encodeErr) {
+      console.warn('[Anti-Delete] Video transcoding fallback warning:', encodeErr);
+    }
+
+    return { buffer: inputBuf, mimetype: 'video/mp4' };
+  } catch (err) {
+    console.warn('[Anti-Delete] Error preparing compatible video:', err);
+    return { buffer: inputBuf, mimetype: 'video/mp4' };
+  } finally {
+    try {
+      if (fs.existsSync(tmpIn)) fs.unlinkSync(tmpIn);
+      if (fs.existsSync(tmpOut)) fs.unlinkSync(tmpOut);
+    } catch {}
+  }
+}
+
+// Helper: Sanitize image for WhatsApp delivery (auto-orients EXIF rotation and ensures standard JPEG)
+export async function sanitizeImageForWhatsApp(inputBuf: Buffer): Promise<{ buffer: Buffer; mimetype: string }> {
+  if (!inputBuf || inputBuf.length === 0) {
+    return { buffer: inputBuf, mimetype: 'image/jpeg' };
+  }
+  try {
+    const cleanJpg = await sharp(inputBuf)
+      .rotate() // auto-orient based on EXIF
+      .jpeg({ quality: 90, mozjpeg: true })
+      .toBuffer();
+    return { buffer: cleanJpg, mimetype: 'image/jpeg' };
+  } catch {
+    return { buffer: inputBuf, mimetype: 'image/jpeg' };
+  }
 }
 
 // Helper: Create official WhatsApp WebP sticker with EXIF metadata
@@ -326,6 +442,8 @@ export class WhatsAppManager {
   private authDir: string;
   private antiDeleteEnabled = true;
   private notifications: WhatsAppNotification[] = [];
+  private mediaCacheDir: string;
+  private recoveringMessageIds = new Set<string>();
   private messageCache = new Map<string, {
     key: proto.IMessageKey;
     sender: string;
@@ -337,9 +455,14 @@ export class WhatsAppManager {
     group?: string;
     groupName?: string;
     mediaType?: 'image' | 'video' | 'audio' | 'sticker' | 'document';
+    mediaTarget?: any;
     mediaBuffer?: Buffer;
+    mediaFilePath?: string;
+    mediaPromise?: Promise<Buffer | null>;
     mimetype?: string;
     fileName?: string;
+    isGif?: boolean;
+    isPtv?: boolean;
     _alreadyRecovered?: boolean;
   }>();
   private activeSpamSession: { remoteJid: string; abort: boolean } | null = null;
@@ -468,7 +591,14 @@ export class WhatsAppManager {
     this.userEmail = userEmail || '';
     this.sanitizedUserId = (userId || 'default').replace(/[^a-zA-Z0-9_-]/g, '_');
     this.authDir = path.resolve(process.cwd(), '.baileys_auth', `session_${this.sanitizedUserId}`);
+    this.mediaCacheDir = path.resolve(process.cwd(), '.media_cache', `session_${this.sanitizedUserId}`);
     this.ensureAuthDir();
+    try {
+      if (!fs.existsSync(this.mediaCacheDir)) {
+        fs.mkdirSync(this.mediaCacheDir, { recursive: true });
+      }
+    } catch {}
+    this.cleanupOldMediaCache();
     this.loadSessionLicense();
     this.loadAntiDeleteSetting();
 
@@ -478,6 +608,24 @@ export class WhatsAppManager {
       body: `Baileys WhatsApp service initialized for user account ${this.userEmail || this.userId}.`,
     });
 
+  }
+
+  private cleanupOldMediaCache() {
+    try {
+      if (!fs.existsSync(this.mediaCacheDir)) return;
+      const files = fs.readdirSync(this.mediaCacheDir);
+      const now = Date.now();
+      const maxAgeMs = 48 * 60 * 60 * 1000; // 48 hours disk retention
+      for (const file of files) {
+        const fullPath = path.join(this.mediaCacheDir, file);
+        try {
+          const stats = fs.statSync(fullPath);
+          if (now - stats.mtimeMs > maxAgeMs) {
+            fs.unlinkSync(fullPath);
+          }
+        } catch {}
+      }
+    } catch {}
   }
 
   public getAntiDeleteEnabled(): boolean {
@@ -810,14 +958,26 @@ export class WhatsAppManager {
     if (!this.antiDeleteEnabled) return;
 
     const msgId = revokedKey.id;
-    const cached = this.messageCache.get(msgId);
+    let cached = this.messageCache.get(msgId);
+    if (!cached) {
+      for (const [k, v] of this.messageCache.entries()) {
+        if (k.endsWith(msgId) || msgId.endsWith(k)) {
+          cached = v;
+          break;
+        }
+      }
+    }
     if (!cached) {
       console.log(`[Anti-Delete] Revoked message ${msgId} not found in local cache.`);
       return;
     }
 
-    if (cached._alreadyRecovered) return;
+    if (this.recoveringMessageIds.has(msgId) || cached._alreadyRecovered) return;
+    this.recoveringMessageIds.add(msgId);
     cached._alreadyRecovered = true;
+    setTimeout(() => {
+      this.recoveringMessageIds.delete(msgId);
+    }, 60000);
 
     // Identify target DM JID: the connected WhatsApp account (Message yourself)
     const myRawJid = this.sock.user?.id || (this.sock as any).authState?.creds?.me?.id || this.currentStatus.user?.id || '';
@@ -861,39 +1021,143 @@ export class WhatsAppManager {
       sender: `+${cached.sender}`,
     });
 
+    // 1. Resolve media buffer with robust multi-tier fallback:
+    // Memory RAM -> Disk Cache -> Active Download Promise -> On-Demand Fetch
+    let recoveredMediaBuffer: Buffer | undefined = cached.mediaBuffer;
+
+    // Check disk storage if evicted from RAM
+    if ((!recoveredMediaBuffer || recoveredMediaBuffer.length === 0) && cached.mediaFilePath && fs.existsSync(cached.mediaFilePath)) {
+      try {
+        recoveredMediaBuffer = fs.readFileSync(cached.mediaFilePath);
+      } catch (err) {
+        console.warn(`[Anti-Delete] Error reading media file from disk (${cached.mediaFilePath}):`, err);
+      }
+    }
+
+    // Check in-flight background download promise (crucial for rapid deletes within seconds of sending)
+    if ((!recoveredMediaBuffer || recoveredMediaBuffer.length === 0) && cached.mediaPromise) {
+      try {
+        const promisedBuf = await Promise.race([
+          cached.mediaPromise,
+          new Promise<null>((res) => setTimeout(() => res(null), 12000)),
+        ]);
+        if (promisedBuf && promisedBuf.length > 0) {
+          recoveredMediaBuffer = promisedBuf;
+        }
+      } catch (err) {
+        console.warn(`[Anti-Delete] Error waiting for media download promise:`, err);
+      }
+    }
+
+    // Check on-demand download if media target exists and still no buffer
+    if ((!recoveredMediaBuffer || recoveredMediaBuffer.length === 0) && cached.mediaTarget && cached.mediaType) {
+      try {
+        console.log(`[Anti-Delete] Fetching revoked media on-demand for msg ${msgId}...`);
+        const rawBuf = await downloadMediaBufferWithRetry(cached.mediaTarget, cached.mediaType, 2);
+        if (rawBuf && rawBuf.length > 0) {
+          if (cached.mediaType === 'video') {
+            const sanitized = await sanitizeVideoForWhatsApp(rawBuf);
+            recoveredMediaBuffer = sanitized.buffer;
+          } else if (cached.mediaType === 'image') {
+            const sanitized = await sanitizeImageForWhatsApp(rawBuf);
+            recoveredMediaBuffer = sanitized.buffer;
+          } else {
+            recoveredMediaBuffer = rawBuf;
+          }
+          if (cached.mediaFilePath) {
+            try {
+              fs.writeFileSync(cached.mediaFilePath, recoveredMediaBuffer);
+            } catch {}
+          }
+        }
+      } catch (fetchErr) {
+        console.warn(`[Anti-Delete] On-demand download failed for msg ${msgId}:`, fetchErr);
+      }
+    }
+
+    // Ensure caption does not exceed WhatsApp's 1024 character limit for media
+    let mediaCaption = alertText;
+    let followUpText: string | null = null;
+    if (mediaCaption.length > 950) {
+      mediaCaption = alertText.slice(0, 900) + '\n...\n_(Full deleted message continued below)_';
+      followUpText = `💬 *Full Deleted Message Content:*\n${cached.text}`;
+    }
+
+    // 2. Deliver recovered message & media to owner DM
     try {
-      if (cached.mediaBuffer && cached.mediaType) {
+      if (recoveredMediaBuffer && recoveredMediaBuffer.length > 0 && cached.mediaType) {
         if (cached.mediaType === 'image') {
-          await this.sock.sendMessage(targetOwnerJid, {
-            image: cached.mediaBuffer,
-            caption: alertText,
-          });
+          let imageToSend = recoveredMediaBuffer;
+          try {
+            const sanitized = await sanitizeImageForWhatsApp(recoveredMediaBuffer);
+            imageToSend = sanitized.buffer;
+          } catch {}
+
+          try {
+            await this.sock.sendMessage(targetOwnerJid, {
+              image: imageToSend,
+              caption: mediaCaption,
+              mimetype: 'image/jpeg',
+            });
+          } catch (imgSendErr) {
+            console.warn('[Anti-Delete] Standard image send failed, delivering as document:', imgSendErr);
+            await this.sock.sendMessage(targetOwnerJid, {
+              document: imageToSend,
+              mimetype: 'image/jpeg',
+              fileName: `recovered_image_${Date.now()}.jpg`,
+              caption: mediaCaption,
+            });
+          }
         } else if (cached.mediaType === 'video') {
-          await this.sock.sendMessage(targetOwnerJid, {
-            video: cached.mediaBuffer,
-            caption: alertText,
-          });
+          // Double-check video validity with FFmpeg (+faststart, H.264 Baseline, AAC)
+          let videoToSend = recoveredMediaBuffer;
+          try {
+            const sanitized = await sanitizeVideoForWhatsApp(recoveredMediaBuffer);
+            videoToSend = sanitized.buffer;
+          } catch {}
+
+          try {
+            await this.sock.sendMessage(targetOwnerJid, {
+              video: videoToSend,
+              mimetype: 'video/mp4',
+              caption: mediaCaption,
+              gifPlayback: Boolean(cached.isGif),
+              ptv: Boolean(cached.isPtv),
+            });
+          } catch (vidSendErr) {
+            console.warn('[Anti-Delete] Standard video send failed, delivering as document:', vidSendErr);
+            await this.sock.sendMessage(targetOwnerJid, {
+              document: videoToSend,
+              mimetype: 'video/mp4',
+              fileName: `recovered_video_${Date.now()}.mp4`,
+              caption: mediaCaption,
+            });
+          }
         } else if (cached.mediaType === 'audio') {
           await this.sock.sendMessage(targetOwnerJid, { text: alertText });
           await this.sock.sendMessage(targetOwnerJid, {
-            audio: cached.mediaBuffer,
+            audio: recoveredMediaBuffer,
             mimetype: cached.mimetype || 'audio/ogg; codecs=opus',
             ptt: true,
           });
         } else if (cached.mediaType === 'sticker') {
           await this.sock.sendMessage(targetOwnerJid, { text: alertText });
           await this.sock.sendMessage(targetOwnerJid, {
-            sticker: cached.mediaBuffer,
+            sticker: recoveredMediaBuffer,
           });
         } else if (cached.mediaType === 'document') {
           await this.sock.sendMessage(targetOwnerJid, {
-            document: cached.mediaBuffer,
+            document: recoveredMediaBuffer,
             mimetype: cached.mimetype || 'application/octet-stream',
             fileName: cached.fileName || 'recovered_file',
-            caption: alertText,
+            caption: mediaCaption,
           });
         } else {
           await this.sock.sendMessage(targetOwnerJid, { text: alertText });
+        }
+
+        if (followUpText) {
+          await this.sock.sendMessage(targetOwnerJid, { text: followUpText }).catch(() => {});
         }
       } else {
         await this.sock.sendMessage(targetOwnerJid, { text: alertText });
@@ -1833,7 +2097,11 @@ export class WhatsAppManager {
           // Cache message for Anti-Delete recovery and .del commands
           if (msg.key.id) {
             const media = extractMediaFromMessage(rawMsg);
-            const cachedEntry = {
+            const msgId = msg.key.id;
+            const ext = media?.type === 'video' ? 'mp4' : media?.type === 'image' ? 'jpg' : media?.type === 'audio' ? 'ogg' : media?.type === 'sticker' ? 'webp' : 'bin';
+            const mediaDiskPath = media ? path.join(this.mediaCacheDir, `${msgId}.${ext}`) : undefined;
+
+            const cachedEntry: any = {
               key: msg.key,
               sender: senderNum,
               senderJid,
@@ -1844,28 +2112,54 @@ export class WhatsAppManager {
               group: isGroup ? remoteJid : undefined,
               groupName: isGroup ? this.groupSubjectCache.get(remoteJid) : undefined,
               mediaType: media?.type,
+              mediaTarget: media?.target,
+              mediaFilePath: mediaDiskPath,
               mimetype: media?.target?.mimetype,
               fileName: media?.target?.fileName,
+              isGif: media?.isGif,
+              isPtv: media?.isPtv,
             };
 
             // Download media buffer asynchronously for instant DM recovery if deleted
             if (media && (media.type === 'image' || media.type === 'video' || media.type === 'audio' || media.type === 'sticker' || media.type === 'document')) {
-              downloadMediaBuffer(media.target, media.type)
-                .then((buf) => {
-                  if (this.messageCache.get(msg.key.id!) !== cachedEntry) return;
-                  const cached = this.rememberMediaBuffer(`message:${msg.key.id}`, buf, () => {
-                    (cachedEntry as any).mediaBuffer = undefined;
-                  });
-                  if (cached) {
-                    (cachedEntry as any).mediaBuffer = buf;
+              const downloadPromise = downloadMediaBufferWithRetry(media.target, media.type, 3)
+                .then(async (buf) => {
+                  let finalBuf = buf;
+                  if (media.type === 'video') {
+                    const sanitized = await sanitizeVideoForWhatsApp(buf);
+                    finalBuf = sanitized.buffer;
+                  } else if (media.type === 'image') {
+                    const sanitized = await sanitizeImageForWhatsApp(buf);
+                    finalBuf = sanitized.buffer;
                   }
+
+                  if (mediaDiskPath) {
+                    try {
+                      fs.writeFileSync(mediaDiskPath, finalBuf);
+                    } catch (diskErr) {
+                      console.warn('[Anti-Delete] Failed writing media to disk cache:', diskErr);
+                    }
+                  }
+
+                  if (this.messageCache.get(msgId) === cachedEntry) {
+                    cachedEntry.mediaBuffer = finalBuf;
+                    this.rememberMediaBuffer(`message:${msgId}`, finalBuf, () => {
+                      cachedEntry.mediaBuffer = undefined;
+                    });
+                  }
+                  return finalBuf;
                 })
-                .catch(() => {});
+                .catch((err) => {
+                  console.warn(`[Anti-Delete] Background media download note for ${msgId}:`, err?.message);
+                  return null;
+                });
+
+              cachedEntry.mediaPromise = downloadPromise;
             }
 
-            this.deleteCachedMessage(msg.key.id);
-            this.messageCache.set(msg.key.id, cachedEntry);
-            if (this.messageCache.size > 1000) {
+            this.deleteCachedMessage(msgId);
+            this.messageCache.set(msgId, cachedEntry);
+            if (this.messageCache.size > 2500) {
               const firstKey = this.messageCache.keys().next().value;
               if (firstKey) this.deleteCachedMessage(firstKey);
             }
@@ -3630,7 +3924,13 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
     sock.ev.on('messages.update', async (updates) => {
       if (!this.antiDeleteEnabled) return;
       for (const update of updates) {
-        if (update.key?.id && (update.update?.message === null || (update.update as any)?.messageStubType === 1)) {
+        if (
+          update.key?.id &&
+          (update.update?.message === null ||
+            (update.update as any)?.messageStubType === 1 ||
+            (update.update as any)?.messageStubType === 2 ||
+            (update.update as any)?.messageStubType === 68)
+        ) {
           await this.handleMessageRevoke(update.key);
         }
       }
