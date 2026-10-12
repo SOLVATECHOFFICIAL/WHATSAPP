@@ -5,7 +5,7 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
-import { doc, runTransaction } from 'firebase/firestore';
+import { doc, getDoc, runTransaction } from 'firebase/firestore';
 import { sessionManager, whatsappManager } from './src/server/whatsapp.ts';
 import { commandHandler, SOLVATECH_MENU } from './src/server/commands.ts';
 import { db } from './src/services/firebase.ts';
@@ -74,11 +74,6 @@ async function startServer() {
       const verified = await session.syncLicenseFromFirestore();
       if (!verified) {
         return res.status(503).json({ success: false, error: 'Could not verify this account license from Firebase.' });
-      }
-      const store = getTrialStore();
-      if (store[userId]) {
-        store[userId].expiresAt = session.getStatus().licenseExpiresAt || null;
-        saveTrialStore(store);
       }
       res.json({
         success: true,
@@ -538,60 +533,38 @@ async function startServer() {
     }
   });
 
-  // 30-Minute Free Test Management Store (server-authoritative & persistent across restarts/devices)
-  const trialStorePath = path.resolve(process.cwd(), '.trial_store.json');
-  const getTrialStore = (): Record<string, { uid?: string; email?: string; hasUsedTrial: boolean; isReset?: boolean; lifetimeLocked?: boolean; expiresAt: string | null; claimedAt?: string; resetAt?: string }> => {
-    try {
-      if (fs.existsSync(trialStorePath)) {
-        const raw = fs.readFileSync(trialStorePath, 'utf-8');
-        return JSON.parse(raw) || {};
-      }
-    } catch {}
-    return {};
-  };
-
-  const saveTrialStore = (data: Record<string, any>) => {
-    try {
-      fs.writeFileSync(trialStorePath, JSON.stringify(data, null, 2), 'utf-8');
-    } catch {}
-  };
-
   // 1. Check Trial Status
-  app.get('/api/trial/status', (req, res) => {
+  app.get('/api/trial/status', async (req, res) => {
     try {
       const uid = (req.query.uid as string) || '';
       const email = ((req.query.email as string) || '').toLowerCase().trim();
-      const store = getTrialStore();
-
-      let userRecord = (uid && store[uid]) || (email && store[email]);
-      if (!userRecord && email) {
-        // Check case-insensitively
-        const matchKey = Object.keys(store).find(
-          (k) => k.toLowerCase() === email || store[k]?.email?.toLowerCase() === email
-        );
-        if (matchKey) userRecord = store[matchKey];
+      if (!uid && !email) {
+        return res.status(400).json({ success: false, error: 'A user ID or email is required.' });
       }
-
-      if (!userRecord) {
-        return res.json({
-          success: true,
-          hasUsedTrial: false,
-          isActive: false,
-          expiresAt: null,
-          remainingMs: 0,
-        });
-      }
-
+      const userSnap = uid ? await getDoc(doc(db, 'users', uid)) : null;
+      const userRecord = userSnap?.exists() ? userSnap.data() : null;
+      const accountEmail = email || (typeof userRecord?.email === 'string' ? userRecord.email.toLowerCase().trim() : '');
+      const emailKey = accountEmail.replace(/[^a-z0-9]/g, '_');
+      const trialSnap = accountEmail ? await getDoc(doc(db, 'claimed_trials', emailKey)) : null;
+      const trialRecord = trialSnap?.exists() ? trialSnap.data() : null;
+      const hasUsedTrial = Boolean(
+        trialRecord ||
+        userRecord?.hasUsedTrial ||
+        userRecord?.lifetimeTrialLocked
+      );
+      const expiresAt = typeof trialRecord?.expiresAt === 'string'
+        ? trialRecord.expiresAt
+        : (typeof userRecord?.trialClaimedAt === 'string' ? userRecord.licenseExpiresAt || null : null);
       const now = Date.now();
-      const expMs = userRecord.expiresAt ? new Date(userRecord.expiresAt).getTime() : 0;
+      const expMs = expiresAt ? new Date(expiresAt).getTime() : 0;
       const isActive = expMs > now;
       const remainingMs = isActive ? expMs - now : 0;
 
       return res.json({
         success: true,
-        hasUsedTrial: Boolean(userRecord.hasUsedTrial),
+        hasUsedTrial,
         isActive,
-        expiresAt: userRecord.expiresAt,
+        expiresAt,
         remainingMs,
       });
     } catch (err: any) {
@@ -611,15 +584,6 @@ async function startServer() {
       const cleanEmail = email;
       const cleanUid = uid;
       const cleanEmailKey = cleanEmail.replace(/[^a-z0-9]/g, '_');
-      const store = getTrialStore();
-
-      const existing = store[cleanUid] || (cleanEmail && store[cleanEmail]);
-      if (existing && existing.hasUsedTrial) {
-        return res.status(409).json({
-          success: false,
-          message: 'The 30-minute test is strictly once in a lifetime per user. It is permanently linked to your email in Firebase and cannot be claimed again.',
-        });
-      }
 
       const trialRef = doc(db, 'claimed_trials', cleanEmailKey);
       const userRef = doc(db, 'users', cleanUid);
@@ -672,18 +636,6 @@ async function startServer() {
         return { expiresAt: expiry, claimedAt };
       });
       const { expiresAt: newExpiresAt, claimedAt } = claim;
-
-      const record = {
-        uid: cleanUid,
-        email: cleanEmail,
-        hasUsedTrial: true,
-        lifetimeLocked: true,
-        claimedAt,
-        expiresAt: newExpiresAt,
-      };
-      store[cleanUid] = record;
-      store[cleanEmail] = record;
-      saveTrialStore(store);
 
       const session = sessionManager.getSession(cleanUid);
       await session.syncLicenseFromFirestore();
@@ -881,6 +833,37 @@ async function startServer() {
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`[SOLVATECH] Server listening on port ${PORT}`);
   });
+
+  let shutdownStarted = false;
+  const shutdown = (signal: NodeJS.Signals) => {
+    if (shutdownStarted) return;
+    shutdownStarted = true;
+    console.log(`[SOLVATECH] Received ${signal}; saving WhatsApp sessions before stopping.`);
+
+    const forceExit = setTimeout(() => {
+      console.error('[SOLVATECH] Graceful shutdown exceeded 15 seconds; exiting for the Railway restart.');
+      process.exit(1);
+    }, 15_000);
+    const serverClosed = new Promise<void>((resolve) => {
+      server.close(() => resolve());
+      server.closeAllConnections?.();
+    });
+
+    void (async () => {
+      try {
+        await sessionManager.shutdownForProcessExit();
+        await serverClosed;
+        clearTimeout(forceExit);
+        process.exit(0);
+      } catch (err) {
+        console.error('[SOLVATECH] Graceful shutdown failed:', err);
+        process.exit(1);
+      }
+    })();
+  };
+
+  process.once('SIGTERM', shutdown);
+  process.once('SIGINT', shutdown);
 }
 
 startServer().catch((err) => {

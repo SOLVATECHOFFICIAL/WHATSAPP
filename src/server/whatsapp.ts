@@ -15,12 +15,28 @@ import QRCode from 'qrcode';
 import fs from 'fs';
 import path from 'path';
 import { execSync } from 'child_process';
+import { createHash } from 'node:crypto';
 import sharp from 'sharp';
 import webpmux from 'node-webpmux';
 import { createWorker } from 'tesseract.js';
 import { commandHandler, parseSpamArgs, GROUP_ONLY_COMMANDS } from './commands.ts';
 import { db } from '../services/firebase.ts';
-import { doc, getDoc, setDoc, deleteDoc, collection, getDocs } from 'firebase/firestore';
+import { doc, getDoc, setDoc, deleteDoc, collection, getDocs, writeBatch } from 'firebase/firestore';
+
+const MAX_PROCESS_MEDIA_CACHE_BYTES = 64 * 1024 * 1024;
+const processMediaCache = new Map<string, { size: number; evict: () => void }>();
+let processMediaCacheBytes = 0;
+
+const hashSessionContent = (content: string) =>
+  createHash('sha256').update(content, 'utf8').digest('hex');
+
+const isSafeAuthFileName = (filename: string) =>
+  Boolean(filename) &&
+  filename !== '.' &&
+  filename !== '..' &&
+  path.basename(filename) === filename &&
+  !filename.includes('\\') &&
+  filename.endsWith('.json');
 
 // Helper: Retrieve official SOLVATECH brand image as buffer for WhatsApp messages (.menu, welcome, etc.)
 export async function getSolvaBrandBuffer(): Promise<Buffer | null> {
@@ -99,11 +115,11 @@ export function extractMediaFromMessage(msgObj: any): {
 // Helper: Download Baileys media stream to buffer
 export async function downloadMediaBuffer(target: any, type: any): Promise<Buffer> {
   const stream = await downloadContentFromMessage(target, type);
-  let buffer = Buffer.from([]);
+  const chunks: Buffer[] = [];
   for await (const chunk of stream) {
-    buffer = Buffer.concat([buffer, chunk]);
+    chunks.push(Buffer.from(chunk));
   }
-  return buffer;
+  return Buffer.concat(chunks);
 }
 
 // Helper: Create official WhatsApp WebP sticker with EXIF metadata
@@ -366,7 +382,11 @@ export class WhatsAppManager {
   private isConnecting = false;
   private firebaseSyncTimer: NodeJS.Timeout | null = null;
   private firebaseSyncPromise: Promise<void> | null = null;
+  private credentialsSavePromise: Promise<void> = Promise.resolve();
   private firebaseSyncPending = false;
+  private firebaseAuthFilesLoaded = false;
+  private firebaseAuthFileIds = new Map<string, string>();
+  private firebaseAuthFileHashes = new Map<string, string>();
   private isIntentionalClosure = false;
   private connectedAt: number | null = null;
   private initPromise: Promise<WASocket> | null = null;
@@ -382,28 +402,42 @@ export class WhatsAppManager {
   private userSpamPurgeState = new Map<string, { detectedAt: number; isPurging: boolean }>();
   private greetingDedupCache = new Map<string, number>();
   private pendingGreetings = new Map<string, { timer: NodeJS.Timeout; participants: Set<string>; action: 'add' | 'remove'; groupId: string }>();
-  private mediaCacheBytes = 0;
-  private mediaCache = new Map<string, { buffer: Buffer; evict: () => void }>();
+  private mediaCache = new Map<string, string>();
 
   private rememberMediaBuffer(key: string, buffer: Buffer, evict: () => void): boolean {
-    const maxCacheBytes = 32 * 1024 * 1024;
-    if (!buffer.length || buffer.length > maxCacheBytes) return false;
+    if (!buffer.length || buffer.length > MAX_PROCESS_MEDIA_CACHE_BYTES) return false;
     this.forgetMediaBuffer(key);
-    while (this.mediaCacheBytes + buffer.length > maxCacheBytes && this.mediaCache.size > 0) {
-      const oldestKey = this.mediaCache.keys().next().value;
-      if (!oldestKey) break;
-      this.forgetMediaBuffer(oldestKey);
+    while (processMediaCacheBytes + buffer.length > MAX_PROCESS_MEDIA_CACHE_BYTES && processMediaCache.size > 0) {
+      const oldestGlobalKey = processMediaCache.keys().next().value;
+      if (!oldestGlobalKey) break;
+      const oldest = processMediaCache.get(oldestGlobalKey);
+      processMediaCache.delete(oldestGlobalKey);
+      if (oldest) {
+        processMediaCacheBytes = Math.max(0, processMediaCacheBytes - oldest.size);
+        oldest.evict();
+      }
     }
-    this.mediaCache.set(key, { buffer, evict });
-    this.mediaCacheBytes += buffer.length;
+    const globalKey = `${this.userId}\u0000${key}`;
+    this.mediaCache.set(key, globalKey);
+    processMediaCache.set(globalKey, {
+      size: buffer.length,
+      evict: () => {
+        this.mediaCache.delete(key);
+        evict();
+      },
+    });
+    processMediaCacheBytes += buffer.length;
     return true;
   }
 
   private forgetMediaBuffer(key: string) {
-    const cached = this.mediaCache.get(key);
-    if (!cached) return;
+    const globalKey = this.mediaCache.get(key);
+    if (!globalKey) return;
     this.mediaCache.delete(key);
-    this.mediaCacheBytes = Math.max(0, this.mediaCacheBytes - cached.buffer.length);
+    const cached = processMediaCache.get(globalKey);
+    if (!cached) return;
+    processMediaCache.delete(globalKey);
+    processMediaCacheBytes = Math.max(0, processMediaCacheBytes - cached.size);
     cached.evict();
   }
 
@@ -984,6 +1018,26 @@ export class WhatsAppManager {
 
       let restoredAny = false;
       const sessionDocId = `session_${this.sanitizedUserId}`;
+      try {
+        const authFiles = await getDocs(collection(db, 'whatsapp_sessions', sessionDocId, 'auth_files'));
+        this.firebaseAuthFilesLoaded = true;
+        for (const authFile of authFiles.docs) {
+          const data = authFile.data();
+          const filename = typeof data.fileName === 'string' ? data.fileName : '';
+          const content = typeof data.content === 'string' ? data.content : '';
+          if (!isSafeAuthFileName(filename) || !content) continue;
+          fs.writeFileSync(path.join(this.authDir, filename), content, 'utf-8');
+          this.firebaseAuthFileIds.set(filename, authFile.id);
+          this.firebaseAuthFileHashes.set(filename, data.sha256 || hashSessionContent(content));
+          restoredAny = true;
+        }
+        if (restoredAny) {
+          console.log(`[WhatsApp Auth (${this.userId})] Restored ${authFiles.size} session files from Firebase.`);
+        }
+      } catch (err) {
+        console.warn(`[WhatsApp Auth (${this.userId})] Firebase auth-file restore note:`, err);
+      }
+
       let fullSnap = await getDoc(doc(db, 'whatsapp_sessions', sessionDocId));
       if (!fullSnap.exists() && this.sanitizedUserId === 'default') {
         fullSnap = await getDoc(doc(db, 'whatsapp_sessions', 'current_session'));
@@ -993,7 +1047,7 @@ export class WhatsAppManager {
         const data = fullSnap.data();
 
         // 1. Direct creds restoration (100% reliable, never exceeds 1MB Firestore limit)
-        if (data?.credsData && typeof data.credsData === 'string') {
+        if (data?.credsData && typeof data.credsData === 'string' && !fs.existsSync(credsPath)) {
           fs.writeFileSync(credsPath, data.credsData, 'utf-8');
           console.log(`[WhatsApp Auth (${this.userId})] Restored core creds.json directly from Firebase!`);
           restoredAny = true;
@@ -1011,12 +1065,12 @@ export class WhatsAppManager {
 
         if (sessionFiles && Object.keys(sessionFiles).length > 0) {
           for (const [filename, content] of Object.entries(sessionFiles)) {
-            if (typeof content === 'string' && filename) {
-              fs.writeFileSync(path.join(this.authDir, filename), content, 'utf-8');
+            const filePath = path.join(this.authDir, filename);
+            if (typeof content === 'string' && isSafeAuthFileName(filename) && !fs.existsSync(filePath)) {
+              fs.writeFileSync(filePath, content, 'utf-8');
+              restoredAny = true;
             }
           }
-          console.log(`[WhatsApp Auth (${this.userId})] Restored ${Object.keys(sessionFiles).length} session files from Firebase Firestore!`);
-          restoredAny = true;
         }
       }
 
@@ -1053,6 +1107,9 @@ export class WhatsAppManager {
           }
         } catch {}
 
+        // Migrate older single-document Firebase sessions to per-file storage
+        // immediately, not only after the next credential rotation.
+        this.scheduleFirebaseCredsSync();
         const licenseVerified = await this.syncLicenseFromFirestore();
         if (licenseVerified && !this.isLicenseExpired() && !this.sock && !this.isConnecting) {
           console.log(`[WhatsApp Auth (${this.userId})] Valid license detected! Reconnecting socket immediately...`);
@@ -1097,100 +1154,127 @@ export class WhatsAppManager {
       const credsPath = path.join(this.authDir, 'creds.json');
       if (!fs.existsSync(credsPath)) return;
 
-      const credsContent = fs.readFileSync(credsPath, 'utf-8');
-      const fileNames = fs.readdirSync(this.authDir)
-        .filter((filename) => filename !== 'creds.json' && filename.endsWith('.json') && !filename.endsWith('.tmp'))
-        .sort((a, b) => {
-          const priority = (filename: string) => {
-            if (filename.startsWith('session-') || filename.startsWith('pre-key-')) return 0;
-            if (filename.startsWith('app-state-sync-key-')) return 1;
-            if (filename.startsWith('identity-key-') || filename.startsWith('lid-mapping-')) return 2;
-            if (filename.startsWith('sender-key-')) return 3;
-            return 4;
-          };
-          return priority(a) - priority(b) || a.localeCompare(b);
-        });
-      const sessionFiles: Record<string, string> = {};
-
-      // Firestore's limit applies to the whole document. Estimate the encoded
-      // JSON field (including escaping), the duplicate creds field, and metadata.
-      const MAX_FIRESTORE_DOCUMENT_BYTES = 900_000;
-      const documentOverheadBytes = 4096;
-      const fixedDocumentBytes =
-        Buffer.byteLength(credsContent, 'utf8') +
-        Buffer.byteLength(this.userId, 'utf8') +
-        Buffer.byteLength(this.userEmail, 'utf8') +
-        documentOverheadBytes;
-      if (fixedDocumentBytes + 2 > MAX_FIRESTORE_DOCUMENT_BYTES) {
-        console.warn(`[WhatsApp Auth (${this.userId})] Firebase session save skipped: core credentials exceed the safe Firestore document budget.`);
-        return;
+      const sessionDocId = `session_${this.sanitizedUserId}`;
+      const authFilesCollection = collection(db, 'whatsapp_sessions', sessionDocId, 'auth_files');
+      if (!this.firebaseAuthFilesLoaded) {
+        const storedFiles = await getDocs(authFilesCollection);
+        for (const storedFile of storedFiles.docs) {
+          const data = storedFile.data();
+          const filename = typeof data.fileName === 'string' ? data.fileName : '';
+          if (!isSafeAuthFileName(filename)) continue;
+          this.firebaseAuthFileIds.set(filename, storedFile.id);
+          if (typeof data.content === 'string') {
+            this.firebaseAuthFileHashes.set(
+              filename,
+              typeof data.sha256 === 'string' ? data.sha256 : hashSessionContent(data.content)
+            );
+          }
+        }
+        this.firebaseAuthFilesLoaded = true;
       }
 
-      let serializedSessionBytes = 2; // Empty JSON object: {}
-      let includedFileCount = 0;
-      let skippedFileCount = 0;
-
-      for (const f of fileNames) {
-        if (
-          f.startsWith('app-state-sync-version-') ||
-          f.startsWith('sender-key-status@')
-        ) {
-          // Skip giant version caches: Baileys re-fetches them automatically without losing credentials
+      const localFiles = new Map<string, string>();
+      for (const filename of fs.readdirSync(this.authDir)) {
+        if (!isSafeAuthFileName(filename) || filename.startsWith('app-state-sync-version-') || filename.startsWith('sender-key-status@')) {
           continue;
         }
+        localFiles.set(filename, fs.readFileSync(path.join(this.authDir, filename), 'utf-8'));
+      }
 
-        try {
-          const content = fs.readFileSync(path.join(this.authDir, f), 'utf-8');
-          const entryBytes =
-            Buffer.byteLength(JSON.stringify(f), 'utf8') +
-            1 + // colon between the JSON key and value
-            Buffer.byteLength(JSON.stringify(content), 'utf8') +
-            (includedFileCount > 0 ? 1 : 0); // comma between entries
-          if (fixedDocumentBytes + serializedSessionBytes + entryBytes <= MAX_FIRESTORE_DOCUMENT_BYTES) {
-            sessionFiles[f] = content;
-            serializedSessionBytes += entryBytes;
-            includedFileCount += 1;
-          } else {
-            skippedFileCount += 1;
+      // Store each Baileys auth file separately so Firestore's per-document
+      // limit cannot silently drop keys from a large multi-file session.
+      const MAX_AUTH_FILE_DOCUMENT_BYTES = 900_000;
+      const writes: Array<{ filename: string; id: string; content: string; sha256: string }> = [];
+      for (const [filename, content] of localFiles) {
+        if (Buffer.byteLength(filename, 'utf8') + Buffer.byteLength(content, 'utf8') + 2048 > MAX_AUTH_FILE_DOCUMENT_BYTES) {
+          console.error(`[WhatsApp Auth (${this.userId})] Cannot persist ${filename}: the individual auth file exceeds Firestore's safe document limit.`);
+          return;
+        }
+        const sha256 = hashSessionContent(content);
+        if (this.firebaseAuthFileHashes.get(filename) !== sha256) {
+          writes.push({
+            filename,
+            id: Buffer.from(filename, 'utf8').toString('base64url'),
+            content,
+            sha256,
+          });
+        }
+      }
+
+      const deletes = Array.from(this.firebaseAuthFileIds.entries())
+        .filter(([filename]) => !localFiles.has(filename));
+      let filesChanged = writes.length > 0 || deletes.length > 0;
+      for (let index = 0; index < writes.length; index += 400) {
+        const chunk = writes.slice(index, index + 400);
+        const batch = writeBatch(db);
+        for (const file of chunk) {
+          batch.set(doc(db, 'whatsapp_sessions', sessionDocId, 'auth_files', file.id), {
+            fileName: file.filename,
+            content: file.content,
+            sha256: file.sha256,
+            updatedAt: new Date().toISOString(),
+          });
+        }
+        await batch.commit();
+        for (const file of chunk) {
+          this.firebaseAuthFileIds.set(file.filename, file.id);
+          this.firebaseAuthFileHashes.set(file.filename, file.sha256);
+        }
+      }
+      for (let index = 0; index < deletes.length; index += 400) {
+        const chunk = deletes.slice(index, index + 400);
+        const batch = writeBatch(db);
+        for (const [, id] of chunk) {
+          batch.delete(doc(db, 'whatsapp_sessions', sessionDocId, 'auth_files', id));
+        }
+        await batch.commit();
+        for (const [filename] of chunk) {
+          this.firebaseAuthFileIds.delete(filename);
+          this.firebaseAuthFileHashes.delete(filename);
+        }
+      }
+
+      if (filesChanged) {
+        // Retain a bounded legacy snapshot for older app versions. New versions
+        // restore the complete auth_files collection above.
+        const credsContent = localFiles.get('creds.json') || '';
+        const legacyFiles: Record<string, string> = {};
+        const maxLegacyBytes = 900_000;
+        const legacyFixedBytes =
+          Buffer.byteLength(this.userId, 'utf8') +
+          Buffer.byteLength(this.userEmail, 'utf8') +
+          4096;
+        let legacyBytes = 2;
+        let legacyCreds = credsContent;
+        if (legacyFixedBytes + Buffer.byteLength(legacyCreds, 'utf8') > maxLegacyBytes) {
+          legacyCreds = '';
+        } else {
+          for (const [filename, content] of localFiles) {
+            if (filename === 'creds.json') continue;
+            const entryBytes =
+              Buffer.byteLength(JSON.stringify(filename), 'utf8') +
+              Buffer.byteLength(JSON.stringify(content), 'utf8') +
+              2 +
+              (Object.keys(legacyFiles).length ? 1 : 0);
+            if (legacyFixedBytes + Buffer.byteLength(legacyCreds, 'utf8') + legacyBytes + entryBytes <= maxLegacyBytes) {
+              legacyFiles[filename] = content;
+              legacyBytes += entryBytes;
+            }
           }
-        } catch {}
-      }
-      const rawSessionData = JSON.stringify(sessionFiles);
-      const estimatedDocumentBytes =
-        fixedDocumentBytes + Buffer.byteLength(rawSessionData, 'utf8');
-      if (estimatedDocumentBytes > MAX_FIRESTORE_DOCUMENT_BYTES) {
-        console.warn(`[WhatsApp Auth (${this.userId})] Firebase session save skipped: serialized document estimate is ${estimatedDocumentBytes} bytes.`);
-        return;
-      }
-      if (skippedFileCount > 0) {
-        console.warn(`[WhatsApp Auth (${this.userId})] Firebase session save omitted ${skippedFileCount} lower-priority auth files to stay under Firestore's document limit.`);
-      }
-
-      const sessionDocId = `session_${this.sanitizedUserId}`;
-      // credsData is stored once; Baileys' multi-file keys are kept in the
-      // bounded rawSessionData field.
-      await setDoc(
-        doc(db, 'whatsapp_sessions', sessionDocId),
-        {
-          userId: this.userId,
-          userEmail: this.userEmail,
-          credsData: credsContent,
-          rawSessionData,
-          updatedAt: new Date().toISOString()
-        },
-        { merge: true }
-      );
-
-      if (this.sanitizedUserId === 'default') {
+        }
+        const legacySnapshot = {
+          credsData: legacyCreds,
+          rawSessionData: JSON.stringify(legacyFiles),
+          updatedAt: new Date().toISOString(),
+        };
         await setDoc(
-          doc(db, 'whatsapp_sessions', 'current_session'),
-          {
-            credsData: credsContent,
-            rawSessionData,
-            updatedAt: new Date().toISOString()
-          },
+          doc(db, 'whatsapp_sessions', sessionDocId),
+          { userId: this.userId, userEmail: this.userEmail, authFormatVersion: 2, ...legacySnapshot },
           { merge: true }
         );
+        if (this.sanitizedUserId === 'default') {
+          await setDoc(doc(db, 'whatsapp_sessions', 'current_session'), legacySnapshot, { merge: true });
+        }
       }
 
       // Also persist connected status to users collection
@@ -1212,9 +1296,33 @@ export class WhatsAppManager {
     }
   }
 
+  public async flushFirebaseCredsSync(): Promise<void> {
+    if (this.firebaseSyncTimer) {
+      clearTimeout(this.firebaseSyncTimer);
+      this.firebaseSyncTimer = null;
+    }
+    this.firebaseSyncPending = false;
+    await this.credentialsSavePromise.catch(() => {});
+    if (this.firebaseSyncPromise) {
+      await this.firebaseSyncPromise.catch(() => {});
+    }
+    await this.syncCredsToFirebase();
+  }
+
   private async clearCredsFromFirebase() {
     try {
       const sessionDocId = `session_${this.sanitizedUserId}`;
+      const authFiles = await getDocs(collection(db, 'whatsapp_sessions', sessionDocId, 'auth_files'));
+      for (let index = 0; index < authFiles.docs.length; index += 400) {
+        const batch = writeBatch(db);
+        for (const authFile of authFiles.docs.slice(index, index + 400)) {
+          batch.delete(authFile.ref);
+        }
+        await batch.commit();
+      }
+      this.firebaseAuthFileIds.clear();
+      this.firebaseAuthFileHashes.clear();
+      this.firebaseAuthFilesLoaded = false;
       await deleteDoc(doc(db, 'whatsapp_sessions', sessionDocId));
       if (this.sanitizedUserId === 'default') {
         await deleteDoc(doc(db, 'whatsapp_sessions', 'current_session'));
@@ -1313,7 +1421,8 @@ export class WhatsAppManager {
         this.sock = sock;
 
         sock.ev.on('creds.update', (creds) => {
-          saveCreds()
+          this.credentialsSavePromise = this.credentialsSavePromise
+            .then(() => saveCreds())
             .then(() => this.scheduleFirebaseCredsSync())
             .catch((err) => console.warn('[WhatsApp Auth] Local credential save failed:', err));
           // Registration confirms the companion is paired; only connection.update("open")
@@ -1817,10 +1926,18 @@ export class WhatsAppManager {
             try {
               const groupMeta = await this.getCachedGroupMetadata(sock, remoteJid);
               if (groupMeta?.participants) {
+                const senderLidPhone = this.getLidReverseMapping(senderNum);
+                const senderIds = new Set([senderNum, senderLidPhone].filter(Boolean));
                 const p = groupMeta.participants.find(
                   (x: any) => {
-                    const cleanP = x.id?.split('@')[0]?.split(':')[0]?.replace(/\D/g, '');
-                    return cleanP === senderNum || x.id === senderJid || (msg.key.participant && x.id === msg.key.participant);
+                    const participantIds = [x.id, x.phoneNumber, x.lid]
+                      .filter((value: any) => typeof value === 'string')
+                      .map((value: string) => value.split('@')[0].split(':')[0].replace(/\D/g, ''));
+                    return (
+                      participantIds.some((id: string) => senderIds.has(id)) ||
+                      x.id === senderJid ||
+                      (msg.key.participant && x.id === msg.key.participant)
+                    );
                   }
                 );
                 isSenderAdmin = p?.admin === 'admin' || p?.admin === 'superadmin';
@@ -2268,8 +2385,12 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                   const rawBuf = await downloadMediaBuffer(media.target, 'image');
                   const pngBuf = await sharp(rawBuf).toFormat('png').toBuffer();
                   const worker = await createWorker('eng');
-                  const ret = await worker.recognize(pngBuf);
-                  await worker.terminate();
+                  let ret;
+                  try {
+                    ret = await worker.recognize(pngBuf);
+                  } finally {
+                    await worker.terminate();
+                  }
 
                   const extractedText = ret.data.text.trim();
                   if (!extractedText) {
@@ -3062,8 +3183,15 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                   }
 
                   const targetClean = targetJid.split('@')[0].replace(/\D/g, '');
+                  const targetLidPhone = this.getLidReverseMapping(targetClean);
+                  const targetIds = new Set([targetClean, targetLidPhone].filter(Boolean));
                   const targetInGroup = groupMeta?.participants?.find(
-                    (p: any) => p.id.replace(/\D/g, '') === targetClean || p.id === targetJid
+                    (p: any) => {
+                      const participantIds = [p.id, p.phoneNumber, p.lid]
+                        .filter((value: any) => typeof value === 'string')
+                        .map((value: string) => value.split('@')[0].split(':')[0].replace(/\D/g, ''));
+                      return participantIds.some((id: string) => targetIds.has(id)) || p.id === targetJid;
+                    }
                   );
 
                   if (!targetInGroup) {
@@ -3390,6 +3518,9 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
       try {
         const { id: groupId, participants, action } = update;
         if (!groupId || !groupId.endsWith('@g.us')) return;
+        // Promotion/demotion events must invalidate all per-session metadata
+        // caches so every connected bot immediately uses the new admin roster.
+        this.invalidateGroupMetaCache(groupId);
         if (action !== 'add' && action !== 'remove') return;
 
         const sec = commandHandler.getSecuritySettings(groupId);
@@ -4185,7 +4316,6 @@ export class WhatsAppSessionManager {
     try {
       if (!fs.existsSync(this.baseAuthDir)) {
         fs.mkdirSync(this.baseAuthDir, { recursive: true });
-        return;
       }
 
       // 1. Scan local session folders
@@ -4254,6 +4384,7 @@ export class WhatsAppSessionManager {
   }
 
   private sync5MinInterval: NodeJS.Timeout | null = null;
+  private globalSyncRunning = false;
   private lastSyncStats = {
     totalChecked: 0,
     activeOnline: 0,
@@ -4284,7 +4415,21 @@ export class WhatsAppSessionManager {
   }
 
   public async runGlobal5MinSync(): Promise<{ totalChecked: number; activeOnline: number; reconnected: number; expiredDisconnected: number }> {
-    console.log('[Global 5-Min Sync] 🌍 Executing worldwide 5-minute sync for all users and active license sessions...');
+    if (this.globalSyncRunning) {
+      console.warn('[Global 5-Min Sync] Skipping this pass because the previous pass is still running.');
+      return {
+        totalChecked: 0,
+        activeOnline: 0,
+        reconnected: 0,
+        expiredDisconnected: 0,
+      };
+    }
+    this.globalSyncRunning = true;
+    const { rss, heapUsed, external } = process.memoryUsage();
+    console.log(
+      `[Runtime Memory] rss=${Math.round(rss / 1048576)}MB heap=${Math.round(heapUsed / 1048576)}MB external=${Math.round(external / 1048576)}MB sessions=${this.sessions.size} mediaCache=${Math.round(processMediaCacheBytes / 1048576)}MB`
+    );
+    console.log('[Global 5-Min Sync] Auditing paired sessions and active connections...');
     let totalChecked = 0;
     let activeOnline = 0;
     let reconnected = 0;
@@ -4320,17 +4465,7 @@ export class WhatsAppSessionManager {
         console.debug('[Global 5-Min Sync] Firestore whatsapp_sessions note:', err);
       }
 
-      // 4. Gather users from Firestore users collection
-      try {
-        const userDocs = await getDocs(collection(db, 'users'));
-        for (const docSnap of userDocs.docs) {
-          userIds.add(docSnap.id);
-        }
-      } catch (err) {
-        console.debug('[Global 5-Min Sync] Firestore users note:', err);
-      }
-
-      console.log(`[Global 5-Min Sync] Auditing ${userIds.size} registered users across the globe...`);
+      console.log(`[Global 5-Min Sync] Auditing ${userIds.size} paired or active sessions.`);
 
       for (const uid of userIds) {
         totalChecked++;
@@ -4430,6 +4565,8 @@ export class WhatsAppSessionManager {
       console.log(`[Global 5-Min Sync] ✅ Worldwide sync complete! Total: ${totalChecked}, Active Online: ${activeOnline}, Healed/Reconnected: ${reconnected}, Expired Disconnected: ${expiredDisconnected}`);
     } catch (err) {
       console.error('[Global 5-Min Sync] Error during worldwide sync:', err);
+    } finally {
+      this.globalSyncRunning = false;
     }
 
     return { totalChecked, activeOnline, reconnected, expiredDisconnected };
@@ -4437,6 +4574,17 @@ export class WhatsAppSessionManager {
 
   public getAllSessions(): Map<string, WhatsAppManager> {
     return this.sessions;
+  }
+
+  public async shutdownForProcessExit(): Promise<void> {
+    if (this.sync5MinInterval) {
+      clearInterval(this.sync5MinInterval);
+      this.sync5MinInterval = null;
+    }
+    const sessions = Array.from(this.sessions.values());
+    await Promise.allSettled(sessions.map((session) => session.flushFirebaseCredsSync()));
+    await Promise.allSettled(sessions.map((session) => session.pauseSocket('Railway process shutdown')));
+    await Promise.allSettled(sessions.map((session) => session.flushFirebaseCredsSync()));
   }
 
   public async getAllStatuses(): Promise<Record<string, any>> {
