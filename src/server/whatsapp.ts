@@ -20,7 +20,7 @@ import sharp from 'sharp';
 import webpmux from 'node-webpmux';
 import { createWorker } from 'tesseract.js';
 import { commandHandler, parseSpamArgs, GROUP_ONLY_COMMANDS } from './commands.ts';
-import { db } from '../services/firebase.ts';
+import { db, isFirestoreQuotaExhausted, reportFirestoreError } from '../services/firebase.ts';
 import { doc, getDoc, setDoc, deleteDoc, collection, getDocs, writeBatch } from 'firebase/firestore';
 
 const MAX_PROCESS_MEDIA_CACHE_BYTES = 64 * 1024 * 1024;
@@ -565,10 +565,15 @@ export class WhatsAppManager {
   }
 
   public async syncLicenseFromFirestore(): Promise<boolean> {
+    if (isFirestoreQuotaExhausted()) {
+      return Boolean(this.sessionLicenseExpiresAt || this.isSessionUnlimited || this.isOwnerEmail());
+    }
     try {
       if (this.userId && this.userId !== 'default') {
         const snap = await getDoc(doc(db, 'users', this.userId));
-        if (!snap.exists()) return false;
+        if (!snap.exists()) {
+          return Boolean(this.sessionLicenseExpiresAt || this.isSessionUnlimited || this.isOwnerEmail());
+        }
 
         const d = snap.data();
         if (typeof d?.email === 'string' && d.email.trim()) {
@@ -594,7 +599,9 @@ export class WhatsAppManager {
               if (uld?.activeKey) this.sessionLicenseKey = uld.activeKey;
               if (uld?.plan && !this.sessionLicensePlan) this.sessionLicensePlan = uld.plan;
             }
-          } catch {}
+          } catch (ulErr) {
+            reportFirestoreError(ulErr);
+          }
         }
         // A saved finite expiry always wins over an unlimited flag.
         const isUnlim = this.isOwnerEmail() || (!expAt && Boolean(d?.isUnlimited));
@@ -602,10 +609,14 @@ export class WhatsAppManager {
         console.log(`[License Sync (${this.userId})] Synced from Firestore: expiresAt=${this.sessionLicenseExpiresAt}, key=${this.sessionLicenseKey}, plan=${this.sessionLicensePlan}`);
         return true;
       }
-    } catch (err) {
-      console.debug(`Firestore license sync note for ${this.userId}:`, err);
+    } catch (err: any) {
+      reportFirestoreError(err);
+      console.debug(`Firestore license sync note for ${this.userId}:`, err?.message || err);
+      if (this.sessionLicenseExpiresAt || this.isSessionUnlimited || this.isOwnerEmail()) {
+        return true;
+      }
     }
-    return false;
+    return Boolean(this.sessionLicenseExpiresAt || this.isSessionUnlimited || this.isOwnerEmail());
   }
 
   public isOwnerEmail(): boolean {
@@ -1100,72 +1111,84 @@ export class WhatsAppManager {
 
       let restoredAny = false;
       const sessionDocId = `session_${this.sanitizedUserId}`;
-      try {
-        const authFiles = await getDocs(collection(db, 'whatsapp_sessions', sessionDocId, 'auth_files'));
-        this.firebaseAuthFilesLoaded = true;
-        for (const authFile of authFiles.docs) {
-          const data = authFile.data();
-          const filename = typeof data.fileName === 'string' ? data.fileName : '';
-          const content = typeof data.content === 'string' ? data.content : '';
-          if (!isSafeAuthFileName(filename) || !content) continue;
-          fs.writeFileSync(path.join(this.authDir, filename), content, 'utf-8');
-          this.firebaseAuthFileIds.set(filename, authFile.id);
-          this.firebaseAuthFileHashes.set(filename, data.sha256 || hashSessionContent(content));
-          restoredAny = true;
-        }
-        if (restoredAny) {
-          console.log(`[WhatsApp Auth (${this.userId})] Restored ${authFiles.size} session files from Firebase.`);
-        }
-      } catch (err) {
-        console.warn(`[WhatsApp Auth (${this.userId})] Firebase auth-file restore note:`, err);
-      }
-
-      let fullSnap = await getDoc(doc(db, 'whatsapp_sessions', sessionDocId));
-      if (!fullSnap.exists() && this.sanitizedUserId === 'default') {
-        fullSnap = await getDoc(doc(db, 'whatsapp_sessions', 'current_session'));
-      }
-
-      if (fullSnap.exists()) {
-        const data = fullSnap.data();
-
-        // 1. Direct creds restoration (100% reliable, never exceeds 1MB Firestore limit)
-        if (data?.credsData && typeof data.credsData === 'string' && !fs.existsSync(credsPath)) {
-          fs.writeFileSync(credsPath, data.credsData, 'utf-8');
-          console.log(`[WhatsApp Auth (${this.userId})] Restored core creds.json directly from Firebase!`);
-          restoredAny = true;
+      if (!isFirestoreQuotaExhausted()) {
+        try {
+          const authFiles = await getDocs(collection(db, 'whatsapp_sessions', sessionDocId, 'auth_files'));
+          this.firebaseAuthFilesLoaded = true;
+          for (const authFile of authFiles.docs) {
+            const data = authFile.data();
+            const filename = typeof data.fileName === 'string' ? data.fileName : '';
+            const content = typeof data.content === 'string' ? data.content : '';
+            if (!isSafeAuthFileName(filename) || !content) continue;
+            fs.writeFileSync(path.join(this.authDir, filename), content, 'utf-8');
+            this.firebaseAuthFileIds.set(filename, authFile.id);
+            this.firebaseAuthFileHashes.set(filename, data.sha256 || hashSessionContent(content));
+            restoredAny = true;
+          }
+          if (restoredAny) {
+            console.log(`[WhatsApp Auth (${this.userId})] Restored ${authFiles.size} session files from Firebase.`);
+          }
+        } catch (err: any) {
+          reportFirestoreError(err);
+          console.warn(`[WhatsApp Auth (${this.userId})] Firebase auth-file restore note:`, err?.message || err);
         }
 
-        // 2. Multi-file companion session keys restoration
-        let sessionFiles: Record<string, string> | null = null;
-        if (data?.rawSessionData && typeof data.rawSessionData === 'string') {
-          try {
-            sessionFiles = JSON.parse(data.rawSessionData);
-          } catch {}
-        } else if (data?.files && typeof data.files === 'object') {
-          sessionFiles = data.files;
-        }
+        try {
+          let fullSnap: any = await getDoc(doc(db, 'whatsapp_sessions', sessionDocId));
+          if (!fullSnap.exists() && this.sanitizedUserId === 'default') {
+            fullSnap = await getDoc(doc(db, 'whatsapp_sessions', 'current_session'));
+          }
 
-        if (sessionFiles && Object.keys(sessionFiles).length > 0) {
-          for (const [filename, content] of Object.entries(sessionFiles)) {
-            const filePath = path.join(this.authDir, filename);
-            if (typeof content === 'string' && isSafeAuthFileName(filename) && !fs.existsSync(filePath)) {
-              fs.writeFileSync(filePath, content, 'utf-8');
+          if (fullSnap && fullSnap.exists()) {
+            const data = fullSnap.data();
+
+            // 1. Direct creds restoration (100% reliable, never exceeds 1MB Firestore limit)
+            if (data?.credsData && typeof data.credsData === 'string' && !fs.existsSync(credsPath)) {
+              fs.writeFileSync(credsPath, data.credsData, 'utf-8');
+              console.log(`[WhatsApp Auth (${this.userId})] Restored core creds.json directly from Firebase!`);
               restoredAny = true;
             }
+
+            // 2. Multi-file companion session keys restoration
+            let sessionFiles: Record<string, string> | null = null;
+            if (data?.rawSessionData && typeof data.rawSessionData === 'string') {
+              try {
+                sessionFiles = JSON.parse(data.rawSessionData);
+              } catch {}
+            } else if (data?.files && typeof data.files === 'object') {
+              sessionFiles = data.files;
+            }
+
+            if (sessionFiles && Object.keys(sessionFiles).length > 0) {
+              for (const [filename, content] of Object.entries(sessionFiles)) {
+                const filePath = path.join(this.authDir, filename);
+                if (!fs.existsSync(filePath) && isSafeAuthFileName(filename)) {
+                  fs.writeFileSync(filePath, content, 'utf-8');
+                  restoredAny = true;
+                }
+              }
+            }
           }
+        } catch (err: any) {
+          reportFirestoreError(err);
+          console.warn(`[WhatsApp Auth (${this.userId})] Firebase session snapshot restore note:`, err?.message || err);
         }
       }
 
       // Fallback to legacy single creds document
-      if (!restoredAny && this.sanitizedUserId === 'default') {
-        const snap = await getDoc(doc(db, 'whatsapp_sessions', 'current_creds'));
-        if (snap.exists()) {
-          const credsData = snap.data();
-          if (credsData?.rawCreds) {
-            fs.writeFileSync(credsPath, credsData.rawCreds, 'utf-8');
-            console.log('[WhatsApp Auth] Restored authentication session from Firebase Firestore!');
-            restoredAny = true;
+      if (!restoredAny && this.sanitizedUserId === 'default' && !isFirestoreQuotaExhausted()) {
+        try {
+          const snap = await getDoc(doc(db, 'whatsapp_sessions', 'current_creds'));
+          if (snap.exists()) {
+            const credsData = snap.data();
+            if (credsData?.rawCreds) {
+              fs.writeFileSync(credsPath, credsData.rawCreds, 'utf-8');
+              console.log('[WhatsApp Auth] Restored authentication session from Firebase Firestore!');
+              restoredAny = true;
+            }
           }
+        } catch (cErr: any) {
+          reportFirestoreError(cErr);
         }
       }
 
@@ -1208,9 +1231,11 @@ export class WhatsAppManager {
 
   // Persist session credentials to Firebase Firestore so restarts/new host deployments retain connection
   private scheduleFirebaseCredsSync() {
+    if (isFirestoreQuotaExhausted()) return;
     if (this.firebaseSyncTimer) clearTimeout(this.firebaseSyncTimer);
     this.firebaseSyncTimer = setTimeout(() => {
       this.firebaseSyncTimer = null;
+      if (isFirestoreQuotaExhausted()) return;
       if (this.firebaseSyncPromise) {
         this.firebaseSyncPending = true;
         return;
@@ -1222,15 +1247,18 @@ export class WhatsAppManager {
         if (this.firebaseSyncPromise === syncPromise) {
           this.firebaseSyncPromise = null;
         }
-        if (this.firebaseSyncPending) {
+        if (this.firebaseSyncPending && !isFirestoreQuotaExhausted()) {
           this.firebaseSyncPending = false;
           this.scheduleFirebaseCredsSync();
+        } else {
+          this.firebaseSyncPending = false;
         }
       }).catch(() => {});
-    }, 1000);
+    }, 15000);
   }
 
   private async syncCredsToFirebase() {
+    if (isFirestoreQuotaExhausted()) return;
     try {
       if (!fs.existsSync(this.authDir)) return;
       const credsPath = path.join(this.authDir, 'creds.json');
@@ -1373,8 +1401,9 @@ export class WhatsAppManager {
           { merge: true }
         );
       }
-    } catch (e) {
-      console.warn('[WhatsApp Auth] Firebase sync creds note:', e);
+    } catch (e: any) {
+      reportFirestoreError(e);
+      console.warn('[WhatsApp Auth] Firebase sync creds note:', e?.message || e);
     }
   }
 
@@ -4592,15 +4621,18 @@ export class WhatsAppSessionManager {
       }
 
       // 3. Gather cloud sessions from Firestore
-      try {
-        const sessionDocs = await getDocs(collection(db, 'whatsapp_sessions'));
-        for (const docSnap of sessionDocs.docs) {
-          if (docSnap.id.startsWith('session_')) {
-            userIds.add(docSnap.id.replace(/^session_/, ''));
+      if (!isFirestoreQuotaExhausted()) {
+        try {
+          const sessionDocs = await getDocs(collection(db, 'whatsapp_sessions'));
+          for (const docSnap of sessionDocs.docs) {
+            if (docSnap.id.startsWith('session_')) {
+              userIds.add(docSnap.id.replace(/^session_/, ''));
+            }
           }
+        } catch (err: any) {
+          reportFirestoreError(err);
+          console.debug('[Global 5-Min Sync] Firestore whatsapp_sessions note:', err?.message || err);
         }
-      } catch (err) {
-        console.debug('[Global 5-Min Sync] Firestore whatsapp_sessions note:', err);
       }
 
       console.log(`[Global 5-Min Sync] Auditing ${userIds.size} paired or active sessions.`);

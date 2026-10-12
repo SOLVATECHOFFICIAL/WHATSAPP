@@ -1,4 +1,4 @@
-import { db } from './firebase';
+import { db, isFirestoreQuotaExhausted, reportFirestoreError } from './firebase';
 import {
   collection,
   doc,
@@ -661,39 +661,7 @@ export async function checkUserTrialStatus(
   const cleanEmail = (userEmail || '').trim().toLowerCase();
   const cleanEmailKey = cleanEmail ? cleanEmail.replace(/[^a-z0-9]/g, '_') : '';
 
-  // 1. Check Firestore claimed_trials collection by sanitized email (PERMANENT LIFETIME RECORD)
-  if (cleanEmailKey) {
-    try {
-      const trialRef = doc(db, 'claimed_trials', cleanEmailKey);
-      const snap = await getDoc(trialRef);
-      if (snap.exists()) {
-        const d = snap.data();
-        if (d?.claimedAt || d?.expiresAt || d?.userEmail) {
-          return true; // PERMANENT ONCE IN A LIFETIME LOCK
-        }
-      }
-    } catch (e) {
-      console.warn('Claimed trial Firestore check note:', e);
-    }
-  }
-
-  // 2. Check Firestore users collection by UID
-  if (userUid) {
-    try {
-      const userRef = doc(db, 'users', userUid);
-      const snap = await getDoc(userRef);
-      if (snap.exists()) {
-        const data = snap.data();
-        if (data?.hasUsedTrial === true || data?.trialClaimedAt) {
-          return true; // PERMANENT ONCE IN A LIFETIME LOCK
-        }
-      }
-    } catch (e) {
-      console.warn('User trial status check note:', e);
-    }
-  }
-
-  // 3. Check persistent server trial store
+  // 1. Check persistent server trial endpoint first (authoritative and protects Firestore quota)
   try {
     const q = new URLSearchParams();
     if (userUid) q.set('uid', userUid);
@@ -707,6 +675,39 @@ export async function checkUserTrialStatus(
     }
   } catch (apiErr) {
     console.debug('Server trial status check note:', apiErr);
+  }
+
+  // 2. Client-side fallback if server was unreachable and quota is available
+  if (!isFirestoreQuotaExhausted()) {
+    if (cleanEmailKey) {
+      try {
+        const trialRef = doc(db, 'claimed_trials', cleanEmailKey);
+        const snap = await getDoc(trialRef);
+        if (snap.exists()) {
+          const d = snap.data();
+          if (d?.claimedAt || d?.expiresAt || d?.userEmail) {
+            return true;
+          }
+        }
+      } catch (e: any) {
+        reportFirestoreError(e);
+      }
+    }
+
+    if (userUid) {
+      try {
+        const userRef = doc(db, 'users', userUid);
+        const snap = await getDoc(userRef);
+        if (snap.exists()) {
+          const data = snap.data();
+          if (data?.hasUsedTrial === true || data?.trialClaimedAt) {
+            return true;
+          }
+        }
+      } catch (e: any) {
+        reportFirestoreError(e);
+      }
+    }
   }
 
   return false;

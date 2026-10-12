@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { db } from '../services/firebase.ts';
+import { db, isFirestoreQuotaExhausted, reportFirestoreError } from '../services/firebase.ts';
 import { collection, doc, setDoc, getDoc, getDocs, onSnapshot, runTransaction, writeBatch } from 'firebase/firestore';
 
 export interface CommandContext {
@@ -198,6 +198,7 @@ class CommandHandler {
   // Real-time synchronization: When any admin toggles an anti or welcome setting in Firebase,
   // it immediately syncs to all other admin bots so they stay 100% in lockstep.
   private setupRealtimeSecuritySync() {
+    if (isFirestoreQuotaExhausted()) return;
     try {
       onSnapshot(
         collection(db, 'group_security'),
@@ -221,15 +222,18 @@ class CommandHandler {
           this.saveSettingsToCache();
         },
         (err) => {
-          console.warn('Real-time group_security snapshot listener note:', err);
+          reportFirestoreError(err);
+          console.warn('Real-time group_security snapshot listener note:', err?.message || err);
         }
       );
-    } catch (err) {
-      console.warn('Real-time security sync listener setup note:', err);
+    } catch (err: any) {
+      reportFirestoreError(err);
+      console.warn('Real-time security sync listener setup note:', err?.message || err);
     }
   }
 
   private setupRealtimeWarningSync() {
+    if (isFirestoreQuotaExhausted()) return;
     try {
       onSnapshot(
         collection(db, 'group_warnings'),
@@ -249,10 +253,14 @@ class CommandHandler {
           });
           this.saveWarningsToCache();
         },
-        (err) => console.warn('Real-time group_warnings snapshot listener note:', err)
+        (err) => {
+          reportFirestoreError(err);
+          console.warn('Real-time group_warnings snapshot listener note:', err?.message || err);
+        }
       );
-    } catch (err) {
-      console.warn('Real-time warning sync listener setup note:', err);
+    } catch (err: any) {
+      reportFirestoreError(err);
+      console.warn('Real-time warning sync listener setup note:', err?.message || err);
     }
   }
 
@@ -394,7 +402,7 @@ class CommandHandler {
   public async loadAccountSecuritySettings(accountId: string): Promise<void> {
     const cleanAccountId = accountId.trim();
     if (!cleanAccountId || cleanAccountId === 'default' || this.accountSecurityProfileUnsubscribes.has(cleanAccountId)) return;
-    if ((this.accountSecurityProfileRetryAfter.get(cleanAccountId) || 0) > Date.now()) return;
+    if (isFirestoreQuotaExhausted() || (this.accountSecurityProfileRetryAfter.get(cleanAccountId) || 0) > Date.now()) return;
     const pending = this.accountSecurityProfileLoads.get(cleanAccountId);
     if (pending) return pending;
 
@@ -414,13 +422,17 @@ class CommandHandler {
             }
             this.accountSecuritySettings[cleanAccountId] = this.normalizeSecuritySettings(snapshot.data());
           },
-          (err) => console.warn('Real-time account group-security sync note:', err)
+          (err) => {
+            reportFirestoreError(err);
+            console.warn('Real-time account group-security sync note:', err?.message || err);
+          }
         );
         this.accountSecurityProfileUnsubscribes.set(cleanAccountId, unsubscribe);
         this.accountSecurityProfileRetryAfter.delete(cleanAccountId);
-      } catch (err) {
-        this.accountSecurityProfileRetryAfter.set(cleanAccountId, Date.now() + 30_000);
-        console.warn('Firebase account group-security profile note:', err);
+      } catch (err: any) {
+        reportFirestoreError(err);
+        this.accountSecurityProfileRetryAfter.set(cleanAccountId, Date.now() + 60_000);
+        console.warn('Firebase account group-security profile note:', err?.message || err);
       }
     })();
     this.accountSecurityProfileLoads.set(cleanAccountId, load);
@@ -442,8 +454,14 @@ class CommandHandler {
 
   // Sync settings or warnings to Firebase
   public async syncToFirebase(collectionName: string, id: string, data: any) {
-    const docRef = doc(db, collectionName, id);
-    await setDoc(docRef, { ...data, updatedAt: new Date().toISOString() }, { merge: true });
+    if (isFirestoreQuotaExhausted()) return;
+    try {
+      const docRef = doc(db, collectionName, id);
+      await setDoc(docRef, { ...data, updatedAt: new Date().toISOString() }, { merge: true });
+    } catch (err: any) {
+      reportFirestoreError(err);
+      console.warn(`[commands] syncToFirebase (${collectionName}/${id}) note:`, err?.message || err);
+    }
   }
 
   // DEFAULT FOR ALL GROUPS: KEEPING EVERYTHING ON (true)

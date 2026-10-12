@@ -8,7 +8,7 @@ import dotenv from 'dotenv';
 import { doc, getDoc, runTransaction } from 'firebase/firestore';
 import { sessionManager, whatsappManager } from './src/server/whatsapp.ts';
 import { commandHandler, SOLVATECH_MENU } from './src/server/commands.ts';
-import { db } from './src/services/firebase.ts';
+import { db, isFirestoreQuotaExhausted, reportFirestoreError } from './src/services/firebase.ts';
 
 dotenv.config();
 
@@ -211,6 +211,7 @@ async function startServer() {
       if (code === 'KEY_DURATION_INVALID') return res.status(422).json({ success: false, message: 'This license key has an invalid duration. No time was added.' });
       if (code === 'ACCOUNT_UNLIMITED') return res.status(409).json({ success: false, message: 'This account already has unlimited access. Its access was not changed and the key remains unused.' });
       if (code === 'ACCOUNT_NOT_FOUND' || code === 'ACCOUNT_EMAIL_MISMATCH') return res.status(403).json({ success: false, message: 'Could not verify this signed-in account. Please sign in again.' });
+      reportFirestoreError(err);
       console.error('Atomic license redemption failed:', err);
       res.status(503).json({ success: false, message: 'License could not be saved. No time was added and the key was not consumed; please retry.' });
     }
@@ -546,12 +547,35 @@ async function startServer() {
       if (!uid && !email) {
         return res.status(400).json({ success: false, error: 'A user ID or email is required.' });
       }
-      const userSnap = uid ? await getDoc(doc(db, 'users', uid)) : null;
-      const userRecord = userSnap?.exists() ? userSnap.data() : null;
-      const accountEmail = email || (typeof userRecord?.email === 'string' ? userRecord.email.toLowerCase().trim() : '');
-      const emailKey = accountEmail.replace(/[^a-z0-9]/g, '_');
-      const trialSnap = accountEmail ? await getDoc(doc(db, 'claimed_trials', emailKey)) : null;
-      const trialRecord = trialSnap?.exists() ? trialSnap.data() : null;
+
+      let userRecord: any = null;
+      let trialRecord: any = null;
+
+      if (!isFirestoreQuotaExhausted()) {
+        try {
+          const userSnap = uid ? await getDoc(doc(db, 'users', uid)) : null;
+          userRecord = userSnap?.exists() ? userSnap.data() : null;
+          const accountEmail = email || (typeof userRecord?.email === 'string' ? userRecord.email.toLowerCase().trim() : '');
+          const emailKey = accountEmail.replace(/[^a-z0-9]/g, '_');
+          const trialSnap = accountEmail ? await getDoc(doc(db, 'claimed_trials', emailKey)) : null;
+          trialRecord = trialSnap?.exists() ? trialSnap.data() : null;
+        } catch (fErr: any) {
+          reportFirestoreError(fErr);
+        }
+      }
+
+      // Local fallback to .trial_store.json if Firestore is exhausted or offline
+      if (!trialRecord) {
+        try {
+          const trialStorePath = path.resolve(__dirname, '.trial_store.json');
+          if (fs.existsSync(trialStorePath)) {
+            const store = JSON.parse(fs.readFileSync(trialStorePath, 'utf-8'));
+            const emailKey = email ? email.replace(/[^a-z0-9]/g, '_') : '';
+            trialRecord = (emailKey && store[emailKey]) || (uid && store[uid]) || null;
+          }
+        } catch {}
+      }
+
       const hasUsedTrial = Boolean(
         trialRecord ||
         userRecord?.hasUsedTrial ||
@@ -573,7 +597,8 @@ async function startServer() {
         remainingMs,
       });
     } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message });
+      reportFirestoreError(err);
+      res.json({ success: true, hasUsedTrial: false, isActive: false, remainingMs: 0 });
     }
   });
 
@@ -642,8 +667,20 @@ async function startServer() {
       });
       const { expiresAt: newExpiresAt, claimedAt } = claim;
 
+      try {
+        const trialStorePath = path.resolve(__dirname, '.trial_store.json');
+        let store: Record<string, any> = {};
+        if (fs.existsSync(trialStorePath)) {
+          try { store = JSON.parse(fs.readFileSync(trialStorePath, 'utf-8')); } catch {}
+        }
+        store[cleanEmailKey] = { userUid: cleanUid, userEmail: cleanEmail, expiresAt: newExpiresAt, claimedAt, lifetimeLocked: true };
+        store[cleanUid] = { userUid: cleanUid, userEmail: cleanEmail, expiresAt: newExpiresAt, claimedAt, lifetimeLocked: true };
+        fs.writeFileSync(trialStorePath, JSON.stringify(store, null, 2), 'utf-8');
+      } catch {}
+
       const session = sessionManager.getSession(cleanUid);
-      await session.syncLicenseFromFirestore();
+      session.setSessionLicense(newExpiresAt, false);
+      await session.syncLicenseFromFirestore().catch(() => {});
 
       res.json({
         success: true,
@@ -651,6 +688,7 @@ async function startServer() {
         expiresAt: newExpiresAt,
       });
     } catch (err: any) {
+      reportFirestoreError(err);
       const message = String(err?.message || '');
       if (message === 'TRIAL_ALREADY_CLAIMED') {
         return res.status(409).json({ success: false, message: 'The 30-minute trial has already been claimed for this account.' });

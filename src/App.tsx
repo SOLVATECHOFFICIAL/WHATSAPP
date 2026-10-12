@@ -324,7 +324,18 @@ export default function App() {
               }
             },
             (err) => {
-              console.debug('Firestore user listener in offline mode:', err.message);
+              console.debug('Firestore user listener in offline mode:', err?.message || err);
+              fetch(`/api/whatsapp/status?userId=${encodeURIComponent(user.uid)}`)
+                .then((r) => r.json())
+                .then((st) => {
+                  if (st?.status?.licenseExpiresAt) {
+                    setUserLicenseData((prev) => ({
+                      ...prev,
+                      expiresAt: st.status.licenseExpiresAt,
+                    }));
+                  }
+                })
+                .catch(() => {});
             }
           );
         } catch (e) {
