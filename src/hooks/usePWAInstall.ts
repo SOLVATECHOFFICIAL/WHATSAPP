@@ -1,13 +1,33 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 
 interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>;
   userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>;
 }
 
+const STORAGE_KEY_INSTALLED = 'solvatech_pwa_installed';
+const STORAGE_KEY_DISMISSED = 'solvatech_pwa_banner_hidden';
+
 export function usePWAInstall() {
   const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
-  const [isInstalled, setIsInstalled] = useState(false);
+  const [isInstalled, setIsInstalled] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    const isStandalone =
+      window.matchMedia('(display-mode: standalone)').matches ||
+      (window.navigator as unknown as { standalone?: boolean }).standalone === true ||
+      document.referrer.includes('android-app://');
+    const storedInstalled = localStorage.getItem(STORAGE_KEY_INSTALLED) === 'true';
+    return isStandalone || storedInstalled;
+  });
+
+  const [isBannerHidden, setIsBannerHidden] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    return (
+      localStorage.getItem(STORAGE_KEY_INSTALLED) === 'true' ||
+      localStorage.getItem(STORAGE_KEY_DISMISSED) === 'true'
+    );
+  });
+
   const [isIOS, setIsIOS] = useState(false);
   const [isAndroid, setIsAndroid] = useState(false);
   const [isInAppBrowser, setIsInAppBrowser] = useState(false);
@@ -18,7 +38,15 @@ export function usePWAInstall() {
       window.matchMedia('(display-mode: standalone)').matches ||
       (window.navigator as unknown as { standalone?: boolean }).standalone === true ||
       document.referrer.includes('android-app://');
-    setIsInstalled(isStandalone);
+    const storedInstalled = localStorage.getItem(STORAGE_KEY_INSTALLED) === 'true';
+    const storedDismissed = localStorage.getItem(STORAGE_KEY_DISMISSED) === 'true';
+
+    if (isStandalone || storedInstalled) {
+      setIsInstalled(true);
+      setIsBannerHidden(true);
+    } else if (storedDismissed) {
+      setIsBannerHidden(true);
+    }
 
     // Detect platform
     const userAgent = window.navigator.userAgent.toLowerCase();
@@ -43,8 +71,13 @@ export function usePWAInstall() {
 
     const handleAppInstalled = () => {
       setIsInstalled(true);
+      setIsBannerHidden(true);
       setDeferredPrompt(null);
       (window as any).__pwaPrompt = null;
+      try {
+        localStorage.setItem(STORAGE_KEY_INSTALLED, 'true');
+        localStorage.setItem(STORAGE_KEY_DISMISSED, 'true');
+      } catch {}
     };
 
     window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
@@ -56,6 +89,22 @@ export function usePWAInstall() {
     };
   }, []);
 
+  const markAsInstalledOnPhone = useCallback(() => {
+    setIsInstalled(true);
+    setIsBannerHidden(true);
+    try {
+      localStorage.setItem(STORAGE_KEY_INSTALLED, 'true');
+      localStorage.setItem(STORAGE_KEY_DISMISSED, 'true');
+    } catch {}
+  }, []);
+
+  const dismissBannerPermanently = useCallback(() => {
+    setIsBannerHidden(true);
+    try {
+      localStorage.setItem(STORAGE_KEY_DISMISSED, 'true');
+    } catch {}
+  }, []);
+
   const install = async () => {
     if (!deferredPrompt) return false;
     try {
@@ -63,7 +112,12 @@ export function usePWAInstall() {
       const { outcome } = await deferredPrompt.userChoice;
       if (outcome === 'accepted') {
         setIsInstalled(true);
+        setIsBannerHidden(true);
         setDeferredPrompt(null);
+        try {
+          localStorage.setItem(STORAGE_KEY_INSTALLED, 'true');
+          localStorage.setItem(STORAGE_KEY_DISMISSED, 'true');
+        } catch {}
         return true;
       }
     } catch (err) {
@@ -76,9 +130,12 @@ export function usePWAInstall() {
     isInstallable: !!deferredPrompt,
     hasPrompt: !!deferredPrompt,
     isInstalled,
+    isBannerHidden,
     isIOS,
     isAndroid,
     isInAppBrowser,
     install,
+    markAsInstalledOnPhone,
+    dismissBannerPermanently,
   };
 }

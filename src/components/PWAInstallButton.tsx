@@ -1,17 +1,26 @@
 import React, { useState } from 'react';
-import { Download, Smartphone, CheckCircle2 } from 'lucide-react';
+import { Download, Smartphone, CheckCircle2, X } from 'lucide-react';
 import { usePWAInstall } from '../hooks/usePWAInstall';
 
 export const PWAInstallButton: React.FC<{
   variant?: 'button' | 'banner';
 }> = ({ variant = 'button' }) => {
-  const { hasPrompt, isInstalled, isIOS, install } = usePWAInstall();
+  const {
+    isInstalled,
+    isBannerHidden,
+    isIOS,
+    install,
+    markAsInstalledOnPhone,
+    dismissBannerPermanently,
+  } = usePWAInstall();
+
   const [isPrompting, setIsPrompting] = useState(false);
   const [justInstalled, setJustInstalled] = useState(false);
+  const [justDismissed, setJustDismissed] = useState(false);
   const [iosMessage, setIosMessage] = useState(false);
 
-  // If already installed in standalone mode, hide
-  if (isInstalled && !justInstalled) {
+  // If already installed or banner hidden, do not show banner
+  if ((isInstalled || isBannerHidden) && !justInstalled && !justDismissed) {
     return null;
   }
 
@@ -20,7 +29,6 @@ export const PWAInstallButton: React.FC<{
     e.stopPropagation();
 
     if (isIOS) {
-      // iOS Safari does not support beforeinstallprompt API
       setIosMessage(true);
       setTimeout(() => setIosMessage(false), 5000);
       return;
@@ -31,6 +39,7 @@ export const PWAInstallButton: React.FC<{
       const accepted = await install();
       if (accepted) {
         setJustInstalled(true);
+        setTimeout(() => setJustInstalled(false), 4000);
       }
     } catch (err) {
       console.warn('Install error:', err);
@@ -39,20 +48,56 @@ export const PWAInstallButton: React.FC<{
     }
   };
 
+  const handleAlreadyOnPhone = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    markAsInstalledOnPhone();
+    setJustDismissed(true);
+    setTimeout(() => setJustDismissed(false), 2500);
+  };
+
+  const handleDismiss = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dismissBannerPermanently();
+    setJustDismissed(true);
+    setTimeout(() => setJustDismissed(false), 2500);
+  };
+
   if (justInstalled) {
     return (
-      <span className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-emerald-400 bg-emerald-950/80 rounded-xl border border-emerald-500/40">
-        <CheckCircle2 className="w-3.5 h-3.5" />
-        <span>Added to Home Screen</span>
-      </span>
+      <div className="mb-4 flex items-center justify-center gap-2 rounded-2xl border border-emerald-500/40 bg-emerald-950/90 p-3 text-xs font-bold text-emerald-300 shadow-lg">
+        <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+        <span>SOLVATECH App added to Home Screen! Banner removed.</span>
+      </div>
     );
   }
 
-  // Banner mode: Real 1-click install button to add to home screen
+  if (justDismissed) {
+    return (
+      <div className="mb-4 flex items-center justify-center gap-2 rounded-2xl border border-slate-700 bg-slate-900/90 p-3 text-xs font-semibold text-slate-300 shadow-md">
+        <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+        <span>App install banner removed permanently.</span>
+      </div>
+    );
+  }
+
+  // Banner mode: 1-click install with permanent "Already on my phone" dismissal
   if (variant === 'banner') {
     return (
       <div className="relative mb-4 overflow-hidden rounded-2xl border border-emerald-500/40 bg-gradient-to-r from-emerald-950/90 via-slate-900/95 to-cyan-950/90 p-3.5 shadow-xl backdrop-blur-md">
-        <div className="flex flex-col sm:flex-row items-center justify-between gap-3">
+        {/* Dismiss 'X' button */}
+        <button
+          type="button"
+          onClick={handleDismiss}
+          aria-label="Dismiss banner permanently"
+          className="absolute top-2.5 right-2.5 p-1 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800/80 transition-colors cursor-pointer"
+          title="Dismiss banner"
+        >
+          <X className="w-4 h-4" />
+        </button>
+
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 pr-6 sm:pr-0">
           <div className="flex items-center gap-3">
             <div className="relative w-12 h-12 shrink-0 rounded-2xl overflow-hidden ring-2 ring-emerald-500/50 shadow-md bg-slate-900">
               <img src="/solva.webp" alt="SOLVATECH App" className="w-full h-full object-cover" />
@@ -78,14 +123,27 @@ export const PWAInstallButton: React.FC<{
               </p>
             </div>
           </div>
-          <button
-            onClick={handleInstallClick}
-            disabled={isPrompting}
-            className="w-full sm:w-auto flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 px-5 py-2.5 text-xs font-bold text-slate-950 shadow-lg shadow-emerald-500/20 hover:from-emerald-400 hover:to-teal-400 active:scale-95 transition cursor-pointer shrink-0"
-          >
-            <Download className="w-4 h-4 shrink-0" />
-            <span>{isPrompting ? 'Adding...' : 'Add to Home Screen'}</span>
-          </button>
+
+          <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto justify-end shrink-0">
+            <button
+              type="button"
+              onClick={handleAlreadyOnPhone}
+              className="text-[11px] text-slate-400 hover:text-white px-2.5 py-2 rounded-xl hover:bg-slate-800/80 transition-colors font-medium cursor-pointer"
+              title="Hide banner because you already installed it on your phone"
+            >
+              Already on my phone ✓
+            </button>
+
+            <button
+              type="button"
+              onClick={handleInstallClick}
+              disabled={isPrompting}
+              className="flex-1 sm:flex-initial flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 px-4 py-2 text-xs font-bold text-slate-950 shadow-lg shadow-emerald-500/20 hover:from-emerald-400 hover:to-teal-400 active:scale-95 transition cursor-pointer shrink-0"
+            >
+              <Download className="w-3.5 h-3.5 shrink-0" />
+              <span>{isPrompting ? 'Adding...' : 'Add to Home Screen'}</span>
+            </button>
+          </div>
         </div>
       </div>
     );

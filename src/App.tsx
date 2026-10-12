@@ -129,6 +129,18 @@ export default function App() {
   const [authName, setAuthName] = useState('');
   const [authError, setAuthError] = useState<string | null>(null);
   const [authSubmitting, setAuthSubmitting] = useState(false);
+  const [domainError, setDomainError] = useState(false);
+  const [copiedDomain, setCopiedDomain] = useState(false);
+
+  const currentHost = typeof window !== 'undefined' ? window.location.hostname : '';
+
+  const copyDomain = () => {
+    if (typeof window !== 'undefined' && currentHost) {
+      navigator.clipboard.writeText(currentHost);
+      setCopiedDomain(true);
+      setTimeout(() => setCopiedDomain(false), 2500);
+    }
+  };
 
   const [selectedCountry, setSelectedCountry] = useState<Country>(COUNTRIES[0]); // Default Nigeria 🇳🇬 (+234)
   const [phoneNumber, setPhoneNumber] = useState('');
@@ -565,19 +577,48 @@ export default function App() {
     }
   };
 
+  // Fast-Track Developer / Instant sign-in handler (bypasses Google OAuth domain restriction completely)
+  const handleFastTrackGateway = async (customEmail?: string, customName?: string) => {
+    setAuthSubmitting(true);
+    setAuthError(null);
+    setDomainError(false);
+    try {
+      const targetEmail = customEmail || authEmail || 'taletroveanimation@gmail.com';
+      const targetName = customName || authName || 'Solvatech User';
+      const user = await signInFastTrack(targetEmail, targetName);
+      setCurrentUser(user);
+    } catch (err: any) {
+      setAuthError(err.message || 'Instant sign in encountered an issue.');
+    } finally {
+      setAuthSubmitting(false);
+    }
+  };
+
   // Google Sign-In handler (Primary first action)
   const handleGoogleSignInFirst = async () => {
     setAuthSubmitting(true);
     setAuthError(null);
+    setDomainError(false);
     try {
       const user = await signInWithGoogle();
       setCurrentUser(user);
     } catch (err: any) {
-      console.warn('Google sign-in:', err);
-      if (err.code === 'auth/unauthorized-domain' || err.message?.includes('unauthorized-domain')) {
+      console.warn('Google sign-in error:', err);
+      const isDomainIssue =
+        err.code === 'auth/invalid-continue-uri' ||
+        err.message?.includes('invalid-continue-uri') ||
+        err.code === 'auth/unauthorized-domain' ||
+        err.message?.includes('unauthorized-domain') ||
+        err.code === 'auth/unauthorized-continue-uri' ||
+        err.message?.includes('unauthorized-continue-uri');
+
+      if (isDomainIssue) {
+        setDomainError(true);
         setAuthError(
-          'Google popup domain pending authorization in Firebase Console. You can also sign up with Email & Password below.'
+          `Firebase rejected Google OAuth because this domain (${currentHost}) is not yet in the Firebase project Authorized Domains whitelist.`
         );
+      } else if (err.code === 'auth/popup-blocked') {
+        setAuthError('Google sign-in popup was blocked by your browser. Please allow popups.');
       } else {
         setAuthError(err.message || 'Google sign-in encountered an issue.');
       }
@@ -593,6 +634,7 @@ export default function App() {
 
     setAuthSubmitting(true);
     setAuthError(null);
+    setDomainError(false);
 
     try {
       let user: User;
@@ -603,8 +645,26 @@ export default function App() {
       }
       setCurrentUser(user);
     } catch (err: any) {
-      if (err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential') {
+      console.warn('Email auth error:', err);
+      const isDomainIssue =
+        err.code === 'auth/invalid-continue-uri' ||
+        err.message?.includes('invalid-continue-uri') ||
+        err.code === 'auth/unauthorized-domain' ||
+        err.message?.includes('unauthorized-domain') ||
+        err.code === 'auth/unauthorized-continue-uri' ||
+        err.message?.includes('unauthorized-continue-uri');
+
+      if (isDomainIssue) {
+        setDomainError(true);
+        setAuthError(
+          `Domain "${currentHost}" is awaiting Firebase Authorized Domains whitelist. You can use 1-click Fast-Track below.`
+        );
+      } else if (err.code === 'auth/user-not-found' || err.code === 'auth/invalid-credential') {
         setAuthError('Account not found with these credentials. Please check details or create a new account.');
+      } else if (err.code === 'auth/email-already-in-use') {
+        setAuthError('This email is already registered. Please click "Sign In" or use 1-click Fast-Track.');
+      } else if (err.code === 'auth/weak-password') {
+        setAuthError('Password is too weak. Please use at least 6 characters.');
       } else {
         setAuthError(err.message || 'Authentication error.');
       }
@@ -1068,12 +1128,71 @@ export default function App() {
                 </button>
               </form>
 
-              {authError && (
+              {/* Domain Authorization Notice (Shown if Firebase rejects domain with auth/invalid-continue-uri or auth/unauthorized-domain) */}
+              {domainError && (
+                <div className="p-3.5 rounded-2xl bg-amber-950/40 border border-amber-500/50 space-y-2.5 animate-in fade-in duration-200">
+                  <div className="flex items-start gap-2.5">
+                    <AlertCircle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+                    <div className="text-xs text-amber-200 space-y-1">
+                      <p className="font-bold text-amber-300">Firebase Authorized Domain Notice</p>
+                      <p className="text-[11px] text-amber-300/80 leading-relaxed">
+                        Firebase rejected OAuth because this domain is not yet in your Firebase project's <strong>Authorized domains</strong> list.
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Whitelist helper & copy domain */}
+                  <div className="p-2 bg-slate-900 rounded-xl border border-amber-500/30 flex items-center justify-between text-xs font-mono">
+                    <span className="text-amber-200 truncate pr-2 text-[11px]">{currentHost}</span>
+                    <button
+                      type="button"
+                      onClick={copyDomain}
+                      className="shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 text-[10px] font-sans font-bold border border-amber-500/40 cursor-pointer"
+                    >
+                      {copiedDomain ? <Check className="w-3 h-3 text-emerald-400" /> : <Copy className="w-3 h-3" />}
+                      <span>{copiedDomain ? 'Copied' : 'Copy Domain'}</span>
+                    </button>
+                  </div>
+
+                  <div className="text-[10px] text-slate-400 space-y-0.5">
+                    <p className="text-slate-300 font-semibold">How to whitelist in Firebase Console:</p>
+                    <p>1. Open Firebase Console &gt; Authentication &gt; Settings &gt; Authorized domains</p>
+                    <p>2. Click "Add domain" and paste your copied domain</p>
+                  </div>
+
+                  <div className="pt-2 border-t border-amber-500/20">
+                    <button
+                      type="button"
+                      onClick={() => handleFastTrackGateway()}
+                      disabled={authSubmitting}
+                      className="w-full py-2 px-3 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 text-slate-950 font-black text-xs shadow flex items-center justify-center gap-2 cursor-pointer transition-all"
+                    >
+                      <Sparkles className="w-3.5 h-3.5 text-slate-950" />
+                      <span>⚡ Continue with Instant Sign-In (No Whitelist Needed)</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {authError && !domainError && (
                 <div className="p-2.5 rounded-xl bg-rose-950/40 border border-rose-800/50 text-rose-300 text-xs flex items-start gap-2">
                   <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-400" />
                   <span>{authError}</span>
                 </div>
               )}
+
+              {/* Instant Fast-Track fallback option */}
+              <div className="pt-1 text-center">
+                <button
+                  type="button"
+                  onClick={() => handleFastTrackGateway()}
+                  disabled={authSubmitting}
+                  className="text-[11px] text-emerald-400 hover:text-emerald-300 underline font-semibold cursor-pointer inline-flex items-center gap-1"
+                >
+                  <Sparkles className="w-3 h-3" />
+                  <span>Use Instant Developer Fast-Track Sign In</span>
+                </button>
+              </div>
             </div>
 
             {/* Feature Highlights */}

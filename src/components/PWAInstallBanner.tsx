@@ -1,16 +1,24 @@
 import React, { useState } from 'react';
-import { Download, X, Smartphone, Sparkles, CheckCircle2 } from 'lucide-react';
+import { Download, X, Sparkles, CheckCircle2 } from 'lucide-react';
 import { usePWAInstall } from '../hooks/usePWAInstall';
 
 export const PWAInstallBanner: React.FC = () => {
-  const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
-  const [isDismissed, setIsDismissed] = useState(false);
+  const {
+    isInstallable,
+    isInstalled,
+    isBannerHidden,
+    isIOS,
+    install,
+    markAsInstalledOnPhone,
+    dismissBannerPermanently,
+  } = usePWAInstall();
+
   const [isInstalling, setIsInstalling] = useState(false);
   const [justInstalled, setJustInstalled] = useState(false);
   const [iosNotice, setIosNotice] = useState(false);
 
-  // If already installed, running in standalone mode, or user dismissed for this session
-  if (isInstalled || isDismissed) {
+  // If already installed on phone, running in standalone mode, or user dismissed permanently
+  if (isInstalled || isBannerHidden) {
     return null;
   }
 
@@ -30,18 +38,25 @@ export const PWAInstallBanner: React.FC = () => {
       const accepted = await install();
       if (accepted) {
         setJustInstalled(true);
-        setTimeout(() => setIsDismissed(true), 3000);
       }
     } finally {
       setIsInstalling(false);
     }
   };
 
+  const handleDismiss = () => {
+    dismissBannerPermanently();
+  };
+
+  const handleAlreadyInstalled = () => {
+    markAsInstalledOnPhone();
+  };
+
   if (justInstalled) {
     return (
       <div className="bg-emerald-950/90 border-b border-emerald-500/30 px-4 py-2 text-center text-xs font-bold text-emerald-300 flex items-center justify-center gap-2">
         <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-        SOLVATECH App added to Home Screen successfully!
+        SOLVATECH App added to Home Screen successfully! Banner removed.
       </div>
     );
   }
@@ -82,6 +97,15 @@ export const PWAInstallBanner: React.FC = () => {
 
         <div className="flex items-center gap-2 w-full sm:w-auto justify-end shrink-0">
           <button
+            type="button"
+            onClick={handleAlreadyInstalled}
+            className="text-[11px] text-slate-400 hover:text-white px-2 py-1 rounded-lg hover:bg-slate-800/80 transition-colors cursor-pointer"
+            title="Already installed on phone"
+          >
+            Already on phone ✓
+          </button>
+
+          <button
             onClick={handleInstallClick}
             disabled={isInstalling}
             className="flex-1 sm:flex-initial flex items-center justify-center gap-2 bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 hover:to-teal-400 text-slate-950 font-bold text-xs px-4 py-2 rounded-lg shadow-md shadow-emerald-500/25 active:scale-95 transition-all cursor-pointer"
@@ -91,10 +115,10 @@ export const PWAInstallBanner: React.FC = () => {
           </button>
 
           <button
-            onClick={() => setIsDismissed(true)}
+            onClick={handleDismiss}
             aria-label="Dismiss install banner"
-            className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800/80 transition-colors"
-            title="Dismiss"
+            className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800/80 transition-colors cursor-pointer"
+            title="Dismiss banner"
           >
             <X className="w-4 h-4" />
           </button>

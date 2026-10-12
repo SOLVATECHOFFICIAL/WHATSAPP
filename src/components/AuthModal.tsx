@@ -36,8 +36,15 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onSuccess, onClose
       const user = await signInWithGoogle();
       onSuccess(user);
     } catch (err: any) {
-      console.warn('Firebase Google Auth:', err);
-      if (err.code === 'auth/unauthorized-domain' || err.message?.includes('unauthorized-domain')) {
+      const isDomainIssue =
+        err.code === 'auth/unauthorized-domain' ||
+        err.message?.includes('unauthorized-domain') ||
+        err.code === 'auth/invalid-continue-uri' ||
+        err.message?.includes('invalid-continue-uri') ||
+        err.code === 'auth/unauthorized-continue-uri' ||
+        err.message?.includes('unauthorized-continue-uri');
+
+      if (isDomainIssue) {
         setDomainError(true);
         setError(`This domain (${currentHost}) is awaiting Firebase Authorized Domains whitelist.`);
       } else if (err.code === 'auth/popup-blocked') {
