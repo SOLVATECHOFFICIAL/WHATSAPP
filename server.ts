@@ -33,7 +33,14 @@ const expiryMillis = (value: any): number => {
 async function startServer() {
   const app = express();
   const server = http.createServer(app);
-  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+  const isRailway = Boolean(
+    process.env.RAILWAY_SERVICE_ID ||
+    process.env.RAILWAY_ENVIRONMENT_ID ||
+    process.env.RAILWAY_PUBLIC_DOMAIN ||
+    process.env.RAILWAY_STATIC_URL,
+  );
+  const rawPort = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+  const PORT = !isRailway && rawPort === 8080 ? 3000 : rawPort;
   const isProd = process.env.NODE_ENV === 'production';
 
   app.use(express.json());
@@ -916,6 +923,7 @@ async function startServer() {
 
   if (!isProd) {
     const vite = await createViteServer({
+      root: __dirname,
       server: {
         middlewareMode: true,
         allowedHosts: true,
@@ -935,6 +943,7 @@ async function startServer() {
     } else {
       console.warn('[SOLVATECH] dist/index.html not found, falling back to Vite middleware');
       const vite = await createViteServer({
+        root: __dirname,
         server: {
           middlewareMode: true,
           allowedHosts: true,
