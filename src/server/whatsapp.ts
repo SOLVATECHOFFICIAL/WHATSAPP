@@ -20,8 +20,8 @@ import sharp from 'sharp';
 import webpmux from 'node-webpmux';
 import { createWorker } from 'tesseract.js';
 import { commandHandler, parseSpamArgs, GROUP_ONLY_COMMANDS } from './commands.ts';
-import { db, isFirestoreQuotaExhausted, reportFirestoreError } from '../services/firebase.ts';
-import { doc, getDoc, setDoc, deleteDoc, collection, getDocs, writeBatch } from 'firebase/firestore';
+import { isFirestoreQuotaExhausted, reportFirestoreError } from '../services/firestore-status.ts';
+import { db, doc, getDoc, setDoc, deleteDoc, collection, getDocs, writeBatch } from './firebase-admin.ts';
 
 const MAX_PROCESS_MEDIA_CACHE_BYTES = 64 * 1024 * 1024;
 const processMediaCache = new Map<string, { size: number; evict: () => void }>();
@@ -645,7 +645,7 @@ export class WhatsAppManager {
     try {
       if (this.userId && this.userId !== 'default') {
         const snap = await getDoc(doc(db, 'user_settings', this.userId));
-        if (snap.exists()) {
+        if (snap.exists) {
           const d = snap.data();
           if (typeof d?.antiDelete === 'boolean') {
             this.antiDeleteEnabled = d.antiDelete;
@@ -719,7 +719,7 @@ export class WhatsAppManager {
     try {
       if (this.userId && this.userId !== 'default') {
         const snap = await getDoc(doc(db, 'users', this.userId));
-        if (!snap.exists()) {
+        if (!snap.exists) {
           return Boolean(this.sessionLicenseExpiresAt || this.isSessionUnlimited || this.isOwnerEmail());
         }
 
@@ -742,7 +742,7 @@ export class WhatsAppManager {
         if (!this.sessionLicenseKey) {
           try {
             const ulSnap = await getDoc(doc(db, 'user_licenses', this.userId));
-            if (ulSnap.exists()) {
+            if (ulSnap.exists) {
               const uld = ulSnap.data();
               if (uld?.activeKey) this.sessionLicenseKey = uld.activeKey;
               if (uld?.plan && !this.sessionLicensePlan) this.sessionLicensePlan = uld.plan;
@@ -1401,11 +1401,11 @@ export class WhatsAppManager {
 
         try {
           let fullSnap: any = await getDoc(doc(db, 'whatsapp_sessions', sessionDocId));
-          if (!fullSnap.exists() && this.sanitizedUserId === 'default') {
+          if (!fullSnap.exists && this.sanitizedUserId === 'default') {
             fullSnap = await getDoc(doc(db, 'whatsapp_sessions', 'current_session'));
           }
 
-          if (fullSnap && fullSnap.exists()) {
+          if (fullSnap && fullSnap.exists) {
             const data = fullSnap.data();
 
             // 1. Direct creds restoration (100% reliable, never exceeds 1MB Firestore limit)
@@ -1445,7 +1445,7 @@ export class WhatsAppManager {
       if (!restoredAny && this.sanitizedUserId === 'default' && !isFirestoreQuotaExhausted()) {
         try {
           const snap = await getDoc(doc(db, 'whatsapp_sessions', 'current_creds'));
-          if (snap.exists()) {
+          if (snap.exists) {
             const credsData = snap.data();
             if (credsData?.rawCreds) {
               fs.writeFileSync(credsPath, credsData.rawCreds, 'utf-8');

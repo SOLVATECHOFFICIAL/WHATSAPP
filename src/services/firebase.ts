@@ -8,25 +8,15 @@ import {
   serverTimestamp,
   setLogLevel,
 } from 'firebase/firestore';
+import { firebaseConfig } from './firebase-config';
+import { isFirestoreQuotaExhausted, reportFirestoreError } from './firestore-status';
+
+export { firebaseConfig, isFirestoreQuotaExhausted, reportFirestoreError };
 
 try {
   setLogLevel('silent');
 } catch {}
 
-let firestoreQuotaExhaustedUntil = 0;
-
-export function isFirestoreQuotaExhausted(): boolean {
-  return Date.now() < firestoreQuotaExhaustedUntil;
-}
-
-export function reportFirestoreError(err: any): void {
-  const msg = err?.message || String(err || '');
-  const code = err?.code || '';
-  if (code === 'resource-exhausted' || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('Quota exceeded')) {
-    firestoreQuotaExhaustedUntil = Math.max(firestoreQuotaExhaustedUntil, Date.now() + 15 * 60 * 1000);
-    console.warn('[Firestore] Quota exceeded. Activating local cache fallback & offline backoff for 15 minutes.');
-  }
-}
 import {
   getAuth,
   GoogleAuthProvider,
@@ -38,30 +28,6 @@ import {
   onAuthStateChanged,
   type User
 } from 'firebase/auth';
-
-const getEnvKey = () => {
-  const candidates = [
-    typeof import.meta !== 'undefined' ? (import.meta as any)?.env?.VITE_FIREBASE_API_KEY : undefined,
-    typeof process !== 'undefined' ? process.env?.VITE_FIREBASE_API_KEY : undefined,
-    typeof process !== 'undefined' ? process.env?.FIREBASE_API_KEY : undefined,
-  ];
-  for (const k of candidates) {
-    if (k && typeof k === 'string' && k.trim().length > 15 && !k.includes('default-key')) {
-      return k.trim();
-    }
-  }
-  // Official Firebase API Key provided for solvatechbot
-  return "AIzaSyDCVp_T6gO6HeTDeevls9MSb9quEzU5YiM";
-};
-
-export const firebaseConfig = {
-  apiKey: getEnvKey(),
-  authDomain: "solvatechbot.firebaseapp.com",
-  projectId: "solvatechbot",
-  storageBucket: "solvatechbot.firebasestorage.app",
-  messagingSenderId: "1094113371408",
-  appId: "1:1094113371408:web:fdf3cbdef31413a703b195"
-};
 
 // Initialize Firebase App
 export const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();

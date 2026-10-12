@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
-import { db, isFirestoreQuotaExhausted, reportFirestoreError } from '../services/firebase.ts';
-import { collection, doc, setDoc, getDoc, getDocs, onSnapshot, runTransaction, writeBatch } from 'firebase/firestore';
+import { isFirestoreQuotaExhausted, reportFirestoreError } from '../services/firestore-status.ts';
+import { db, collection, doc, setDoc, getDoc, getDocs, onSnapshot, runTransaction, writeBatch } from './firebase-admin.ts';
 
 export interface CommandContext {
   command: string;
@@ -348,7 +348,7 @@ class CommandHandler {
     try {
       // 3. Bot Settings (Anti-Delete)
       const antiDoc = await getDoc(doc(db, 'bot_settings', 'anti_delete'));
-      if (antiDoc.exists()) {
+      if (antiDoc.exists) {
         const d = antiDoc.data();
         if (d && typeof d.enabled === 'boolean') {
           this.antiDeleteEnabled = d.enabled;
@@ -410,13 +410,13 @@ class CommandHandler {
       try {
         const profileRef = doc(db, 'group_security', this.getAccountSecurityProfileId(cleanAccountId));
         const profileSnap = await getDoc(profileRef);
-        if (profileSnap.exists()) {
+        if (profileSnap.exists) {
           this.accountSecuritySettings[cleanAccountId] = this.normalizeSecuritySettings(profileSnap.data());
         }
         const unsubscribe = onSnapshot(
           profileRef,
           (snapshot) => {
-            if (!snapshot.exists()) {
+            if (!snapshot.exists) {
               delete this.accountSecuritySettings[cleanAccountId];
               return;
             }
@@ -766,8 +766,8 @@ _Need a custom website of any kind? Developer Solomon builds high-performance we
       if ((!expiresAt || !licenseKey) && ctx.userId && ctx.userId !== 'default') {
         try {
           const userDoc = await getDoc(doc(db, 'users', ctx.userId));
-          if (userDoc.exists()) {
-            const ud = userDoc.data();
+          if (userDoc.exists) {
+            const ud = userDoc.data() || {};
             if (!expiresAt && ud.licenseExpiresAt) expiresAt = ud.licenseExpiresAt;
             if (!planName && ud.licensePlan) planName = ud.licensePlan;
             if (!licenseKey && (ud.licenseKey || ud.activeKey)) licenseKey = ud.licenseKey || ud.activeKey;

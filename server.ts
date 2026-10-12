@@ -1,22 +1,18 @@
+import 'dotenv/config';
 import express from 'express';
 import http from 'http';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import dotenv from 'dotenv';
-import { doc, getDoc, runTransaction } from 'firebase/firestore';
+import { db, doc, getDoc, runTransaction } from './src/server/firebase-admin.ts';
 import { sessionManager, whatsappManager } from './src/server/whatsapp.ts';
 import { commandHandler, SOLVATECH_MENU } from './src/server/commands.ts';
 import {
-  db,
   firebaseConfig,
-  isFirestoreQuotaExhausted,
-  reportFirestoreError,
-} from './src/services/firebase.ts';
+} from './src/services/firebase-config.ts';
+import { isFirestoreQuotaExhausted, reportFirestoreError } from './src/services/firestore-status.ts';
 import { OWNER_EMAIL } from './src/services/admin-config.ts';
-
-dotenv.config();
 
 // Preserve the fatal stack trace, then let Node exit so Railway can restart a
 // process that may be in an unsafe state instead of continuing silently.
@@ -189,8 +185,8 @@ async function startServer() {
           transaction.get(userRef),
         ]);
 
-        if (!licenseSnap.exists()) throw new Error('INVALID_KEY');
-        if (!userSnap.exists()) throw new Error('ACCOUNT_NOT_FOUND');
+        if (!licenseSnap.exists) throw new Error('INVALID_KEY');
+        if (!userSnap.exists) throw new Error('ACCOUNT_NOT_FOUND');
         const license = licenseSnap.data();
         const user = userSnap.data();
         const savedEmail = typeof user.email === 'string' ? user.email.trim().toLowerCase() : '';
@@ -298,7 +294,7 @@ async function startServer() {
       return res.json({
         success: true,
         botName: 'SOLVATECH',
-        firebaseProject: 'solvatechbot',
+        firebaseProject: firebaseConfig.projectId,
         status: {
           state: 'disconnected',
           isConnected: false,
@@ -312,7 +308,7 @@ async function startServer() {
     res.json({
       success: true,
       botName: 'SOLVATECH',
-      firebaseProject: 'solvatechbot',
+      firebaseProject: firebaseConfig.projectId,
       status: session.getStatus(),
     });
   });
@@ -627,11 +623,11 @@ async function startServer() {
       if (!isFirestoreQuotaExhausted()) {
         try {
           const userSnap = uid ? await getDoc(doc(db, 'users', uid)) : null;
-          userRecord = userSnap?.exists() ? userSnap.data() : null;
+          userRecord = userSnap?.exists ? userSnap.data() : null;
           const accountEmail = email || (typeof userRecord?.email === 'string' ? userRecord.email.toLowerCase().trim() : '');
           const emailKey = accountEmail.replace(/[^a-z0-9]/g, '_');
           const trialSnap = accountEmail ? await getDoc(doc(db, 'claimed_trials', emailKey)) : null;
-          trialRecord = trialSnap?.exists() ? trialSnap.data() : null;
+          trialRecord = trialSnap?.exists ? trialSnap.data() : null;
         } catch (fErr: any) {
           reportFirestoreError(fErr);
         }
@@ -695,10 +691,10 @@ async function startServer() {
           transaction.get(trialRef),
           transaction.get(userRef),
         ]);
-        if (trialSnap.exists()) {
+        if (trialSnap.exists) {
           throw new Error('TRIAL_ALREADY_CLAIMED');
         }
-        if (!userSnap.exists()) {
+        if (!userSnap.exists) {
           throw new Error('ACCOUNT_NOT_FOUND');
         }
 
@@ -913,7 +909,7 @@ async function startServer() {
     res.json({
       status: 'ok',
       bot: 'SOLVATECH',
-      firebase: 'solvatechbot',
+      firebase: firebaseConfig.projectId,
       timestamp: new Date().toISOString()
     });
   });

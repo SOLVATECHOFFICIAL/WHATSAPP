@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { signInWithGoogle, signInWithEmail, signUpWithEmail, signInFastTrack } from '../services/firebase';
+import { firebaseConfig } from '../services/firebase-config';
 import { Shield, Copy, Check, AlertCircle, ExternalLink, Mail, Lock, User as UserIcon, ArrowRight } from 'lucide-react';
 import { User } from 'firebase/auth';
 
@@ -290,7 +291,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onSuccess, onClose
           )}
 
           <div className="pt-2 text-center text-[10px] text-slate-500">
-            Firebase Project: <code className="text-slate-400">solvatechbot.firebaseapp.com</code>
+            Firebase Project: <code className="text-slate-400">{firebaseConfig.authDomain}</code>
           </div>
         </div>
       </div>
