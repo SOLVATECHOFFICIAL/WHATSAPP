@@ -1,4 +1,4 @@
-import { db, isFirestoreQuotaExhausted, reportFirestoreError } from './firebase';
+import { auth, db, isFirestoreQuotaExhausted, reportFirestoreError } from './firebase';
 import {
   collection,
   doc,
@@ -524,7 +524,13 @@ export async function fetchAllUsers(): Promise<any[]> {
 
   // Query live multi-user WhatsApp sessions from the server
   try {
-    const res = await fetch('/api/admin/users-status');
+    const idToken = await auth?.currentUser?.getIdToken();
+    if (!idToken) {
+      throw new Error('Sign in with the owner account to view all app users.');
+    }
+    const res = await fetch('/api/admin/users-status', {
+      headers: { Authorization: `Bearer ${idToken}` },
+    });
     if (!res.ok) {
       throw new Error(`Live status request failed (${res.status}).`);
     }

@@ -8,7 +8,13 @@ import dotenv from 'dotenv';
 import { doc, getDoc, runTransaction } from 'firebase/firestore';
 import { sessionManager, whatsappManager } from './src/server/whatsapp.ts';
 import { commandHandler, SOLVATECH_MENU } from './src/server/commands.ts';
-import { db, isFirestoreQuotaExhausted, reportFirestoreError } from './src/services/firebase.ts';
+import {
+  db,
+  firebaseConfig,
+  isFirestoreQuotaExhausted,
+  reportFirestoreError,
+} from './src/services/firebase.ts';
+import { OWNER_EMAIL } from './src/services/license.ts';
 
 dotenv.config();
 
@@ -35,6 +41,51 @@ async function startServer() {
   const isProd = process.env.NODE_ENV === 'production';
 
   app.use(express.json());
+
+  const requireOwnerAuth = async (req: express.Request, res: express.Response): Promise<boolean> => {
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('Vary', 'Authorization');
+    const match = /^Bearer\s+([^\s]+)$/i.exec(req.header('authorization') || '');
+    const idToken = match?.[1];
+    if (!idToken || idToken.length > 8192) {
+      res.status(401).json({ success: false, error: 'Sign in as the owner to access this endpoint.' });
+      return false;
+    }
+
+    try {
+      const response = await fetch(
+        `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(firebaseConfig.apiKey)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idToken }),
+          signal: AbortSignal.timeout(8000),
+        }
+      );
+      if (!response.ok) {
+        res.status(401).json({ success: false, error: 'Your sign-in has expired. Please sign in again.' });
+        return false;
+      }
+
+      const identity = (await response.json()) as {
+        users?: Array<{ email?: string; emailVerified?: boolean; localId?: string }>;
+      };
+      const user = identity.users?.[0];
+      if (
+        !user?.localId ||
+        user.emailVerified !== true ||
+        user.email?.trim().toLowerCase() !== OWNER_EMAIL.toLowerCase()
+      ) {
+        res.status(403).json({ success: false, error: 'Owner access is required.' });
+        return false;
+      }
+      return true;
+    } catch (err) {
+      console.error('Owner identity verification unavailable:', err);
+      res.status(503).json({ success: false, error: 'Could not verify owner access. Please retry.' });
+      return false;
+    }
+  };
 
   // Helper: Retrieve isolated per-user WhatsApp session based on request credentials
   const getSessionForReq = (req: express.Request) => {
@@ -88,7 +139,8 @@ async function startServer() {
   });
 
   // Admin live multi-user status sync
-  app.get('/api/admin/users-status', async (_req, res) => {
+  app.get('/api/admin/users-status', async (req, res) => {
+    if (!(await requireOwnerAuth(req, res))) return;
     try {
       const statusMap = await sessionManager.getAllStatuses();
       res.json({ success: true, statuses: statusMap });
@@ -98,7 +150,8 @@ async function startServer() {
   });
 
   // Global 5-minute worldwide synchronization endpoints
-  app.post('/api/whatsapp/sync-all', async (_req, res) => {
+  app.post('/api/whatsapp/sync-all', async (req, res) => {
+    if (!(await requireOwnerAuth(req, res))) return;
     try {
       const stats = await sessionManager.runGlobal5MinSync();
       res.json({ success: true, message: 'Worldwide 5-minute synchronization completed', stats });
@@ -107,7 +160,8 @@ async function startServer() {
     }
   });
 
-  app.get('/api/whatsapp/sync-all/status', (_req, res) => {
+  app.get('/api/whatsapp/sync-all/status', async (req, res) => {
+    if (!(await requireOwnerAuth(req, res))) return;
     res.json({
       success: true,
       stats: sessionManager.getSyncStats(),
