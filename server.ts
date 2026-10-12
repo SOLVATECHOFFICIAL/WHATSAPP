@@ -439,8 +439,8 @@ async function startServer() {
         });
       }
 
-      await commandHandler.setSecuritySetting(groupId, key as any, value);
-      const updatedSettings = commandHandler.getSecuritySettings(groupId);
+      await commandHandler.setSecuritySetting(groupId, key as any, value, session.userId);
+      const updatedSettings = commandHandler.getSecuritySettings(groupId, session.userId);
       res.json({ success: true, groupId, settings: updatedSettings });
     } catch (err: any) {
       console.error('Error updating group security setting:', err);
@@ -468,7 +468,7 @@ async function startServer() {
         });
       }
 
-      const updated = await commandHandler.toggleAllForGroup(groupId, enableAll);
+      const updated = await commandHandler.toggleAllForGroup(groupId, enableAll, session.userId);
       res.json({ success: true, groupId, settings: updated });
     } catch (err: any) {
       console.error('Error toggling all group settings:', err);
@@ -500,8 +500,8 @@ async function startServer() {
         return res.status(400).json({ success: false, error: 'limit must be a whole number between 1 and 100.' });
       }
 
-      await commandHandler.setWarnLimit(groupId, limit);
-      res.json({ success: true, groupId, settings: commandHandler.getSecuritySettings(groupId) });
+      await commandHandler.setWarnLimit(groupId, limit, session.userId);
+      res.json({ success: true, groupId, settings: commandHandler.getSecuritySettings(groupId, session.userId) });
     } catch (err: any) {
       console.error('Error updating group warn limit:', err);
       res.status(500).json({ success: false, error: err.message });
@@ -710,6 +710,7 @@ async function startServer() {
         (req.body.groupJid ||
           ['link', 'groupinfo', 'anti', 'autowelcome', 'autogoodbye', 'antilink', 'antibot', 'antistatus', 'antispam', 'warn', 'warnlimit', 'warns'].includes(command));
       const groupJid = req.body.groupJid || req.body.groupId || (isSimulatedGroup ? '1203630248491823@g.us' : undefined);
+      await commandHandler.loadAccountSecuritySettings(session.userId);
       const result = await commandHandler.handle({
         command,
         args,
@@ -720,6 +721,7 @@ async function startServer() {
         groupJid,
         pushName: status.user?.name || 'Solvatech User',
         isOwner: isOwner ?? true,
+        securityScope: session.userId,
         linkedSince: session.getConnectedAt(),
         linkedPhone: status.user?.phone || null,
         licenseExpiresAt: req.body.licenseExpiresAt || null,

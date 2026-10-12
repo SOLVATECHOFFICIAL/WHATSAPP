@@ -678,6 +678,7 @@ export class WhatsAppManager {
     this.userMessageHistory.clear();
     this.userSpamPurgeState.clear();
     this.greetingDedupCache.clear();
+    commandHandler.releaseAccountSecuritySettings(this.userId);
   }
 
   private async syncConnectionStatusToFirestore(): Promise<void> {
@@ -1394,6 +1395,7 @@ export class WhatsAppManager {
     if (this.isLicenseExpired()) {
       throw new Error('Cannot connect WhatsApp: this account has no active license.');
     }
+    await commandHandler.loadAccountSecuritySettings(this.userId);
     if (this.sock && this.currentStatus.isConnected) {
       return this.sock;
     }
@@ -2009,7 +2011,7 @@ export class WhatsAppManager {
             if (!isBotAdmin) {
               // Bot account is not an admin in this group: DO NOT SEND ANY WARNING MESSAGES!
             } else {
-              const sec = commandHandler.getSecuritySettings(remoteJid);
+              const sec = commandHandler.getSecuritySettings(remoteJid, this.userId);
 
             // 1. Anti-Bot: Detect any member message starting with '.' or containing words like .at, .with, or replying to/with bot interactions
             const isWordStartingWithDot =
@@ -2031,7 +2033,7 @@ export class WhatsAppManager {
 
             if (sec.antibot && isBotDetected) {
               try { await sock.sendMessage(remoteJid, { delete: msg.key }); } catch {}
-              const warn = await commandHandler.addWarning(remoteJid, senderJid);
+              const warn = await commandHandler.addWarning(remoteJid, senderJid, this.userId);
               if (warn.count >= warn.max) {
                 try { await sock.groupParticipantsUpdate(remoteJid, [senderJid], 'remove'); } catch {}
                 await sock.sendMessage(remoteJid, {
@@ -2052,7 +2054,7 @@ export class WhatsAppManager {
             const hasLink = /(https?:\/\/[^\s]+|chat\.whatsapp\.com\/[^\s]+|wa\.me\/[^\s]+|t\.me\/[^\s]+)/i.test(textWithoutOfficialDomain);
             if (sec.antilink && hasLink) {
               try { await sock.sendMessage(remoteJid, { delete: msg.key }); } catch {}
-              const warn = await commandHandler.addWarning(remoteJid, senderJid);
+              const warn = await commandHandler.addWarning(remoteJid, senderJid, this.userId);
               if (warn.count >= warn.max) {
                 try { await sock.groupParticipantsUpdate(remoteJid, [senderJid], 'remove'); } catch {}
                 await sock.sendMessage(remoteJid, {
@@ -2078,7 +2080,7 @@ export class WhatsAppManager {
             );
             if (sec.antistatus && isStatusMention) {
               try { await sock.sendMessage(remoteJid, { delete: msg.key }); } catch {}
-              const warn = await commandHandler.addWarning(remoteJid, senderJid);
+              const warn = await commandHandler.addWarning(remoteJid, senderJid, this.userId);
               if (warn.count >= warn.max) {
                 try { await sock.groupParticipantsUpdate(remoteJid, [senderJid], 'remove'); } catch {}
                 await sock.sendMessage(remoteJid, {
@@ -2174,7 +2176,7 @@ export class WhatsAppManager {
                 setBoundedCache(this.userMessageHistory, spamUserKey, [], 1000);
 
                 // Unified warning increment
-                const warn = await commandHandler.addWarning(remoteJid, senderJid);
+                const warn = await commandHandler.addWarning(remoteJid, senderJid, this.userId);
                 if (warn.count >= warn.max) {
                   try { await sock.groupParticipantsUpdate(remoteJid, [senderJid], 'remove'); } catch {}
                   this.userSpamPurgeState.delete(spamUserKey);
@@ -3030,7 +3032,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
               if (!isGroup || !isAuthorizedAdmin) return;
               try {
                 const val = args[0]?.toLowerCase() === 'off' ? false : true;
-                await commandHandler.setSecuritySetting(remoteJid, 'antilink', val);
+                await commandHandler.setSecuritySetting(remoteJid, 'antilink', val, this.userId);
                 reactDone();
                 await sock.sendMessage(remoteJid, {
                   text: `🛡️ *[ANTI-LINK SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED & ENFORCED*' : '❌ *DISABLED*'}\nPolicy: Unauthorized external links will be auto-deleted with security warning issued to sender.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
@@ -3047,7 +3049,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
               if (!isGroup || !isAuthorizedAdmin) return;
               try {
                 const val = args[0]?.toLowerCase() === 'off' ? false : true;
-                await commandHandler.setSecuritySetting(remoteJid, 'antibot', val);
+                await commandHandler.setSecuritySetting(remoteJid, 'antibot', val, this.userId);
                 reactDone();
                 await sock.sendMessage(remoteJid, {
                   text: `🤖 *[ANTI-BOT SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED & ENFORCED*' : '❌ *DISABLED*'}\nPolicy: Non-admin members using bot prefix commands (*.*) will have their message auto-deleted and receive a security warning.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
@@ -3064,7 +3066,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
               if (!isGroup || !isAuthorizedAdmin) return;
               try {
                 const val = args[0]?.toLowerCase() === 'off' ? false : true;
-                await commandHandler.setSecuritySetting(remoteJid, 'antistatus', val);
+                await commandHandler.setSecuritySetting(remoteJid, 'antistatus', val, this.userId);
                 reactDone();
                 await sock.sendMessage(remoteJid, {
                   text: `📱 *[ANTI-STATUS MENTION SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED & ENFORCED*' : '❌ *DISABLED*'}\nPolicy: Non-admin members mentioning this group in their personal WhatsApp status will have the alert deleted and receive a security warning.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
@@ -3081,7 +3083,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
               if (!isGroup || !isAuthorizedAdmin) return;
               try {
                 const val = args[0]?.toLowerCase() === 'off' ? false : true;
-                await commandHandler.setSecuritySetting(remoteJid, 'antispam', val);
+                await commandHandler.setSecuritySetting(remoteJid, 'antispam', val, this.userId);
                 reactDone();
                 await sock.sendMessage(remoteJid, {
                   text: `🚫 *[ANTI-SPAM DEFENSE SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED & ENFORCED*' : '❌ *DISABLED*'}\nPolicy: Flood messages, rapid stickers/media spam, and repetitive text/words will be automatically purged (including original spam messages). If a member continues sending messages while deletion is underway, they are *INSTANTLY KICKED*!\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
@@ -3098,7 +3100,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
               if (!isGroup || !isAuthorizedAdmin) return;
               try {
                 const val = args[0]?.toLowerCase() === 'off' ? false : true;
-                await commandHandler.setSecuritySetting(remoteJid, 'autowelcome', val);
+                await commandHandler.setSecuritySetting(remoteJid, 'autowelcome', val, this.userId);
                 reactDone();
                 await sock.sendMessage(remoteJid, {
                   text: `👋 *[AUTO-WELCOME SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED*' : '❌ *DISABLED*'}\nPolicy: Automatically greets anyone who enters the group.\nRule: Strictly sent only by connected admin bots.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
@@ -3115,7 +3117,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
               if (!isGroup || !isAuthorizedAdmin) return;
               try {
                 const val = args[0]?.toLowerCase() === 'off' ? false : true;
-                await commandHandler.setSecuritySetting(remoteJid, 'autogoodbye', val);
+                await commandHandler.setSecuritySetting(remoteJid, 'autogoodbye', val, this.userId);
                 reactDone();
                 await sock.sendMessage(remoteJid, {
                   text: `🚪 *[AUTO-GOODBYE SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nStatus: ${val ? '✅ *ENABLED*' : '❌ *DISABLED*'}\nPolicy: Automatically acknowledges departing or removed participants.\nRule: Strictly sent only by connected admin bots.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
@@ -3156,7 +3158,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                     }, { quoted: msg });
                     return;
                   }
-                  await commandHandler.setWarnLimit(remoteJid, num);
+                  await commandHandler.setWarnLimit(remoteJid, num, this.userId);
                   reactDone();
                   await sock.sendMessage(remoteJid, {
                     text: `⚙️ *[WARN LIMIT UPDATED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\nGroup warning limit set to *${num} warnings*.\nAccumulating ${num} warnings across Anti-Bot, Anti-Link, Anti-Status, Anti-Spam, or Admin warnings will automatically kick the member.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
@@ -3180,7 +3182,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                   }
                   const targetClean = targetJid.split('@')[0].replace(/\D/g, '');
                   const count = commandHandler.getWarnings(remoteJid, targetJid);
-                  const max = commandHandler.getSecuritySettings(remoteJid).warnLimit || 3;
+                  const max = commandHandler.getSecuritySettings(remoteJid, this.userId).warnLimit || 3;
                   reactDone();
                   await sock.sendMessage(remoteJid, {
                     text: `📋 *[GROUP WARNING STATUS]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👤 *Participant:* @${targetClean}\n⚠️ *Current Warnings:* ${count} / ${max}\nStatus: ${count >= max ? '🚨 Removal Limit Exceeded' : `${max - count} warnings remaining before auto-kick`}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n> 🛡️ _SOLVATECH Group Defense_`,
@@ -3288,7 +3290,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                   }
 
                   // Increment warning count (+1)
-                  const warnResult = await commandHandler.addWarning(remoteJid, targetInGroup.id);
+                  const warnResult = await commandHandler.addWarning(remoteJid, targetInGroup.id, this.userId);
                   const reason = args.filter((a: string) => !a.startsWith('@') && a.replace(/\D/g, '') !== targetClean).join(' ').trim() || 'Rule violation / Disobeying group instructions';
 
                   // Check if warning threshold reached
@@ -3326,7 +3328,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
             // 24. .anti (Inspect group protection matrix - Admin connected to bot only)
             if (command === 'anti') {
               if (!isGroup || !isAuthorizedAdmin) return;
-              const sec = commandHandler.getSecuritySettings(remoteJid);
+              const sec = commandHandler.getSecuritySettings(remoteJid, this.userId);
               reactDone();
               await sock.sendMessage(
                 remoteJid,
@@ -3463,6 +3465,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
               pushName: msg.pushName || undefined,
               isOwner,
               isGroupAdmin: isAuthorizedAdmin,
+              securityScope: this.userId,
               linkedSince: this.connectedAt,
               linkedPhone: this.currentStatus.user?.phone,
               quotedParticipant: quotedParticipant || undefined,
@@ -3580,7 +3583,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
         this.invalidateGroupMetaCache(groupId);
         if (action !== 'add' && action !== 'remove') return;
 
-        const sec = commandHandler.getSecuritySettings(groupId);
+        const sec = commandHandler.getSecuritySettings(groupId, this.userId);
         if (action === 'add' && sec.autowelcome === false) return;
         if (action === 'remove' && sec.autogoodbye === false) return;
 
@@ -4204,6 +4207,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
       warnLimit?: number;
     };
   }>> {
+    await commandHandler.loadAccountSecuritySettings(this.userId);
     // STRICT USER REQUIREMENT:
     // "Once your button not linked to the account, the group that will show, don't let it show any group.
     // Say link account first to show your groups that you are in."
@@ -4326,7 +4330,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
           isAdmin,
           creation: meta.creation,
           owner: meta.owner,
-          settings: commandHandler.getSecuritySettings(gid),
+          settings: commandHandler.getSecuritySettings(gid, this.userId),
         });
       }
 
