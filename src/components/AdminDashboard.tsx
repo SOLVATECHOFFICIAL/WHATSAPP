@@ -57,6 +57,7 @@ import {
   deleteSingleLicense,
   calculateRemainingTime,
   OWNER_EMAIL,
+  isOwnerEmail,
 } from '../services/license';
 
 interface AdminDashboardProps {
@@ -127,8 +128,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       window.location.hostname === 'localhost' ||
       window.location.hostname.includes('127.0.0.1'));
 
-  // STRICT RULE: No one can be admin EXCEPT awoyinfasolomon1@gmail.com!
-  const isOwner = currentUserEmail?.toLowerCase() === OWNER_EMAIL.toLowerCase();
+  // Owner access check
+  const isOwner = isOwnerEmail(currentUserEmail);
 
   // Portable Tab Navigation: Clean 3 Powerhouse Hubs
   const [activeTab, setActiveTab] = useState<'users' | 'keys_opay' | 'system'>('users');
@@ -278,13 +279,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     usersRefreshInFlight.current = true;
     try {
       const latestUsers = await fetchAllUsers();
-      setUsers((previous) =>
-        sameAdminUserSnapshot(previous, latestUsers) ? previous : latestUsers
-      );
-      setUsersRefreshFailed(false);
+      if (Array.isArray(latestUsers)) {
+        setUsers((previous) =>
+          sameAdminUserSnapshot(previous, latestUsers) ? previous : latestUsers
+        );
+        setUsersRefreshFailed(false);
+      }
     } catch (err) {
       console.warn('Keeping the last confirmed admin user list after a refresh failure:', err);
-      setUsersRefreshFailed(true);
+      setUsers((prev) => {
+        if (!prev || prev.length === 0) {
+          setUsersRefreshFailed(true);
+        }
+        return prev;
+      });
     } finally {
       usersRefreshInFlight.current = false;
     }

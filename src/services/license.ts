@@ -1,5 +1,5 @@
 import { auth, db, isFirestoreQuotaExhausted, reportFirestoreError } from './firebase';
-import { OWNER_EMAIL } from './admin-config';
+import { OWNER_EMAIL, OWNER_EMAILS, isOwnerEmail } from './admin-config';
 import {
   collection,
   doc,
@@ -59,7 +59,7 @@ export interface LicenseRecord {
   expiresAt?: string;
 }
 
-export { OWNER_EMAIL };
+export { OWNER_EMAIL, OWNER_EMAILS, isOwnerEmail };
 
 const pendingLicenseWrites = new Map<string, LicenseRecord>();
 const LICENSE_WRITE_TIMEOUT_MS = 15_000;
@@ -202,8 +202,8 @@ export async function toggleUserUnlimited(
 ): Promise<boolean> {
   const email = userEmail || `${userUid}@solvatech.com`;
   
-  // STRICT RULE: awoyinfasolomon1@gmail.com CAN NEVER be removed from unlimited!
-  if (email.toLowerCase() === OWNER_EMAIL.toLowerCase()) {
+  // STRICT RULE: Owner accounts CAN NEVER be removed from unlimited!
+  if (isOwnerEmail(email)) {
     enableUnlimited = true;
     return true;
   }
@@ -523,26 +523,22 @@ export async function fetchAllUsers(): Promise<any[]> {
   const usersMap = new Map<string, any>();
   let serverStatuses: Record<string, any> = {};
 
-  // Query live multi-user WhatsApp sessions from the server
+  // Query live multi-user WhatsApp sessions from the server (graceful enhancement)
   try {
     const idToken = await auth?.currentUser?.getIdToken();
-    if (!idToken) {
-      throw new Error('Sign in with the owner account to view all app users.');
+    if (idToken) {
+      const res = await fetch('/api/admin/users-status', {
+        headers: { Authorization: `Bearer ${idToken}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.success && data.statuses && typeof data.statuses === 'object') {
+          serverStatuses = data.statuses;
+        }
+      }
     }
-    const res = await fetch('/api/admin/users-status', {
-      headers: { Authorization: `Bearer ${idToken}` },
-    });
-    if (!res.ok) {
-      throw new Error(`Live status request failed (${res.status}).`);
-    }
-    const data = await res.json();
-    if (!data?.success || !data.statuses || typeof data.statuses !== 'object') {
-      throw new Error('Live status response was incomplete.');
-    }
-    serverStatuses = data.statuses;
   } catch (err) {
-    console.debug('Could not fetch server live user statuses:', err);
-    throw new Error('Could not confirm WhatsApp user statuses from the server.');
+    console.debug('Could not fetch server live user statuses (using cached state):', err);
   }
 
   const now = Date.now();
@@ -550,51 +546,60 @@ export async function fetchAllUsers(): Promise<any[]> {
   // 1. Fetch from Firestore users collection
   try {
     const colRef = collection(db, 'users');
-    const snap = await getDocsFromServer(colRef);
-    snap.forEach((d) => {
-      const data = d.data() || {};
-      const uid = d.id;
-      const isOwner = Boolean(data.email && data.email.toLowerCase() === OWNER_EMAIL.toLowerCase());
-      const rawExpiresAt = data.licenseExpiresAt || null;
-      const expMs = rawExpiresAt ? new Date(rawExpiresAt).getTime() : 0;
-      // Strict countdown: if user has a finite expiration timestamp and is not owner, evaluate exact expiration
-      const isDateExpired = !isOwner && (
-        (rawExpiresAt && expMs > 0 && expMs <= now) ||
-        (!rawExpiresAt && !data.isUnlimited)
-      );
-      const isUnlimited = isOwner || (!rawExpiresAt && Boolean(data.isUnlimited));
-      const isExpired = isDateExpired || data.licenseStatus === 'expired';
+    let snap: any;
+    try {
+      snap = await getDocsFromServer(colRef);
+    } catch {
+      snap = await getDocs(colRef);
+    }
+    if (snap) {
+      snap.forEach((d: any) => {
+        const data = d.data() || {};
+        const uid = d.id;
+        const isOwner = isOwnerEmail(data.email);
+        const rawExpiresAt = data.licenseExpiresAt || null;
+        const expMs = rawExpiresAt ? new Date(rawExpiresAt).getTime() : 0;
+        // Strict countdown: if user has a finite expiration timestamp and is not owner, evaluate exact expiration
+        const isDateExpired = !isOwner && (
+          (rawExpiresAt && expMs > 0 && expMs <= now) ||
+          (!rawExpiresAt && !data.isUnlimited)
+        );
+        const isUnlimited = isOwner || (!rawExpiresAt && Boolean(data.isUnlimited));
+        const isExpired = isDateExpired || data.licenseStatus === 'expired';
 
-      const liveStatus = serverStatuses[uid] || {};
-      // Strict rule: only show connected if live socket is actually connected AND license is not expired
-      const isActuallyConnected = !isExpired && Boolean(liveStatus.isConnected);
-      const linkedPhone = liveStatus.phone || data.linkedPhone || data.phone || null;
-      const isPaired = Boolean(liveStatus.isPaired || linkedPhone);
+        const liveStatus = serverStatuses[uid] || {};
+        // Strict rule: only show connected if live socket is actually connected AND license is not expired
+        const isActuallyConnected = !isExpired && Boolean(liveStatus.isConnected);
+        const linkedPhone = liveStatus.phone || data.linkedPhone || data.phone || null;
+        const isPaired = Boolean(liveStatus.isPaired || linkedPhone);
 
-      usersMap.set(uid, {
-        uid,
-        email: data.email || `${uid}@solvatech.com`,
-        displayName: data.displayName || data.email?.split('@')[0] || 'Solvatech User',
-        isUnlimited,
-        licensePlan: isUnlimited
-          ? '👑 Unlimited Lifetime (Admin Granted)'
-          : (isExpired ? 'Expired Plan' : (data.licensePlan || 'Active Plan')),
-        licenseStatus: isUnlimited ? 'unlimited' : (isExpired ? 'expired' : 'active'),
-        licenseKey: data.licenseKey || null,
-        licenseExpiresAt: rawExpiresAt,
-        linkedPhone,
-        isPaired,
-        whatsappConnected: isActuallyConnected,
-        hasUsedTrial: Boolean(data.hasUsedTrial),
-        trialClaimedAt: data.trialClaimedAt || null,
-        commandsRun: data.commandsRun || 0,
-        lastLogin: data.lastLogin || data.updatedAt || new Date().toISOString(),
-        memberSince: data.createdAt || '2026-10-01',
+        usersMap.set(uid, {
+          uid,
+          email: data.email || `${uid}@solvatech.com`,
+          displayName: data.displayName || data.email?.split('@')[0] || 'Solvatech User',
+          isUnlimited,
+          licensePlan: isUnlimited
+            ? '👑 Unlimited Lifetime (Admin Granted)'
+            : (isExpired ? 'Expired Plan' : (data.licensePlan || 'Active Plan')),
+          licenseStatus: isUnlimited ? 'unlimited' : (isExpired ? 'expired' : 'active'),
+          licenseKey: data.licenseKey || null,
+          licenseExpiresAt: rawExpiresAt,
+          linkedPhone,
+          isPaired,
+          whatsappConnected: isActuallyConnected,
+          hasUsedTrial: Boolean(data.hasUsedTrial),
+          trialClaimedAt: data.trialClaimedAt || null,
+          commandsRun: data.commandsRun || 0,
+          lastLogin: data.lastLogin || data.updatedAt || new Date().toISOString(),
+          memberSince: data.createdAt || '2026-10-01',
+        });
       });
-    });
+    }
   } catch (err) {
-    console.warn('Firestore fetch users:', err);
-    throw new Error('Could not confirm the registered user list from Firestore.');
+    console.warn('Firestore fetch users note:', err);
+    if (usersMap.size === 0) {
+      throw new Error('Could not confirm the registered user list from Firestore.');
+    }
   }
 
   return Array.from(usersMap.values());
@@ -834,7 +839,7 @@ export async function terminateAllLicenses(): Promise<{ success: boolean; count:
       const data = d.data() || {};
       const email = (data.email || '').toLowerCase();
       // Master Founder Account is NEVER terminated
-      if (email === OWNER_EMAIL.toLowerCase()) return;
+      if (isOwnerEmail(email)) return;
 
       updates.push(
         setDoc(
@@ -907,7 +912,7 @@ export async function grantAllActiveUsersExtraDays(
   try {
     const allUsers = await fetchAllUsers();
     for (const u of allUsers) {
-      if (u.email?.toLowerCase() === OWNER_EMAIL.toLowerCase()) continue;
+      if (isOwnerEmail(u.email)) continue;
       await grantUserExtraDays(u.uid, u.email, days);
       count++;
     }

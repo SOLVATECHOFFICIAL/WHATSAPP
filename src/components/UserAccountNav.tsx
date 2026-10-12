@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { User } from 'firebase/auth';
 import { signOutUser } from '../services/firebase';
+import { isOwnerEmail } from '../services/admin-config';
 import { LogOut, Shield, Key, ChevronDown, User as UserIcon } from 'lucide-react';
 
 interface UserAccountNavProps {
@@ -51,7 +52,7 @@ export const UserAccountNav: React.FC<UserAccountNavProps> = ({ user, onOpenAuth
     );
   }
 
-  const isOwner = Boolean(user.email && user.email.trim().toLowerCase() === 'awoyinfasolomon1@gmail.com');
+  const isOwner = Boolean(user.email && isOwnerEmail(user.email));
   const licenseKey = isOwner ? 'SOLVA-OWNER-UNLIMITED-MASTER' : `SOLVA-${user.uid.slice(0, 6).toUpperCase()}-2026`;
 
   return (

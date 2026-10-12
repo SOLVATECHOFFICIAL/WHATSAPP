@@ -53,6 +53,7 @@ import {
 } from './components/NotificationsPanel';
 import {
   OWNER_EMAIL,
+  isOwnerEmail,
   calculateRemainingTime,
   redeemKey,
   checkUserTrialStatus,
@@ -82,7 +83,7 @@ interface WhatsAppStatus {
 }
 
 export async function safeParseJson<T = any>(res: Response | null | undefined): Promise<T | null> {
-  if (!res || !res.ok) return null;
+  if (!res) return null;
   const contentType = res.headers.get('content-type') || '';
   if (!contentType.includes('application/json') && !contentType.includes('+json')) return null;
   try {
@@ -226,10 +227,9 @@ export default function App() {
     }
   };
 
-  // STRICT RULE: Only awoyinfasolomon1@gmail.com is authorized owner/admin!
+  // STRICT RULE: Authorized owner/admin check
   const isOwner = Boolean(
-    currentUser?.email &&
-    currentUser.email.trim().toLowerCase() === OWNER_EMAIL.toLowerCase()
+    currentUser?.email && isOwnerEmail(currentUser.email)
   );
 
   // Manual status refresh: forces immediate fetch from backend for current user
@@ -664,7 +664,7 @@ export default function App() {
       });
 
       const data = await safeParseJson(res);
-      if (data && data.success) {
+      if (res.ok && data && data.success) {
         setPairingCode(data.pairingCode);
         setStatus((prev) => ({
           ...prev,
@@ -674,7 +674,13 @@ export default function App() {
           targetPhone: `+${fullNumber}`,
         }));
       } else {
-        setPairingError(data?.error || 'Failed to request pairing code or server unavailable');
+        setPairingError(
+          data?.error ||
+          data?.message ||
+          (res.status === 503
+            ? 'WhatsApp bot engine is connecting to servers, please retry in 5 seconds.'
+            : `Failed to request pairing code (${res.status}). Please try again.`)
+        );
       }
     } catch (err: any) {
       setPairingError(err.message || 'Error communicating with WhatsApp server');

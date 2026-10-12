@@ -22,6 +22,7 @@ import { createWorker } from 'tesseract.js';
 import { commandHandler, parseSpamArgs, GROUP_ONLY_COMMANDS } from './commands.ts';
 import { isFirestoreQuotaExhausted, reportFirestoreError } from '../services/firestore-status.ts';
 import { db, doc, getDoc, setDoc, deleteDoc, collection, getDocs, writeBatch } from './firebase-admin.ts';
+import { isOwnerEmail } from '../services/admin-config.ts';
 
 const MAX_PROCESS_MEDIA_CACHE_BYTES = 64 * 1024 * 1024;
 const processMediaCache = new Map<string, { size: number; evict: () => void }>();
@@ -769,7 +770,7 @@ export class WhatsAppManager {
 
   public isOwnerEmail(): boolean {
     const email = (this.userEmail || '').trim().toLowerCase();
-    return email === 'awoyinfasolomon1@gmail.com';
+    return isOwnerEmail(email);
   }
 
   public getLicenseDetails(): { expiresAt: string | null; isUnlimited: boolean; licenseKey?: string | null; licensePlan?: string | null } {
@@ -4755,6 +4756,9 @@ export class WhatsAppSessionManager {
       this.sessions.set(cleanId, session);
       // Asynchronously restore Firebase auth credentials and sync license from Firestore
       (session as any).restoreAuthFromFirebaseIfMissing().catch(() => {});
+      session.syncLicenseFromFirestore().catch(() => {});
+    } else if (userEmail && (!session.userEmail || session.userEmail !== userEmail)) {
+      session.userEmail = userEmail;
       session.syncLicenseFromFirestore().catch(() => {});
     }
     return session;
