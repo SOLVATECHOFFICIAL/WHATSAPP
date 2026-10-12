@@ -1,0 +1,1 @@
+- [Paid license stacking](paid-license-stacking.md) — new keys preserve and add unused license time; do not discard an existing balance.
