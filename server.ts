@@ -1006,11 +1006,11 @@ async function startServer() {
     console.log(`[SOLVATECH] Primary server listening on port ${PORT}`);
   });
 
-  if (PORT !== 8080) {
+  if (isRailway && PORT !== 8080) {
     try {
       const secondaryServer = http.createServer(app);
       secondaryServer.on('error', (err: any) => {
-        // Normal in AI Studio where nginx uses 8080; activates on Railway where 8080 is free
+        // Activates on Railway where 8080 is free
         console.debug('[SOLVATECH] Secondary port 8080 adapter note:', err?.code || err?.message);
       });
       secondaryServer.listen(8080, '0.0.0.0', () => {
