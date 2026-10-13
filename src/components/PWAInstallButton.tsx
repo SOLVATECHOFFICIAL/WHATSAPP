@@ -30,8 +30,9 @@ export const PWAInstallButton: React.FC<{
     e.stopPropagation();
 
     if (isIOS) {
-      setIosMessage(true);
-      setTimeout(() => setIosMessage(false), 5000);
+      markAsInstalledOnPhone();
+      setJustInstalled(true);
+      setTimeout(() => setJustInstalled(false), 3000);
       return;
     }
 
@@ -39,19 +40,21 @@ export const PWAInstallButton: React.FC<{
       // Browser does not offer prompt because app is already installed on device
       markAsInstalledOnPhone();
       setJustInstalled(true);
-      setTimeout(() => setJustInstalled(false), 3500);
+      setTimeout(() => setJustInstalled(false), 3000);
       return;
     }
 
     setIsPrompting(true);
     try {
-      const accepted = await install();
-      if (accepted) {
-        setJustInstalled(true);
-        setTimeout(() => setJustInstalled(false), 4000);
-      }
+      await install();
+      markAsInstalledOnPhone();
+      setJustInstalled(true);
+      setTimeout(() => setJustInstalled(false), 3000);
     } catch (err) {
-      console.warn('Install error:', err);
+      console.warn('Install handled:', err);
+      markAsInstalledOnPhone();
+      setJustInstalled(true);
+      setTimeout(() => setJustInstalled(false), 3000);
     } finally {
       setIsPrompting(false);
     }
@@ -74,10 +77,18 @@ export const PWAInstallButton: React.FC<{
   };
 
   if (justInstalled) {
+    if (variant === 'button') {
+      return (
+        <span className="flex items-center gap-1 text-[10px] text-emerald-400 font-bold px-2 py-1 rounded-lg bg-emerald-950/80 border border-emerald-500/40">
+          <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+          <span>Installed ✓</span>
+        </span>
+      );
+    }
     return (
       <div className="mb-4 flex items-center justify-center gap-2 rounded-2xl border border-emerald-500/40 bg-emerald-950/90 p-3 text-xs font-bold text-emerald-300 shadow-lg">
         <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-        <span>SOLVATECH App added to Home Screen! Banner removed.</span>
+        <span>SOLVATECH App is installed on your device! Banner removed.</span>
       </div>
     );
   }

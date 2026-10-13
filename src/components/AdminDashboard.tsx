@@ -472,7 +472,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           }
         : selectedPlan;
 
-      const newLic = await createLicense(planToUse, OWNER_EMAIL);
+      const newLic = await createLicense(planToUse, currentUserEmail || OWNER_EMAIL);
       setGeneratedKey(newLic);
       setBatchGenerated([]);
       setLicenses((prev) => [newLic, ...prev]);
@@ -500,7 +500,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         : selectedPlan;
 
       const count = Math.max(1, Math.min(100, Number(batchCount) || 5));
-      const created = await batchCreateLicenses(planToUse, count, OWNER_EMAIL);
+      const created = await batchCreateLicenses(planToUse, count, currentUserEmail || OWNER_EMAIL);
       setBatchGenerated(created);
       setGeneratedKey(null);
       setLicenses((prev) => [...created, ...prev]);
@@ -843,7 +843,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               </span>
             </div>
             <p className="text-[10px] sm:text-[11px] text-slate-400 font-mono flex items-center gap-1.5 truncate">
-              <span className="text-amber-300 font-bold">{currentUserEmail || 'awoyinfataiwo20@gmail.com'}</span>
+              <span className="text-amber-300 font-bold">{currentUserEmail || OWNER_EMAILS[0]}</span>
               <span className="text-slate-600">•</span>
               <span className="text-emerald-400 flex items-center gap-1 font-semibold">
                 <span className="w-2 h-2 rounded-full bg-emerald-400" />

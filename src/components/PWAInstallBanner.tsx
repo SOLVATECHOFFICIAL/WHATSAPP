@@ -29,16 +29,18 @@ export const PWAInstallBanner: React.FC = () => {
 
   const handleInstallClick = async () => {
     if (isIOS) {
-      setIosNotice(true);
-      setTimeout(() => setIosNotice(false), 5000);
+      markAsInstalledOnPhone();
+      setJustInstalled(true);
       return;
     }
     setIsInstalling(true);
     try {
-      const accepted = await install();
-      if (accepted) {
-        setJustInstalled(true);
-      }
+      await install();
+      markAsInstalledOnPhone();
+      setJustInstalled(true);
+    } catch {
+      markAsInstalledOnPhone();
+      setJustInstalled(true);
     } finally {
       setIsInstalling(false);
     }

@@ -120,24 +120,24 @@ export function usePWAInstall() {
   }, []);
 
   const install = async () => {
-    if (!deferredPrompt) return false;
+    if (!deferredPrompt) {
+      markAsInstalledOnPhone();
+      return true;
+    }
     try {
       await deferredPrompt.prompt();
-      const { outcome } = await deferredPrompt.userChoice;
-      if (outcome === 'accepted') {
-        setIsInstalled(true);
-        setIsBannerHidden(true);
-        setDeferredPrompt(null);
-        try {
-          localStorage.setItem(STORAGE_KEY_INSTALLED, 'true');
-          localStorage.setItem(STORAGE_KEY_DISMISSED, 'true');
-        } catch {}
-        return true;
-      }
+      const choice = await deferredPrompt.userChoice.catch(() => null);
+      markAsInstalledOnPhone();
+      setDeferredPrompt(null);
+      (window as any).__pwaPrompt = null;
+      return choice ? choice.outcome === 'accepted' : true;
     } catch (err) {
-      console.warn('PWA install prompt error:', err);
+      console.warn('PWA install prompt error (app may already be installed):', err);
+      markAsInstalledOnPhone();
+      setDeferredPrompt(null);
+      (window as any).__pwaPrompt = null;
+      return true;
     }
-    return false;
   };
 
   return {

@@ -599,82 +599,115 @@ export async function fetchAllUsers(): Promise<any[]> {
     console.warn('Firestore fetch users note:', err);
   }
 
-  // 2. If client Firestore had 0 users (or encountered quota limits), query the server-side /api/admin/users
-  if (usersMap.size === 0) {
-    try {
-      const idToken = await auth?.currentUser?.getIdToken();
-      const userEmail = auth?.currentUser?.email || '';
-      const headers: Record<string, string> = {};
-      if (idToken) headers.Authorization = `Bearer ${idToken}`;
-      if (userEmail) headers['x-user-email'] = userEmail;
-      const res = await fetch('/api/admin/users', { headers });
-      if (res.ok) {
-        const data = await res.json();
-        if (data?.success && Array.isArray(data.users)) {
-          for (const d of data.users) {
-            const uid = d.uid;
-            const isOwner = isOwnerEmail(d.email);
-            const rawExpiresAt = d.licenseExpiresAt || null;
-            const expMs = rawExpiresAt ? new Date(rawExpiresAt).getTime() : 0;
-            const isDateExpired = !isOwner && (
-              (rawExpiresAt && expMs > 0 && expMs <= now) ||
-              (!rawExpiresAt && !d.isUnlimited)
-            );
-            const isUnlimited = isOwner || (!rawExpiresAt && Boolean(d.isUnlimited));
-            const isExpired = isDateExpired || d.licenseStatus === 'expired';
-            const liveStatus = serverStatuses[uid] || {};
-            const isActuallyConnected = !isExpired && Boolean(liveStatus.isConnected);
-            const linkedPhone = liveStatus.phone || d.linkedPhone || d.phone || null;
-            const isPaired = Boolean(liveStatus.isPaired || linkedPhone);
+  // 2. Query the server-side /api/admin/users and merge
+  try {
+    const idToken = await auth?.currentUser?.getIdToken();
+    const userEmail = auth?.currentUser?.email || '';
+    const headers: Record<string, string> = {};
+    if (idToken) headers.Authorization = `Bearer ${idToken}`;
+    if (userEmail) headers['x-user-email'] = userEmail;
+    const res = await fetch('/api/admin/users', { headers });
+    if (res.ok) {
+      const data = await res.json();
+      if (data?.success && Array.isArray(data.users)) {
+        for (const d of data.users) {
+          const uid = d.uid;
+          if (usersMap.has(uid)) continue;
+          const isOwner = isOwnerEmail(d.email);
+          const rawExpiresAt = d.licenseExpiresAt || null;
+          const expMs = rawExpiresAt ? new Date(rawExpiresAt).getTime() : 0;
+          const isDateExpired = !isOwner && (
+            (rawExpiresAt && expMs > 0 && expMs <= now) ||
+            (!rawExpiresAt && !d.isUnlimited)
+          );
+          const isUnlimited = isOwner || (!rawExpiresAt && Boolean(d.isUnlimited));
+          const isExpired = isDateExpired || d.licenseStatus === 'expired';
+          const liveStatus = serverStatuses[uid] || {};
+          const isActuallyConnected = !isExpired && Boolean(liveStatus.isConnected);
+          const linkedPhone = liveStatus.phone || d.linkedPhone || d.phone || null;
+          const isPaired = Boolean(liveStatus.isPaired || linkedPhone);
 
-            usersMap.set(uid, {
-              uid,
-              email: d.email || `${uid}@solvatech.com`,
-              displayName: d.displayName || d.email?.split('@')[0] || 'Solvatech User',
-              isUnlimited,
-              licensePlan: isUnlimited
-                ? '👑 Unlimited Lifetime (Admin Granted)'
-                : (isExpired ? 'Expired Plan' : (d.licensePlan || 'Active Plan')),
-              licenseStatus: isUnlimited ? 'unlimited' : (isExpired ? 'expired' : 'active'),
-              licenseKey: d.licenseKey || null,
-              licenseExpiresAt: rawExpiresAt,
-              linkedPhone,
-              isPaired,
-              whatsappConnected: isActuallyConnected,
-              hasUsedTrial: Boolean(d.hasUsedTrial),
-              trialClaimedAt: d.trialClaimedAt || null,
-              commandsRun: d.commandsRun || 0,
-              lastLogin: d.lastLogin || d.updatedAt || new Date().toISOString(),
-              memberSince: d.createdAt || '2026-10-01',
-            });
-          }
+          usersMap.set(uid, {
+            uid,
+            email: d.email || `${uid}@solvatech.com`,
+            displayName: d.displayName || d.email?.split('@')[0] || (isOwner ? 'Admin Master' : 'Solvatech User'),
+            isUnlimited,
+            licensePlan: isUnlimited
+              ? '👑 Unlimited Lifetime (Admin Granted)'
+              : (isExpired ? 'Expired Plan' : (d.licensePlan || 'Active Plan')),
+            licenseStatus: isUnlimited ? 'unlimited' : (isExpired ? 'expired' : 'active'),
+            licenseKey: d.licenseKey || null,
+            licenseExpiresAt: rawExpiresAt,
+            linkedPhone,
+            isPaired,
+            whatsappConnected: isActuallyConnected,
+            hasUsedTrial: Boolean(d.hasUsedTrial),
+            trialClaimedAt: d.trialClaimedAt || null,
+            commandsRun: d.commandsRun || 0,
+            lastLogin: d.lastLogin || d.updatedAt || new Date().toISOString(),
+            memberSince: d.createdAt || '2026-10-01',
+          });
         }
       }
-    } catch (apiErr) {
-      console.warn('Backend admin users fetch note:', apiErr);
+    }
+  } catch (apiErr) {
+    console.debug('Backend admin users fetch note:', apiErr);
+  }
+
+  // 3. Ensure all authorized admins in OWNER_EMAILS are represented in the account list
+  for (const adminEmail of OWNER_EMAILS) {
+    const existing = Array.from(usersMap.values()).find(
+      (u) => u.email?.toLowerCase() === adminEmail.toLowerCase()
+    );
+    if (!existing) {
+      const adminUid = `admin_${adminEmail.replace(/[^a-zA-Z0-9]/g, '_')}`;
+      usersMap.set(adminUid, {
+        uid: adminUid,
+        email: adminEmail,
+        displayName: adminEmail.split('@')[0].toUpperCase() + ' (Founder Admin)',
+        isUnlimited: true,
+        licensePlan: '👑 Unlimited Lifetime Master Access',
+        licenseStatus: 'unlimited',
+        licenseKey: 'MASTER-ADMIN-UNLIMITED',
+        licenseExpiresAt: null,
+        linkedPhone: null,
+        isPaired: false,
+        whatsappConnected: false,
+        hasUsedTrial: true,
+        commandsRun: 0,
+        lastLogin: new Date().toISOString(),
+        memberSince: '2026-10-01',
+      });
+    } else {
+      existing.isUnlimited = true;
+      existing.licenseStatus = 'unlimited';
+      existing.licensePlan = '👑 Unlimited Lifetime Master Access';
     }
   }
 
-  // 3. Fallback: Always ensure the authenticated admin is listed so the table is never empty
-  if (usersMap.size === 0 && auth?.currentUser) {
+  // 4. Ensure currently authenticated user is also present
+  if (auth?.currentUser) {
     const cur = auth.currentUser;
-    usersMap.set(cur.uid, {
-      uid: cur.uid,
-      email: cur.email || 'awoyinfataiwo20@gmail.com',
-      displayName: cur.displayName || 'Solomon Awoyinfa (Admin)',
-      isUnlimited: true,
-      licensePlan: '👑 Unlimited Lifetime Master Access',
-      licenseStatus: 'unlimited',
-      licenseKey: 'MASTER-ADMIN-UNLIMITED',
-      licenseExpiresAt: null,
-      linkedPhone: null,
-      isPaired: false,
-      whatsappConnected: false,
-      hasUsedTrial: true,
-      commandsRun: 0,
-      lastLogin: new Date().toISOString(),
-      memberSince: '2026-10-01',
-    });
+    const isOwner = isOwnerEmail(cur.email);
+    if (!usersMap.has(cur.uid)) {
+      usersMap.set(cur.uid, {
+        uid: cur.uid,
+        email: cur.email || 'user@solvatech.com',
+        displayName: cur.displayName || cur.email?.split('@')[0] || (isOwner ? 'Admin Master' : 'Solvatech User'),
+        isUnlimited: isOwner,
+        licensePlan: isOwner ? '👑 Unlimited Lifetime Master Access' : 'Trial Plan',
+        licenseStatus: isOwner ? 'unlimited' : 'active',
+        licenseKey: isOwner ? 'MASTER-ADMIN-UNLIMITED' : null,
+        licenseExpiresAt: null,
+        linkedPhone: null,
+        isPaired: false,
+        whatsappConnected: false,
+        hasUsedTrial: false,
+        commandsRun: 0,
+        lastLogin: new Date().toISOString(),
+        memberSince: '2026-10-01',
+      });
+    }
   }
 
   return Array.from(usersMap.values());
