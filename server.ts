@@ -173,14 +173,25 @@ async function startServer() {
   app.post('/api/whatsapp/sync-license', async (req, res) => {
     try {
       const userId = (req.body?.userId as string) || (req.query.userId as string) || (req.headers['x-user-id'] as string) || '';
+      const userEmail = (req.body?.userEmail as string) || (req.query?.userEmail as string) || (req.headers['x-user-email'] as string) || '';
+      const incomingExpiresAt = req.body?.expiresAt || req.query?.expiresAt || null;
+      const isUnlimited = Boolean(req.body?.isUnlimited || req.query?.isUnlimited || (userEmail && isOwnerEmail(userEmail)));
+
       if (!userId) {
         return res.status(400).json({ success: false, error: 'User ID is required.' });
       }
-      const session = sessionManager.getSession(userId);
-      const verified = await session.syncLicenseFromFirestore();
-      if (!verified) {
-        return res.status(503).json({ success: false, error: 'Could not verify this account license from Firebase.' });
+      const session = sessionManager.getSession(userId, userEmail);
+      if (userEmail) {
+        session.userEmail = userEmail;
       }
+
+      if (isUnlimited) {
+        session.setSessionLicense(null, true);
+      } else if (incomingExpiresAt && new Date(incomingExpiresAt).getTime() > Date.now()) {
+        session.setSessionLicense(incomingExpiresAt, false);
+      }
+
+      await session.syncLicenseFromFirestore();
       res.json({
         success: true,
         isExpired: session.isLicenseExpired(),
@@ -499,10 +510,26 @@ async function startServer() {
         try {
           const snap = await getDoc(licenseRef);
           if (snap.exists) {
-            license = snap.data();
-            saveLicenseRecord(license as any);
+            license = snap.data() as any;
+            if (license) saveLicenseRecord(license as any);
           }
         } catch {}
+      }
+
+      // 2. Fallback: If client provided license snapshot (from Firestore or mint cache)
+      if (!license && req.body?.clientLicenseRecord) {
+        const clr = req.body.clientLicenseRecord;
+        if (clr && typeof clr.key === 'string' && clr.key.trim().toUpperCase() === key) {
+          license = saveLicenseRecord({
+            key,
+            planId: clr.planId || 'custom',
+            planName: clr.planName || 'Paid License Plan',
+            durationDays: Number(clr.durationDays) || 1,
+            durationMinutes: Number(clr.durationMinutes) || 0,
+            status: clr.status || 'unclaimed',
+            createdAt: clr.createdAt || new Date().toISOString(),
+          });
+        }
       }
 
       if (!license) {
@@ -575,6 +602,12 @@ async function startServer() {
             if (tExp > currentExpiryTime) currentExpiryTime = tExp;
           }
         } catch {}
+      }
+
+      // Check client active countdown as well
+      if (req.body?.currentClientExpiresAt) {
+        const cExp = expiryMillis(req.body.currentClientExpiresAt);
+        if (cExp > currentExpiryTime) currentExpiryTime = cExp;
       }
 
       const currentRemainingMs = currentExpiryTime > now ? currentExpiryTime - now : 0;
@@ -713,11 +746,12 @@ async function startServer() {
         const isSessionValid = session.sessionLicenseExpiresAt && new Date(session.sessionLicenseExpiresAt).getTime() > Date.now();
         // 2. Check if .trial_store.json has an active trial
         let isTrialActive = false;
+        const cleanUserEmail = (userEmail || '').trim().toLowerCase();
+        const emailKey = cleanUserEmail ? cleanUserEmail.replace(/[^a-z0-9]/g, '_') : '';
         const trialStorePath = path.resolve(__dirname, '.trial_store.json');
         if (fs.existsSync(trialStorePath)) {
           try {
             const tStore = JSON.parse(fs.readFileSync(trialStorePath, 'utf-8'));
-            const emailKey = userEmail ? userEmail.replace(/[^a-z0-9]/g, '_') : '';
             const tRec = (emailKey && tStore[emailKey]) || (userId && tStore[userId]);
             if (tRec?.expiresAt && new Date(tRec.expiresAt).getTime() > Date.now()) {
               session.setSessionLicense(tRec.expiresAt, false);
@@ -726,19 +760,19 @@ async function startServer() {
           } catch {}
         }
 
-        if (!isSessionValid && !isTrialActive) {
+        if (req.body?.licenseExpiresAt && new Date(req.body.licenseExpiresAt).getTime() > Date.now()) {
+          session.setSessionLicense(req.body.licenseExpiresAt, false);
+        } else if (req.body?.isUnlimited) {
+          session.setSessionLicense(null, true);
+        }
+
+        if (!isSessionValid && !isTrialActive && session.isLicenseExpired()) {
           const licenseVerified = await session.syncLicenseFromFirestore();
-          if (!licenseVerified) {
-            if (req.body?.isUnlimited) {
-              session.setSessionLicense(null, true);
-            } else if (req.body?.licenseExpiresAt && new Date(req.body.licenseExpiresAt).getTime() > Date.now()) {
-              session.setSessionLicense(req.body.licenseExpiresAt, false);
-            } else {
-              return res.status(403).json({
-                success: false,
-                error: 'Please activate your 30-minute free trial or redeem a license key to connect.',
-              });
-            }
+          if (!licenseVerified && session.isLicenseExpired()) {
+            return res.status(403).json({
+              success: false,
+              error: 'Please activate your 30-minute free trial or redeem a license key to connect.',
+            });
           }
         }
       }

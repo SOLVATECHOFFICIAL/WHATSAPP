@@ -345,6 +345,17 @@ export default function App() {
           if (isLocallyClaimed) {
             setHasClaimedTrial(true);
           }
+          const cachedExpiry =
+            localStorage.getItem(`solvatech_license_expiresAt_${user.uid}`) ||
+            (user.email ? localStorage.getItem(`solvatech_license_expiresAt_${user.email.toLowerCase()}`) : null);
+          if (cachedExpiry && new Date(cachedExpiry).getTime() > Date.now()) {
+            setUserLicenseData((prev) => ({
+              ...prev,
+              expiresAt: cachedExpiry,
+              plan: 'Active Access',
+              isUnlimited: false,
+            }));
+          }
         } catch {}
 
         // Query authoritative trial status and active expiration for this specific account
@@ -361,6 +372,10 @@ export default function App() {
                 } catch {}
               }
               if (data.isActive && data.expiresAt) {
+                try {
+                  localStorage.setItem(`solvatech_license_expiresAt_${user.uid}`, data.expiresAt);
+                  if (user.email) localStorage.setItem(`solvatech_license_expiresAt_${user.email.toLowerCase()}`, data.expiresAt);
+                } catch {}
                 setUserLicenseData((prev) => ({
                   ...prev,
                   expiresAt: data.expiresAt,
@@ -400,6 +415,12 @@ export default function App() {
                   const now = Date.now();
                   const prevExpMs = prev.expiresAt ? new Date(prev.expiresAt).getTime() : 0;
                   const newExpMs = data.licenseExpiresAt ? new Date(data.licenseExpiresAt).getTime() : 0;
+                  let localExpMs = 0;
+                  try {
+                    const lExp = localStorage.getItem(`solvatech_license_expiresAt_${user.uid}`) ||
+                      (user.email ? localStorage.getItem(`solvatech_license_expiresAt_${user.email.toLowerCase()}`) : null);
+                    if (lExp) localExpMs = new Date(lExp).getTime();
+                  } catch {}
 
                   let finalExpiresAt = data.licenseExpiresAt || null;
                   let finalPlan = data.licensePlan || (isUserUnlimited ? '👑 Unlimited Lifetime (Admin Granted)' : 'Active Plan');
@@ -408,6 +429,15 @@ export default function App() {
                   if (prevExpMs > now && (!newExpMs || newExpMs < prevExpMs)) {
                     finalExpiresAt = prev.expiresAt;
                     finalPlan = prev.plan;
+                  } else if (localExpMs > now && (!newExpMs || newExpMs < localExpMs)) {
+                    finalExpiresAt = new Date(localExpMs).toISOString();
+                  }
+
+                  if (finalExpiresAt && new Date(finalExpiresAt).getTime() > now) {
+                    try {
+                      localStorage.setItem(`solvatech_license_expiresAt_${user.uid}`, finalExpiresAt);
+                      if (user.email) localStorage.setItem(`solvatech_license_expiresAt_${user.email.toLowerCase()}`, finalExpiresAt);
+                    } catch {}
                   }
 
                   return {
@@ -915,6 +945,12 @@ export default function App() {
       if (res.success) {
         setInTabSuccess(res.message);
         setInTabKeyInput('');
+        if (res.expiresAt) {
+          try {
+            localStorage.setItem(`solvatech_license_expiresAt_${currentUser.uid}`, res.expiresAt);
+            if (currentUser.email) localStorage.setItem(`solvatech_license_expiresAt_${currentUser.email.toLowerCase()}`, res.expiresAt);
+          } catch {}
+        }
         setUserLicenseData((prev) => ({
           ...prev,
           expiresAt: res.expiresAt || prev.expiresAt,
@@ -967,6 +1003,12 @@ export default function App() {
       if (res.success) {
         setHasClaimedTrial(true);
         const newExpiresAt = res.expiresAt || new Date(Date.now() + 30 * 60 * 1000).toISOString();
+        try {
+          localStorage.setItem(`solvatech_trial_claimed_${currentUser.uid}`, 'true');
+          if (currentUser.email) localStorage.setItem(`solvatech_trial_claimed_${currentUser.email.toLowerCase()}`, 'true');
+          localStorage.setItem(`solvatech_license_expiresAt_${currentUser.uid}`, newExpiresAt);
+          if (currentUser.email) localStorage.setItem(`solvatech_license_expiresAt_${currentUser.email.toLowerCase()}`, newExpiresAt);
+        } catch {}
         setTrialMessage({ type: 'success', text: res.message });
         setUserLicenseData({
           expiresAt: newExpiresAt,

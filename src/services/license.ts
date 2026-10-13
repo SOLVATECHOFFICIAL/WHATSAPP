@@ -134,18 +134,51 @@ export async function redeemKey(
     return { success: false, message: 'Sign in and enter a valid license key before redeeming.' };
   }
 
+  const cleanKey = keyToRedeem.trim().toUpperCase().replace(/\s+/g, '');
+  const cleanEmail = userEmail.trim().toLowerCase();
+  const currentClientExpiresAt =
+    localStorage.getItem(`solvatech_license_expiresAt_${userUid}`) ||
+    localStorage.getItem(`solvatech_license_expiresAt_${cleanEmail}`) ||
+    null;
+
   let data: any;
   try {
-    const response = await fetch('/api/license/redeem', {
+    let response = await fetch('/api/license/redeem', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         userId: userUid,
-        email: userEmail.trim().toLowerCase(),
-        key: keyToRedeem.trim().toUpperCase(),
+        email: cleanEmail,
+        key: cleanKey,
+        currentClientExpiresAt,
       }),
     });
     data = await response.json();
+
+    // If server didn't find the key (e.g. minted on client or during restart), check client Firestore fallback
+    if ((!response.ok || !data.success) && (response.status === 404 || data?.message?.includes('not found') || data?.message?.includes('Invalid'))) {
+      try {
+        const licSnap = await getDoc(doc(db, 'licenses', cleanKey));
+        if (licSnap.exists()) {
+          const licData = licSnap.data() as LicenseRecord;
+          response = await fetch('/api/license/redeem', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              userId: userUid,
+              email: cleanEmail,
+              key: cleanKey,
+              currentClientExpiresAt,
+              clientLicenseRecord: licData,
+            }),
+          });
+          data = await response.json();
+        }
+      } catch (fallbackErr) {
+        console.warn('Client Firestore fallback check note:', fallbackErr);
+      }
+    }
+
     if (!response.ok || !data.success) {
       return {
         success: false,
@@ -179,6 +212,51 @@ export async function redeemKey(
   const message = isStacked
     ? `🎉 ${data.planName} Activated! Added ${addedTimeLabel} on top of your existing ${prevHours}h ${prevMins}m balance. New total: ${newDays > 0 ? `${newDays}d ` : ''}${remHours}h ${remMins}m left!`
     : `🎉 ${data.planName} Activated! You have ${addedTimeLabel} of full 24/7 WhatsApp bot access. Timer is running!`;
+
+  // Save to localStorage immediately so zero-blink countdown works
+  try {
+    localStorage.setItem(`solvatech_license_expiresAt_${userUid}`, newExpiresAt);
+    localStorage.setItem(`solvatech_license_expiresAt_${cleanEmail}`, newExpiresAt);
+  } catch {}
+
+  // Update client Firestore user document directly for reactive UI sync
+  try {
+    const userRef = doc(db, 'users', userUid);
+    void setDoc(userRef, {
+      uid: userUid,
+      email: cleanEmail,
+      licenseExpiresAt: newExpiresAt,
+      licensePlan: data.planName || 'Active Paid Plan',
+      licenseKey: cleanKey,
+      licenseStatus: 'active',
+      isUnlimited: false,
+      updatedAt: serverTimestamp(),
+    }, { merge: true });
+
+    const userLicRef = doc(db, 'user_licenses', userUid);
+    void setDoc(userLicRef, {
+      userId: userUid,
+      email: cleanEmail,
+      activeKey: cleanKey,
+      plan: data.planName || 'Active Paid Plan',
+      expiresAt: newExpiresAt,
+      updatedAt: serverTimestamp(),
+    }, { merge: true });
+  } catch {}
+
+  // Trigger server session license sync
+  try {
+    void fetch('/api/whatsapp/sync-license', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId: userUid,
+        userEmail: cleanEmail,
+        expiresAt: newExpiresAt,
+        isUnlimited: false,
+      }),
+    });
+  } catch {}
 
   return {
     success: true,
@@ -931,6 +1009,8 @@ export async function claim30MinuteTrial(
   try {
     localStorage.setItem(`solvatech_trial_claimed_${userUid}`, 'true');
     localStorage.setItem(`solvatech_trial_claimed_${cleanEmail}`, 'true');
+    localStorage.setItem(`solvatech_license_expiresAt_${userUid}`, finalExpiresAt);
+    localStorage.setItem(`solvatech_license_expiresAt_${cleanEmail}`, finalExpiresAt);
   } catch {}
 
   // Update client Firestore user document directly for immediate reactive UI update
@@ -955,7 +1035,12 @@ export async function claim30MinuteTrial(
     void fetch('/api/whatsapp/sync-license', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId: userUid }),
+      body: JSON.stringify({
+        userId: userUid,
+        userEmail: cleanEmail,
+        expiresAt: finalExpiresAt,
+        isUnlimited: false,
+      }),
     }).catch(() => {});
   } catch {}
 

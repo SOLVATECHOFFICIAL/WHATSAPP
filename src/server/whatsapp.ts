@@ -542,10 +542,10 @@ export class WhatsAppManager {
   private reconnectTimer: NodeJS.Timeout | null = null;
   private isFreshNewPairing = false;
   private heartbeatInterval: NodeJS.Timeout | null = null;
-  private sessionLicenseExpiresAt: string | null = null;
-  private sessionLicenseKey: string | null = null;
-  private sessionLicensePlan: string | null = null;
-  private isSessionUnlimited: boolean = false;
+  public sessionLicenseExpiresAt: string | null = null;
+  public sessionLicenseKey: string | null = null;
+  public sessionLicensePlan: string | null = null;
+  public isSessionUnlimited: boolean = false;
   private userInteractions = new Map<string, Map<string, { count: number; name?: string }>>();
   private contactNames = new Map<string, string>();
   private groupInviteCodes = new Map<string, string>();
@@ -734,26 +734,34 @@ export class WhatsAppManager {
     }
     try {
       if (this.userId && this.userId !== 'default') {
-        const snap = await getDoc(doc(db, 'users', this.userId));
-        if (!snap.exists) {
-          return Boolean(this.sessionLicenseExpiresAt || this.isSessionUnlimited || this.isOwnerEmail());
+        let expAt: string | null = null;
+        let d: any = null;
+
+        try {
+          const snap = await getDoc(doc(db, 'users', this.userId));
+          if (snap.exists) {
+            d = snap.data();
+            if (typeof d?.email === 'string' && d.email.trim()) {
+              this.userEmail = d.email.trim();
+            }
+            if (typeof d?.licenseExpiresAt === 'string') {
+              expAt = d.licenseExpiresAt;
+            }
+            if (typeof d?.licenseKey === 'string' && d.licenseKey.trim()) {
+              this.sessionLicenseKey = d.licenseKey.trim();
+            } else if (typeof d?.activeKey === 'string' && d.activeKey.trim()) {
+              this.sessionLicenseKey = d.activeKey.trim();
+            }
+            if (typeof d?.licensePlan === 'string' && d.licensePlan.trim()) {
+              this.sessionLicensePlan = d.licensePlan.trim();
+            } else if (typeof d?.plan === 'string' && d.plan.trim()) {
+              this.sessionLicensePlan = d.plan.trim();
+            }
+          }
+        } catch (dbErr) {
+          console.debug('User document read note:', dbErr);
         }
 
-        const d = snap.data();
-        if (typeof d?.email === 'string' && d.email.trim()) {
-          this.userEmail = d.email.trim();
-        }
-        const expAt = typeof d?.licenseExpiresAt === 'string' ? d.licenseExpiresAt : null;
-        if (typeof d?.licenseKey === 'string' && d.licenseKey.trim()) {
-          this.sessionLicenseKey = d.licenseKey.trim();
-        } else if (typeof d?.activeKey === 'string' && d.activeKey.trim()) {
-          this.sessionLicenseKey = d.activeKey.trim();
-        }
-        if (typeof d?.licensePlan === 'string' && d.licensePlan.trim()) {
-          this.sessionLicensePlan = d.licensePlan.trim();
-        } else if (typeof d?.plan === 'string' && d.plan.trim()) {
-          this.sessionLicensePlan = d.plan.trim();
-        }
         // If still missing key, check user_licenses collection
         if (!this.sessionLicenseKey) {
           try {
@@ -762,11 +770,13 @@ export class WhatsAppManager {
               const uld = ulSnap.data();
               if (uld?.activeKey) this.sessionLicenseKey = uld.activeKey;
               if (uld?.plan && !this.sessionLicensePlan) this.sessionLicensePlan = uld.plan;
+              if (uld?.expiresAt && !expAt) expAt = uld.expiresAt;
             }
           } catch (ulErr) {
             reportFirestoreError(ulErr);
           }
         }
+
         // Check if there is an active trial in .trial_store.json
         const trialStorePath = path.resolve(__dirname, '../../.trial_store.json');
         if (fs.existsSync(trialStorePath)) {
@@ -785,7 +795,7 @@ export class WhatsAppManager {
           } catch {}
         }
 
-        // Preserve current active session license if incoming expAt is null or expired
+        // Preserve current active session license if incoming expAt is null or older
         if (this.sessionLicenseExpiresAt) {
           const sExpMs = new Date(this.sessionLicenseExpiresAt).getTime();
           const newExpMs = expAt ? new Date(expAt).getTime() : 0;
@@ -1248,6 +1258,22 @@ export class WhatsAppManager {
         name: registeredName,
         phone: `+${registeredPhone}`,
       };
+    }
+
+    // Re-check trial store if session license is currently expired or uninitialized
+    if (this.isLicenseExpired()) {
+      const trialStorePath = path.resolve(__dirname, '../../.trial_store.json');
+      if (fs.existsSync(trialStorePath)) {
+        try {
+          const tStore = JSON.parse(fs.readFileSync(trialStorePath, 'utf-8'));
+          const emailKey = this.userEmail ? this.userEmail.toLowerCase().replace(/[^a-z0-9]/g, '_') : '';
+          const tRec = (emailKey && tStore[emailKey]) || (this.userId && tStore[this.userId]);
+          if (tRec?.expiresAt && new Date(tRec.expiresAt).getTime() > Date.now()) {
+            this.setSessionLicense(tRec.expiresAt, false);
+            if (!this.sessionLicensePlan) this.sessionLicensePlan = '⚡ 30-Minute Free Test (Active)';
+          }
+        } catch {}
+      }
     }
 
     const isExpired = this.isLicenseExpired();
