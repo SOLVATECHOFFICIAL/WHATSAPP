@@ -903,14 +903,15 @@ async function startServer() {
       const remainingMs = isActive ? expMs - now : 0;
       const hasClaimedEver = Boolean(
         trialRecord?.claimedAt ||
+        trialRecord?.lifetimeLocked ||
         userRecord?.hasUsedTrial ||
         userRecord?.lifetimeTrialLocked
       );
-      const hasUsedTrial = hasClaimedEver && !isActive;
 
       return res.json({
         success: true,
-        hasUsedTrial,
+        hasClaimedTrial: hasClaimedEver,
+        hasUsedTrial: hasClaimedEver,
         isActive,
         expiresAt,
         remainingMs,
@@ -952,6 +953,7 @@ async function startServer() {
             success: true,
             message: '🎉 30-minute test is already active! Your countdown is running.',
             expiresAt: existingTrial.expiresAt,
+            hasClaimedTrial: true,
           });
         }
         return res.status(409).json({
@@ -1077,6 +1079,7 @@ async function startServer() {
         success: true,
         message: '🎉 30-minute test activated! Your countdown has begun.',
         expiresAt: newExpiresAt,
+        hasClaimedTrial: true,
       });
     } catch (err: any) {
       reportFirestoreError(err);

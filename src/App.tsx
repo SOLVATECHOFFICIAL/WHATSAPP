@@ -337,12 +337,29 @@ export default function App() {
       setAuthLoading(false);
 
       if (user) {
+        // Check local storage immediately for zero-flicker UI
+        try {
+          const isLocallyClaimed =
+            localStorage.getItem(`solvatech_trial_claimed_${user.uid}`) === 'true' ||
+            Boolean(user.email && localStorage.getItem(`solvatech_trial_claimed_${user.email.toLowerCase()}`) === 'true');
+          if (isLocallyClaimed) {
+            setHasClaimedTrial(true);
+          }
+        } catch {}
+
         // Query authoritative trial status and active expiration for this specific account
         fetch(`/api/trial/status?uid=${encodeURIComponent(user.uid)}&email=${encodeURIComponent(user.email || '')}`)
           .then((r) => r.json())
           .then((data) => {
             if (data?.success) {
-              setHasClaimedTrial(data.hasUsedTrial);
+              const isClaimed = Boolean(data.hasClaimedTrial ?? data.hasUsedTrial);
+              if (isClaimed) {
+                setHasClaimedTrial(true);
+                try {
+                  localStorage.setItem(`solvatech_trial_claimed_${user.uid}`, 'true');
+                  if (user.email) localStorage.setItem(`solvatech_trial_claimed_${user.email.toLowerCase()}`, 'true');
+                } catch {}
+              }
               if (data.isActive && data.expiresAt) {
                 setUserLicenseData((prev) => ({
                   ...prev,
@@ -355,7 +372,7 @@ export default function App() {
           })
           .catch(() => {
             checkUserTrialStatus(user.uid, user.email).then((claimed) => {
-              setHasClaimedTrial(claimed);
+              if (claimed) setHasClaimedTrial(true);
             });
           });
 
@@ -366,12 +383,12 @@ export default function App() {
             (snap) => {
               if (snap.exists()) {
                 const data = snap.data();
-                if (data.hasUsedTrial === false) {
-                  setHasClaimedTrial(false);
-                } else if (data.hasUsedTrial === true) {
-                  const expMs = data.licenseExpiresAt ? new Date(data.licenseExpiresAt).getTime() : 0;
-                  const isTrialStillActive = expMs > Date.now();
-                  setHasClaimedTrial(!isTrialStillActive);
+                if (data.hasUsedTrial === true || data.lifetimeTrialLocked === true || data.trialClaimedAt) {
+                  setHasClaimedTrial(true);
+                  try {
+                    localStorage.setItem(`solvatech_trial_claimed_${user.uid}`, 'true');
+                    if (user.email) localStorage.setItem(`solvatech_trial_claimed_${user.email.toLowerCase()}`, 'true');
+                  } catch {}
                 }
 
                 const hasFiniteExpiry = Boolean(data.licenseExpiresAt);
@@ -928,19 +945,20 @@ export default function App() {
         currentUser.email || `${currentUser.uid}@solvatech.com`
       );
       if (res.success) {
-        setHasClaimedTrial(false);
+        setHasClaimedTrial(true);
+        const newExpiresAt = res.expiresAt || new Date(Date.now() + 30 * 60 * 1000).toISOString();
         setTrialMessage({ type: 'success', text: res.message });
-        setUserLicenseData((prev) => ({
-          ...prev,
-          expiresAt: res.expiresAt || new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+        setUserLicenseData({
+          expiresAt: newExpiresAt,
           plan: '⚡ 30-Minute Free Trial (Active)',
+          key: null,
           isUnlimited: false,
-        }));
+        });
         setToastNotification({
           id: 'trial_' + Date.now(),
           type: 'system',
           title: '🎉 30-Minute Free Test Activated!',
-          body: 'You now have 30 minutes of free access to link your WhatsApp and test all bot features!',
+          body: 'Countdown has begun instantly! Link your WhatsApp below to test all bot features.',
           timestamp: new Date().toLocaleTimeString(),
         });
         setTimeout(() => setToastNotification(null), 5000);
@@ -1938,6 +1956,35 @@ export default function App() {
                       </div>
                     </div>
                   )}
+                  {/* Live Active 30-Minute Trial Countdown Box */}
+                  {isLicenseActive && hasClaimedTrial && !isOwner && !userLicenseData.isUnlimited && userLicenseData.expiresAt && (
+                    <div className="p-3.5 rounded-2xl bg-gradient-to-r from-emerald-950/80 via-slate-900 to-amber-950/40 border border-emerald-500/50 shadow-xl flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className="p-2.5 rounded-xl bg-emerald-500/20 text-emerald-400 shrink-0 ring-1 ring-emerald-500/30">
+                          <Zap className="w-5 h-5 text-emerald-400 fill-emerald-400 animate-pulse" />
+                        </div>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <h4 className="font-bold text-xs sm:text-sm text-white">⚡ 30-Minute Free Test Active</h4>
+                            <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[9px] font-bold uppercase tracking-wider">
+                              Countdown Running
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-slate-300 mt-0.5 truncate">
+                            Your free session is ticking live. Link your WhatsApp below now!
+                          </p>
+                        </div>
+                      </div>
+                      <div className="text-right shrink-0 bg-slate-950/90 px-3.5 py-1.5 rounded-xl border border-emerald-500/40 shadow-inner">
+                        <span className="text-[9px] text-slate-400 uppercase tracking-wider block font-semibold">Remaining</span>
+                        <LicenseCountdown
+                          expiresAt={userLicenseData.expiresAt}
+                          isUnlimited={false}
+                          nowOffsetMs={serverClockOffsetMs}
+                        />
+                      </div>
+                    </div>
+                  )}
 
                   {!isLicenseActive && hasClaimedTrial && (
                     <div className="p-3.5 rounded-xl bg-amber-950/30 border border-amber-500/40 text-amber-300 text-xs flex items-start justify-between gap-3">
@@ -2192,59 +2239,53 @@ export default function App() {
           {/* TAB 3: LICENSE */}
           {activeTab === 'license' && (
             <div className="space-y-4">
-              {/* 30-MINUTE FREE TEST (ONCE IN A LIFETIME PER ACCOUNT) */}
-              <div className="p-4 rounded-2xl bg-gradient-to-r from-amber-950/70 via-slate-900 to-emerald-950/50 border-2 border-amber-500/60 shadow-xl space-y-3">
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex items-start gap-3">
-                    <img
-                      src="/solva.webp"
-                      alt="SOLVATECH"
-                      className="w-10 h-10 rounded-xl object-cover ring-1 ring-amber-500/50 shadow-md shrink-0"
-                    />
-                    <div>
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <h4 className="font-bold text-sm text-white">🎁 30-Minute Free Test</h4>
-                        <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[10px] font-bold uppercase tracking-wider">
-                          Once in a Lifetime
-                        </span>
+              {/* 30-MINUTE FREE TEST (ONCE IN A LIFETIME PER ACCOUNT) - TAKEN AWAY FOREVER ONCE CLAIMED */}
+              {!hasClaimedTrial && (
+                <div className="p-4 rounded-2xl bg-gradient-to-r from-amber-950/70 via-slate-900 to-emerald-950/50 border-2 border-amber-500/60 shadow-xl space-y-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-start gap-3">
+                      <img
+                        src="/solva.webp"
+                        alt="SOLVATECH"
+                        className="w-10 h-10 rounded-xl object-cover ring-1 ring-amber-500/50 shadow-md shrink-0"
+                      />
+                      <div>
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <h4 className="font-bold text-sm text-white">🎁 30-Minute Free Test</h4>
+                          <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 text-[10px] font-bold uppercase tracking-wider">
+                            Once in a Lifetime
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-slate-300 mt-1 leading-relaxed">
+                          Every account gets <strong>30 minutes of free, unrestricted access</strong> to connect WhatsApp and test all bot features! Stacks on top of your balance if activated.
+                        </p>
                       </div>
-                      <p className="text-[11px] text-slate-300 mt-1 leading-relaxed">
-                        Every account gets <strong>30 minutes of free, unrestricted access</strong> to connect WhatsApp and test all bot features! Stacks on top of your balance if activated.
-                      </p>
                     </div>
                   </div>
-                </div>
 
-                {trialMessage && (
-                  <div
-                    className={`p-2.5 rounded-xl text-xs flex items-center gap-2 ${
-                      trialMessage.type === 'success'
-                        ? 'bg-emerald-950/50 border border-emerald-500/50 text-emerald-300'
-                        : 'bg-rose-950/50 border border-rose-500/50 text-rose-300'
-                    }`}
-                  >
-                    {trialMessage.type === 'success' ? (
-                      <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                    ) : (
-                      <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
-                    )}
-                    <span>{trialMessage.text}</span>
-                  </div>
-                )}
+                  {trialMessage && (
+                    <div
+                      className={`p-2.5 rounded-xl text-xs flex items-center gap-2 ${
+                        trialMessage.type === 'success'
+                          ? 'bg-emerald-950/50 border border-emerald-500/50 text-emerald-300'
+                          : 'bg-rose-950/50 border border-rose-500/50 text-rose-300'
+                      }`}
+                    >
+                      {trialMessage.type === 'success' ? (
+                        <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                      ) : (
+                        <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                      )}
+                      <span>{trialMessage.text}</span>
+                    </div>
+                  )}
 
-                <div className="flex items-center justify-between gap-3 pt-2 border-t border-slate-800/80">
-                  <div className="text-[11px] text-slate-400 flex items-center gap-1.5">
-                    <Clock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-                    <span>
-                      {hasClaimedTrial ? 'Status: 30-Minute Trial Already Used' : 'Status: Ready to Activate (Free)'}
-                    </span>
-                  </div>
+                  <div className="flex items-center justify-between gap-3 pt-2 border-t border-slate-800/80">
+                    <div className="text-[11px] text-slate-400 flex items-center gap-1.5">
+                      <Clock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                      <span>Status: Ready to Activate (Free)</span>
+                    </div>
 
-                  {hasClaimedTrial ? (
-                    <span className="px-3 py-1.5 rounded-xl bg-slate-850 border border-slate-700/80 text-slate-400 text-xs font-semibold">
-                      ✓ Trial Completed
-                    </span>
-                  ) : (
                     <button
                       type="button"
                       onClick={handleClaim30MinTrial}
@@ -2263,9 +2304,9 @@ export default function App() {
                         </>
                       )}
                     </button>
-                  )}
+                  </div>
                 </div>
-              </div>
+              )}
 
               {/* NUMBER ONE REQUIREMENT: PROMINENT, BOLD OPAY BANK SHOWCASE */}
               <div className="p-4 sm:p-5 rounded-3xl bg-gradient-to-br from-emerald-950 via-slate-900 to-teal-950 border-2 border-emerald-400/80 shadow-2xl shadow-emerald-950/80 space-y-4 relative overflow-hidden">

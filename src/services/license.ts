@@ -783,6 +783,16 @@ export async function checkUserTrialStatus(
 
   const cleanEmail = (userEmail || '').trim().toLowerCase();
 
+  // Instant local memory check: once claimed in this account, never show again
+  try {
+    if (userUid && localStorage.getItem(`solvatech_trial_claimed_${userUid}`) === 'true') {
+      return true;
+    }
+    if (cleanEmail && localStorage.getItem(`solvatech_trial_claimed_${cleanEmail}`) === 'true') {
+      return true;
+    }
+  } catch {}
+
   // 1. Check persistent server trial endpoint first (authoritative)
   try {
     const q = new URLSearchParams();
@@ -792,7 +802,14 @@ export async function checkUserTrialStatus(
     if (res.ok) {
       const data = await res.json();
       if (data && data.success) {
-        return data.hasUsedTrial === true;
+        const isClaimed = Boolean(data.hasClaimedTrial ?? data.hasUsedTrial);
+        if (isClaimed) {
+          try {
+            if (userUid) localStorage.setItem(`solvatech_trial_claimed_${userUid}`, 'true');
+            if (cleanEmail) localStorage.setItem(`solvatech_trial_claimed_${cleanEmail}`, 'true');
+          } catch {}
+          return true;
+        }
       }
     }
   } catch (apiErr) {
@@ -807,9 +824,11 @@ export async function checkUserTrialStatus(
         const snap = await getDoc(userRef);
         if (snap.exists()) {
           const data = snap.data();
-          const expMs = data?.licenseExpiresAt ? new Date(data.licenseExpiresAt).getTime() : 0;
-          const isActive = expMs > Date.now();
-          if ((data?.hasUsedTrial === true || data?.trialClaimedAt) && !isActive) {
+          if (data?.hasUsedTrial === true || data?.trialClaimedAt || data?.lifetimeTrialLocked === true) {
+            try {
+              localStorage.setItem(`solvatech_trial_claimed_${userUid}`, 'true');
+              if (cleanEmail) localStorage.setItem(`solvatech_trial_claimed_${cleanEmail}`, 'true');
+            } catch {}
             return true;
           }
         }
@@ -847,6 +866,12 @@ export async function claim30MinuteTrial(
     });
     const data = await res.json();
     if (!res.ok || !data.success || typeof data.expiresAt !== 'string') {
+      if (data?.message?.includes('already been claimed') || data?.message?.includes('already active')) {
+        try {
+          localStorage.setItem(`solvatech_trial_claimed_${userUid}`, 'true');
+          localStorage.setItem(`solvatech_trial_claimed_${cleanEmail}`, 'true');
+        } catch {}
+      }
       return {
         success: false,
         message: data?.message || 'The 30-minute test could not be activated.',
@@ -860,6 +885,12 @@ export async function claim30MinuteTrial(
       message: 'Trial service is unavailable. Please retry in a moment.',
     };
   }
+
+  // Permanently save to localStorage for this account so claim banner is gone forever
+  try {
+    localStorage.setItem(`solvatech_trial_claimed_${userUid}`, 'true');
+    localStorage.setItem(`solvatech_trial_claimed_${cleanEmail}`, 'true');
+  } catch {}
 
   // Update client Firestore user document directly for immediate reactive UI update
   try {
