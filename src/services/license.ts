@@ -11,6 +11,7 @@ import {
   updateDoc,
   serverTimestamp,
   query,
+  where,
   orderBy
 } from 'firebase/firestore';
 
@@ -325,9 +326,39 @@ export async function toggleUserUnlimited(
       },
       { merge: true }
     );
+
+    // Sync any secondary Firestore records with the same email
+    if (email && email.includes('@')) {
+      try {
+        const qSnap = await getDocs(query(collection(db, 'users'), where('email', '==', email.trim().toLowerCase())));
+        for (const d of qSnap.docs) {
+          if (d.id !== userUid) {
+            await setDoc(
+              doc(db, 'users', d.id),
+              {
+                isUnlimited: enableUnlimited,
+                licenseStatus: enableUnlimited ? 'unlimited' : 'expired',
+                licensePlan: enableUnlimited ? '👑 Unlimited Lifetime (Admin Granted)' : 'Expired Plan',
+                licenseKey: enableUnlimited ? 'SOLVA-ADMIN-UNLIMITED-VIP' : 'REVOKED',
+                licenseExpiresAt: enableUnlimited ? null : new Date().toISOString(),
+                updatedAt: serverTimestamp(),
+              },
+              { merge: true }
+            );
+          }
+        }
+      } catch {}
+    }
   } catch (err) {
     console.warn('Firestore toggle unlimited:', err);
   }
+
+  try {
+    localStorage.setItem(`solvatech_license_isUnlimited_${userUid}`, enableUnlimited ? 'true' : 'false');
+    if (email) {
+      localStorage.setItem(`solvatech_license_isUnlimited_${email.trim().toLowerCase()}`, enableUnlimited ? 'true' : 'false');
+    }
+  } catch {}
 
   // Persist directly to backend database so refresh never loses state
   await postAdminUpdate({
@@ -418,6 +449,42 @@ export async function grantUserExtraDays(
       },
       { merge: true }
     );
+
+    const userLicRef = doc(db, 'user_licenses', userUid);
+    await setDoc(
+      userLicRef,
+      {
+        userId: userUid,
+        email: userEmail,
+        expiresAt: newExpiresAt,
+        plan: `Admin Granted (+${days} Days)`,
+        status: 'active',
+        isUnlimited: false,
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true }
+    );
+
+    if (userEmail && userEmail.includes('@')) {
+      try {
+        const qSnap = await getDocs(query(collection(db, 'users'), where('email', '==', userEmail.trim().toLowerCase())));
+        for (const d of qSnap.docs) {
+          if (d.id !== userUid) {
+            await setDoc(
+              doc(db, 'users', d.id),
+              {
+                licenseExpiresAt: newExpiresAt,
+                licensePlan: `Admin Granted (+${days} Days)`,
+                licenseStatus: 'active',
+                isUnlimited: false,
+                updatedAt: serverTimestamp(),
+              },
+              { merge: true }
+            );
+          }
+        }
+      } catch {}
+    }
   } catch (e) {
     console.error('Error granting extra days in Firestore:', e);
   }
@@ -854,15 +921,24 @@ export async function fetchAllUsers(): Promise<any[]> {
 
     if (finalEmailMap.has(rawEmail)) {
       const existing = finalEmailMap.get(rawEmail);
+      const isUnlimitedMerged = Boolean(existing.isUnlimited || user.isUnlimited);
       const existingScore = (existing.isUnlimited ? 100 : 0) + (existing.linkedPhone ? 50 : 0) + (existing.licenseExpiresAt ? 25 : 0);
       const currentScore = (user.isUnlimited ? 100 : 0) + (user.linkedPhone ? 50 : 0) + (user.licenseExpiresAt ? 25 : 0);
 
-      if (currentScore > existingScore) {
-        if (existing.uid) duplicateUidsToDelete.push(existing.uid);
-        finalEmailMap.set(rawEmail, user);
-      } else {
-        if (user.uid) duplicateUidsToDelete.push(user.uid);
+      const winner = currentScore > existingScore ? user : existing;
+      const loser = currentScore > existingScore ? existing : user;
+
+      if (loser.uid && loser.uid !== winner.uid) {
+        duplicateUidsToDelete.push(loser.uid);
       }
+
+      finalEmailMap.set(rawEmail, {
+        ...winner,
+        isUnlimited: isUnlimitedMerged,
+        licensePlan: isUnlimitedMerged ? '👑 Unlimited Lifetime (Admin Granted)' : winner.licensePlan,
+        licenseStatus: isUnlimitedMerged ? 'unlimited' : winner.licenseStatus,
+        licenseExpiresAt: isUnlimitedMerged ? null : (winner.licenseExpiresAt || loser.licenseExpiresAt || null),
+      });
     } else {
       finalEmailMap.set(rawEmail, user);
     }

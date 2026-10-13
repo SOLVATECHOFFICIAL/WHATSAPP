@@ -594,7 +594,45 @@ async function startServer() {
         } catch {}
       }
 
-      // 2. Fallback: If client provided license snapshot (from Firestore or mint cache)
+      // 2. Fallback: Query live Firestore via REST API if local store was restarted/cleared
+      if (!license && firebaseConfig.projectId) {
+        try {
+          const fsRes = await fetch(
+            `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(firebaseConfig.projectId)}/databases/(default)/documents/licenses/${encodeURIComponent(key)}`,
+            { signal: AbortSignal.timeout(4000) }
+          );
+          if (fsRes.ok) {
+            const fsDoc = (await fsRes.json()) as any;
+            if (fsDoc?.fields) {
+              const parseFs = (f: any) => {
+                if (!f) return undefined;
+                if (f.stringValue !== undefined) return f.stringValue;
+                if (f.integerValue !== undefined) return Number(f.integerValue);
+                if (f.doubleValue !== undefined) return Number(f.doubleValue);
+                if (f.booleanValue !== undefined) return f.booleanValue;
+                return undefined;
+              };
+              const fields = fsDoc.fields;
+              license = saveLicenseRecord({
+                key: parseFs(fields.key) || key,
+                planId: parseFs(fields.planId) || 'custom',
+                planName: parseFs(fields.planName) || 'Paid License Plan',
+                durationDays: Number(parseFs(fields.durationDays) || 1),
+                durationMinutes: Number(parseFs(fields.durationMinutes) || 0),
+                status: parseFs(fields.status) || 'unclaimed',
+                claimedBy: parseFs(fields.claimedBy) || null,
+                claimedEmail: parseFs(fields.claimedEmail) || null,
+                expiresAt: parseFs(fields.expiresAt) || null,
+                createdAt: parseFs(fields.createdAt) || new Date().toISOString(),
+              });
+            }
+          }
+        } catch (restErr) {
+          console.debug('Firestore REST lookup note:', restErr);
+        }
+      }
+
+      // 3. Fallback: If client provided license snapshot (from Firestore or mint cache)
       if (!license && req.body?.clientLicenseRecord) {
         const clr = req.body.clientLicenseRecord;
         if (clr && typeof clr.key === 'string' && clr.key.trim().toUpperCase() === key) {
@@ -1553,6 +1591,14 @@ async function startServer() {
 
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`[SOLVATECH] Primary server listening on port ${PORT}`);
+    // Instant reconnection on startup / Railway crash recovery:
+    // Checks all previously connected sessions, validates licenses, and restores them
+    setTimeout(() => {
+      console.log('[SOLVATECH] Running startup auto-restore and instant reconnect pass...');
+      sessionManager.autoRestoreAllSessions().catch((err) => {
+        console.warn('[SOLVATECH] Startup auto-restore note:', err);
+      });
+    }, 2000);
   });
 
   if (isRailway && PORT !== 8080) {

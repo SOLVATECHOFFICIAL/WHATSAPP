@@ -355,7 +355,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
       setUsers((prev) =>
         prev.map((u) => {
-          if (u.uid === user.uid) {
+          if (u.uid === user.uid || (u.email && user.email && u.email.toLowerCase() === user.email.toLowerCase())) {
             return {
               ...u,
               isUnlimited: nextUnlimited,
@@ -367,6 +367,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           return u;
         })
       );
+
+      void refreshAdminUsers();
 
       showToast(
         nextUnlimited
@@ -389,9 +391,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       if (res.success) {
         setUsers((prev) =>
           prev.map((u) =>
-            u.uid === user.uid ? { ...u, licenseExpiresAt: res.expiresAt, isUnlimited: false } : u
+            u.uid === user.uid || (u.email && user.email && u.email.toLowerCase() === user.email.toLowerCase())
+              ? { ...u, licenseExpiresAt: res.expiresAt, licenseStatus: 'active', isUnlimited: false }
+              : u
           )
         );
+        void refreshAdminUsers();
         showToast(`Added +${days} days to ${user.email}!`);
       }
     } catch (e) {

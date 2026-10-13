@@ -1322,10 +1322,11 @@ export class WhatsAppManager {
         }
 
         const elapsed = Date.now() - this.reconnectingStartedAt;
-        if (elapsed >= 45000) {
+        const FIVE_MINUTES_MS = 5 * 60 * 1000; // 300,000 ms
+        if (elapsed >= FIVE_MINUTES_MS) {
           // STRICT USER REQUIREMENT:
-          // "if try reconnect back for full 45 sec and no avail just return back the real WhatsApp pair for user t put number again"
-          console.log(`[Baileys Reconnect ${this.userId}] 45 seconds elapsed without reaching WhatsApp device. Returning back to pairing screen.`);
+          // "if he try it for Good 5 min and no avail then relax and disconnect and wait for the user to come and repair it self maybe the user already disconnect it from WhatsApp"
+          console.log(`[Baileys Reconnect ${this.userId}] 5 minutes elapsed without reaching WhatsApp phone. Relaxing socket attempts and waiting for user repair.`);
           this.reconnectingStartedAt = null;
           this.isConnecting = false;
           if (this.sock) {
@@ -1335,32 +1336,24 @@ export class WhatsAppManager {
             } catch {}
             this.sock = null;
           }
-          try {
-            if (fs.existsSync(this.authDir)) {
-              fs.rmSync(this.authDir, { recursive: true, force: true });
-            }
-            this.clearCredsFromFirebase().catch(() => {});
-          } catch {}
 
           this.currentStatus.isConnected = false;
-          this.currentStatus.isPaired = false;
           this.currentStatus.state = 'disconnected';
           this.currentStatus.pairingStage = 'idle';
           this.currentStatus.pairingCode = undefined;
           this.currentStatus.qrCodeUrl = undefined;
-          this.currentStatus.user = undefined;
-          this.currentStatus.lastError = 'Unable to reach your WhatsApp phone within 45 seconds. Please enter your phone number below to pair again.';
+          this.currentStatus.lastError = 'Unable to reach your WhatsApp device after 5 minutes of retrying. The bot has paused reconnection to save resources. Please click reconnect or repair when ready.';
           this.currentStatus.reconnectRemainingSeconds = undefined;
           this.connectedAt = null;
           this.currentStatus.connectedAt = undefined;
 
           this.addNotification({
-            type: 'error',
-            title: 'WhatsApp Reconnect Timed Out (45s)',
-            body: 'Unable to reach your WhatsApp device within 45 seconds. Ready for fresh pairing.',
+            type: 'warning',
+            title: 'WhatsApp Reconnect Paused (5 Min Timeout)',
+            body: 'Retried for 5 minutes without reaching your WhatsApp device. Reconnection is paused so you can repair or re-pair when ready.',
           });
         } else {
-          const remainingSec = Math.max(0, Math.ceil((45000 - elapsed) / 1000));
+          const remainingSec = Math.max(0, Math.ceil((FIVE_MINUTES_MS - elapsed) / 1000));
           this.currentStatus.isConnected = false;
           this.currentStatus.state = 'connecting';
           this.currentStatus.pairingStage = 'connected';
@@ -5010,15 +5003,18 @@ export class WhatsAppSessionManager {
         for (const docSnap of snap.docs) {
           if (docSnap.id.startsWith('session_')) {
             const rawId = docSnap.id.replace(/^session_/, '');
-            if (!this.sessions.has(rawId)) {
-              console.log(`[Multi-Session] Found cloud WhatsApp session for user: ${rawId}, initializing...`);
-              const session = this.getSession(rawId);
+            console.log(`[Multi-Session] Restoring cloud WhatsApp session for user: ${rawId}...`);
+            const session = this.getSession(rawId);
+            session.ensureRestored().then(() => {
               session.syncLicenseFromFirestore().then(() => {
                 if (!session.isLicenseExpired()) {
+                  console.log(`[Multi-Session] Cloud user ${rawId} has valid license! Auto-reconnecting...`);
                   session.initSocket().catch((err) => console.warn(`Cloud auto-reconnect note for ${rawId}:`, err));
+                } else {
+                  console.log(`[Multi-Session] Cloud user ${rawId} license is expired, keeping paused.`);
                 }
               }).catch(() => {});
-            }
+            }).catch(() => {});
           }
         }
       } catch (err) {
