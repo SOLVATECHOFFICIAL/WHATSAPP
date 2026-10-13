@@ -804,9 +804,8 @@ export class WhatsAppManager {
           }
         }
 
-        // A saved finite expiry always wins over an unlimited flag.
-        const isUnlim = this.isOwnerEmail() || (!expAt && Boolean(d?.isUnlimited));
-        this.setSessionLicense(expAt, isUnlim);
+        const isUnlim = this.isOwnerEmail() || Boolean(d?.isUnlimited) || d?.licenseStatus === 'unlimited' || Boolean(d?.licensePlan?.includes('Unlimited')) || this.isSessionUnlimited;
+        this.setSessionLicense(isUnlim ? null : expAt, isUnlim);
         console.log(`[License Sync (${this.userId})] Synced: expiresAt=${this.sessionLicenseExpiresAt}, key=${this.sessionLicenseKey}, plan=${this.sessionLicensePlan}`);
         return true;
       }
@@ -835,9 +834,9 @@ export class WhatsAppManager {
   }
 
   public setSessionLicense(expiresAt: string | null, isUnlimited: boolean) {
-    this.sessionLicenseExpiresAt = expiresAt;
-    // Strict finite countdown enforcement: an account with an expiration timestamp cannot be marked unlimited unless owner!
-    this.isSessionUnlimited = this.isOwnerEmail() || (!expiresAt && Boolean(isUnlimited));
+    const unlim = this.isOwnerEmail() || Boolean(isUnlimited);
+    this.isSessionUnlimited = unlim;
+    this.sessionLicenseExpiresAt = unlim ? null : expiresAt;
     this.saveSessionLicense();
     // If user was previously expired and now has valid license, wake up connection immediately
     if (!this.isLicenseExpired() && !this.sock && !this.isConnecting) {
@@ -850,17 +849,13 @@ export class WhatsAppManager {
   }
 
   public isLicenseExpired(): boolean {
-    if (this.isOwnerEmail()) return false;
+    if (this.isOwnerEmail() || this.isSessionUnlimited) return false;
     // Strict countdown down to the exact millisecond and minute!
     if (this.sessionLicenseExpiresAt) {
       const expMs = new Date(this.sessionLicenseExpiresAt).getTime();
       if (!isNaN(expMs)) {
         return Date.now() >= expMs;
       }
-    }
-    // Only if there is NO expiration date and the session is marked unlimited (VIP grant)
-    if (this.isSessionUnlimited && !this.sessionLicenseExpiresAt) {
-      return false;
     }
     // Unlicensed non-owner/non-unlimited accounts cannot run bot
     return true;

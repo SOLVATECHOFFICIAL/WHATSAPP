@@ -406,10 +406,7 @@ export default function App() {
                   } catch {}
                 }
 
-                const hasFiniteExpiry = Boolean(data.licenseExpiresAt);
-                // awoyinfasolomon1@gmail.com is strictly and permanently unlimited
-                // Non-owners with an explicit expiry date are strictly timed (NOT unlimited)
-                const isUserUnlimited = isOwner || (!hasFiniteExpiry && !!data.isUnlimited);
+                const isUserUnlimited = isOwner || Boolean(data.isUnlimited) || data.licenseStatus === 'unlimited' || Boolean(data.licensePlan?.includes('Unlimited'));
 
                 setUserLicenseData((prev) => {
                   const now = Date.now();
@@ -422,15 +419,17 @@ export default function App() {
                     if (lExp) localExpMs = new Date(lExp).getTime();
                   } catch {}
 
-                  let finalExpiresAt = data.licenseExpiresAt || null;
-                  let finalPlan = data.licensePlan || (isUserUnlimited ? '👑 Unlimited Lifetime (Admin Granted)' : 'Active Plan');
+                  let finalExpiresAt = isUserUnlimited ? null : (data.licenseExpiresAt || null);
+                  let finalPlan = isUserUnlimited ? '👑 Unlimited Lifetime (Admin Granted)' : (data.licensePlan || 'Active Plan');
 
                   // If current active countdown is still running and snapshot has null/older, retain the active countdown
-                  if (prevExpMs > now && (!newExpMs || newExpMs < prevExpMs)) {
-                    finalExpiresAt = prev.expiresAt;
-                    finalPlan = prev.plan;
-                  } else if (localExpMs > now && (!newExpMs || newExpMs < localExpMs)) {
-                    finalExpiresAt = new Date(localExpMs).toISOString();
+                  if (!isUserUnlimited) {
+                    if (prevExpMs > now && (!newExpMs || newExpMs < prevExpMs)) {
+                      finalExpiresAt = prev.expiresAt;
+                      finalPlan = prev.plan;
+                    } else if (localExpMs > now && (!newExpMs || newExpMs < localExpMs)) {
+                      finalExpiresAt = new Date(localExpMs).toISOString();
+                    }
                   }
 
                   if (finalExpiresAt && new Date(finalExpiresAt).getTime() > now) {
@@ -493,7 +492,7 @@ export default function App() {
           userId: currentUser.uid,
           userEmail: currentUser.email,
           expiresAt: userLicenseData.expiresAt,
-          isUnlimited: isOwner || (!userLicenseData.expiresAt && userLicenseData.isUnlimited),
+          isUnlimited: isOwner || userLicenseData.isUnlimited,
         }),
       }).then(async (response) => {
         if (!response.ok) return;

@@ -57,6 +57,7 @@ export interface LicenseRecord {
   claimedAt?: string;
   createdAt: string;
   expiresAt?: string;
+  createdBy?: string;
 }
 
 export { OWNER_EMAIL, OWNER_EMAILS, isOwnerEmail };
@@ -80,20 +81,16 @@ export function generateKeyString(planPrefix: string): string {
 }
 
 export async function createLicense(plan: LicensePlan, createdBy: string = OWNER_EMAIL): Promise<LicenseRecord> {
-  const attemptId = [createdBy, plan.id, plan.name, plan.durationDays, plan.durationMinutes || 0].join(':');
-  let record = pendingLicenseWrites.get(attemptId);
-  if (!record) {
-    record = {
-      key: generateKeyString(plan.id),
-      planId: plan.id,
-      planName: plan.name,
-      durationDays: plan.durationDays,
-      durationMinutes: plan.durationMinutes || 0,
-      status: 'unclaimed',
-      createdAt: new Date().toISOString(),
-    };
-    pendingLicenseWrites.set(attemptId, record);
-  }
+  const record: LicenseRecord = {
+    key: generateKeyString(plan.id),
+    planId: plan.id,
+    planName: plan.name,
+    durationDays: plan.durationDays,
+    durationMinutes: plan.durationMinutes || 0,
+    status: 'unclaimed',
+    createdAt: new Date().toISOString(),
+    createdBy,
+  };
 
   // 1. Immediately persist on the server (authoritative backend store)
   try {
@@ -114,7 +111,6 @@ export async function createLicense(plan: LicensePlan, createdBy: string = OWNER
     console.warn('Firestore license write:', err);
   }
 
-  pendingLicenseWrites.delete(attemptId);
   return record;
 }
 
@@ -267,6 +263,25 @@ export async function redeemKey(
   };
 }
 
+async function postAdminUpdate(payload: Record<string, any>): Promise<void> {
+  try {
+    const idToken = await auth?.currentUser?.getIdToken().catch(() => '');
+    const userEmail = auth?.currentUser?.email || OWNER_EMAIL;
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'x-user-email': userEmail,
+    };
+    if (idToken) headers['Authorization'] = `Bearer ${idToken}`;
+    await fetch('/api/admin/update-user', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+    });
+  } catch (err) {
+    console.debug('postAdminUpdate note:', err);
+  }
+}
+
 // TOGGLE UNLIMITED ACCESS FOR ANY USER (ADMIN QUICK SWITCH)
 export async function toggleUserUnlimited(
   userUid: string,
@@ -313,6 +328,17 @@ export async function toggleUserUnlimited(
   } catch (err) {
     console.warn('Firestore toggle unlimited:', err);
   }
+
+  // Persist directly to backend database so refresh never loses state
+  await postAdminUpdate({
+    uid: userUid,
+    email,
+    isUnlimited: enableUnlimited,
+    licenseExpiresAt: enableUnlimited ? null : new Date().toISOString(),
+    licensePlan: enableUnlimited ? '👑 Unlimited Lifetime (Admin Granted)' : 'Expired Plan',
+    licenseStatus: enableUnlimited ? 'unlimited' : 'expired',
+    licenseKey: enableUnlimited ? 'SOLVA-ADMIN-UNLIMITED-VIP' : 'REVOKED',
+  });
 
   try {
     await fetch('/api/whatsapp/sync-license', {
@@ -396,6 +422,16 @@ export async function grantUserExtraDays(
     console.error('Error granting extra days in Firestore:', e);
   }
 
+  // Persist directly to backend database so refresh never loses state
+  await postAdminUpdate({
+    uid: userUid,
+    email: userEmail,
+    isUnlimited: false,
+    licenseExpiresAt: newExpiresAt,
+    licensePlan: `Admin Granted (+${days} Days)`,
+    licenseStatus: 'active',
+  });
+
   try {
     await fetch('/api/whatsapp/sync-license', {
       method: 'POST',
@@ -407,6 +443,11 @@ export async function grantUserExtraDays(
         isUnlimited: false,
       }),
     });
+  } catch {}
+
+  try {
+    localStorage.setItem(`solvatech_license_expiresAt_${userUid}`, newExpiresAt);
+    if (userEmail) localStorage.setItem(`solvatech_license_expiresAt_${userEmail.trim().toLowerCase()}`, newExpiresAt);
   } catch {}
 
   return {
@@ -449,6 +490,16 @@ export async function revokeUserAccess(
   } catch (e) {
     console.warn('Error revoking in Firestore:', e);
   }
+
+  await postAdminUpdate({
+    uid: userUid,
+    email: userEmail || '',
+    isUnlimited: false,
+    licenseExpiresAt: nowIso,
+    licensePlan: 'Revoked by Admin',
+    licenseStatus: 'expired',
+    licenseKey: 'REVOKED',
+  });
 
   try {
     await fetch('/api/whatsapp/sync-license', {
@@ -679,12 +730,12 @@ export async function fetchAllUsers(): Promise<any[]> {
         const rawExpiresAt = data.licenseExpiresAt || null;
         const expMs = rawExpiresAt ? new Date(rawExpiresAt).getTime() : 0;
         // Strict countdown: if user has a finite expiration timestamp and is not owner, evaluate exact expiration
-        const isDateExpired = !isOwner && (
+        const isUnlimited = isOwner || Boolean(data.isUnlimited) || data.licenseStatus === 'unlimited' || Boolean(data.licensePlan?.includes('Unlimited'));
+        const isDateExpired = !isOwner && !isUnlimited && (
           (rawExpiresAt && expMs > 0 && expMs <= now) ||
-          (!rawExpiresAt && !data.isUnlimited)
+          (!rawExpiresAt)
         );
-        const isUnlimited = isOwner || (!rawExpiresAt && Boolean(data.isUnlimited));
-        const isExpired = isDateExpired || data.licenseStatus === 'expired';
+        const isExpired = !isUnlimited && (isDateExpired || data.licenseStatus === 'expired');
 
         const liveStatus = serverStatuses[uid] || {};
         // Strict rule: only show connected if live socket is actually connected AND license is not expired
@@ -702,7 +753,7 @@ export async function fetchAllUsers(): Promise<any[]> {
             : (isExpired ? 'Expired Plan' : (data.licensePlan || 'Active Plan')),
           licenseStatus: isUnlimited ? 'unlimited' : (isExpired ? 'expired' : 'active'),
           licenseKey: data.licenseKey || null,
-          licenseExpiresAt: rawExpiresAt,
+          licenseExpiresAt: isUnlimited ? null : rawExpiresAt,
           linkedPhone,
           isPaired,
           whatsappConnected: isActuallyConnected,
@@ -732,20 +783,36 @@ export async function fetchAllUsers(): Promise<any[]> {
         for (const d of data.users) {
           const uid = d.uid;
           const isOwner = isOwnerEmail(d.email);
-          const rawExpiresAt = d.licenseExpiresAt || null;
-          const expMs = rawExpiresAt ? new Date(rawExpiresAt).getTime() : 0;
-          const isDateExpired = !isOwner && (
-            (rawExpiresAt && expMs > 0 && expMs <= now) ||
-            (!rawExpiresAt && !d.isUnlimited)
+          const existing = usersMap.get(uid);
+
+          // Unlimited status is retained if set in either database
+          const isUnlimited = isOwner || Boolean(d.isUnlimited) || Boolean(existing?.isUnlimited) || d.licenseStatus === 'unlimited' || existing?.licenseStatus === 'unlimited' || Boolean(d.licensePlan?.includes('Unlimited')) || Boolean(existing?.licensePlan?.includes('Unlimited'));
+
+          let finalExpiresAt: string | null = null;
+          if (!isUnlimited) {
+            const expExisting = existing?.licenseExpiresAt ? new Date(existing.licenseExpiresAt).getTime() : 0;
+            const expServer = d.licenseExpiresAt ? new Date(d.licenseExpiresAt).getTime() : 0;
+            if (expExisting > now && expExisting >= expServer) {
+              finalExpiresAt = existing.licenseExpiresAt;
+            } else if (expServer > now) {
+              finalExpiresAt = d.licenseExpiresAt;
+            } else {
+              finalExpiresAt = existing?.licenseExpiresAt || d.licenseExpiresAt || null;
+            }
+          }
+
+          const expMs = finalExpiresAt ? new Date(finalExpiresAt).getTime() : 0;
+          const isDateExpired = !isOwner && !isUnlimited && (
+            (finalExpiresAt && expMs > 0 && expMs <= now) ||
+            (!finalExpiresAt)
           );
-          const isUnlimited = isOwner || (!rawExpiresAt && Boolean(d.isUnlimited));
-          const isExpired = isDateExpired || d.licenseStatus === 'expired';
+          const isExpired = !isUnlimited && isDateExpired;
+
           const liveStatus = serverStatuses[uid] || {};
           const isActuallyConnected = !isExpired && Boolean(liveStatus.isConnected);
-          const linkedPhone = liveStatus.phone || d.linkedPhone || d.phone || null;
-          const isPaired = Boolean(liveStatus.isPaired || linkedPhone);
+          const linkedPhone = liveStatus.phone || d.linkedPhone || d.phone || existing?.linkedPhone || null;
+          const isPaired = Boolean(liveStatus.isPaired || linkedPhone || existing?.isPaired);
 
-          const existing = usersMap.get(uid);
           usersMap.set(uid, {
             ...existing,
             uid,
@@ -757,10 +824,10 @@ export async function fetchAllUsers(): Promise<any[]> {
               : (isExpired ? 'Expired Plan' : (d.licensePlan || existing?.licensePlan || 'Active Plan')),
             licenseStatus: isUnlimited ? 'unlimited' : (isExpired ? 'expired' : 'active'),
             licenseKey: d.licenseKey || existing?.licenseKey || null,
-            licenseExpiresAt: rawExpiresAt || existing?.licenseExpiresAt,
-            linkedPhone: linkedPhone || existing?.linkedPhone,
-            isPaired: isPaired || existing?.isPaired,
-            whatsappConnected: isActuallyConnected || existing?.whatsappConnected,
+            licenseExpiresAt: isUnlimited ? null : finalExpiresAt,
+            linkedPhone,
+            isPaired,
+            whatsappConnected: isActuallyConnected,
             hasUsedTrial: Boolean(d.hasUsedTrial || existing?.hasUsedTrial),
             trialClaimedAt: d.trialClaimedAt || existing?.trialClaimedAt || null,
             commandsRun: d.commandsRun || existing?.commandsRun || 0,

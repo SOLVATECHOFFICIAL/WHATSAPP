@@ -719,11 +719,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const enrichedUsers = useMemo(() => {
     return users.map((u) => {
       const isOwnerAccount = isOwnerEmail(u.email);
-      // Admin accounts are strictly and permanently unlimited
-      // Non-owners with an explicit licenseExpiresAt are strictly timed (NOT unlimited)
-      const hasFiniteExpiry = Boolean(u.licenseExpiresAt);
-      const isUnlimited = isOwnerAccount ? true : (!hasFiniteExpiry && !!u.isUnlimited);
-      const remaining = calculateRemainingTime(u.licenseExpiresAt, isUnlimited);
+      // Unlimited accounts (Founder or Admin-granted VIP) are unconditionally unlimited
+      const isUnlimited = isOwnerAccount || Boolean(u.isUnlimited) || u.licenseStatus === 'unlimited' || Boolean(u.licensePlan?.includes('Unlimited'));
+      const remaining = calculateRemainingTime(isUnlimited ? null : u.licenseExpiresAt, isUnlimited);
 
       // Online check: active Baileys socket linked to WhatsApp AND strictly unexpired license!
       const isOnline =
@@ -758,10 +756,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     });
   }, [users, whatsappStatus]);
 
-  // FILTERED USERS
+  // FILTERED & SORTED USERS
   const filteredUsers = useMemo(() => {
     const q = (searchQuery || '').trim().toLowerCase();
-    return enrichedUsers.filter((u) => {
+    const filtered = enrichedUsers.filter((u) => {
       if (q) {
         const match =
           u.email?.toLowerCase().includes(q) ||
@@ -779,6 +777,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       if (userFilter === 'unlimited') return u.isUnlimited;
       if (userFilter === 'expired') return u.isExpired;
       return true;
+    });
+
+    // Sort: 1. Owners/Permanent Founders, 2. Unlimited VIPs, 3. Online WhatsApp, 4. Paid active, 5. Trial active, 6. Expired
+    return [...filtered].sort((a, b) => {
+      if (a.isOwner && !b.isOwner) return -1;
+      if (!a.isOwner && b.isOwner) return 1;
+      if (a.isUnlimited && !b.isUnlimited) return -1;
+      if (!a.isUnlimited && b.isUnlimited) return 1;
+      if (a.isOnline && !b.isOnline) return -1;
+      if (!a.isOnline && b.isOnline) return 1;
+      if (a.isPaidActive && !b.isPaidActive) return -1;
+      if (!a.isPaidActive && b.isPaidActive) return 1;
+      if (a.isTrial && !b.isTrial) return -1;
+      if (!a.isTrial && b.isTrial) return 1;
+      return 0;
     });
   }, [enrichedUsers, searchQuery, userFilter]);
 

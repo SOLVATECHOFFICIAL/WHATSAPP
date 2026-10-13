@@ -187,8 +187,29 @@ async function startServer() {
 
       if (isUnlimited) {
         session.setSessionLicense(null, true);
+        try {
+          await setDoc(doc(db, 'users', userId), {
+            uid: userId,
+            ...(userEmail ? { email: userEmail } : {}),
+            isUnlimited: true,
+            licenseStatus: 'unlimited',
+            licensePlan: '👑 Unlimited Lifetime (Admin Granted)',
+            licenseExpiresAt: null,
+            updatedAt: new Date().toISOString(),
+          }, { merge: true });
+        } catch {}
       } else if (incomingExpiresAt && new Date(incomingExpiresAt).getTime() > Date.now()) {
         session.setSessionLicense(incomingExpiresAt, false);
+        try {
+          await setDoc(doc(db, 'users', userId), {
+            uid: userId,
+            ...(userEmail ? { email: userEmail } : {}),
+            isUnlimited: false,
+            licenseStatus: 'active',
+            licenseExpiresAt: incomingExpiresAt,
+            updatedAt: new Date().toISOString(),
+          }, { merge: true });
+        } catch {}
       }
 
       await session.syncLicenseFromFirestore();
@@ -366,6 +387,63 @@ async function startServer() {
       }
 
       res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // Admin update user license/access endpoint (persists unlimited, extra days, revokes)
+  app.post('/api/admin/update-user', async (req, res) => {
+    if (!(await requireOwnerAuth(req, res))) return;
+    try {
+      const uid = typeof req.body?.uid === 'string' ? req.body.uid.trim() : '';
+      const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+      if (!uid) {
+        return res.status(400).json({ success: false, error: 'User ID is required.' });
+      }
+
+      const isUnlimited = typeof req.body?.isUnlimited === 'boolean' ? req.body.isUnlimited : undefined;
+      const licenseExpiresAt = req.body?.licenseExpiresAt !== undefined ? req.body.licenseExpiresAt : undefined;
+      const licensePlan = typeof req.body?.licensePlan === 'string' ? req.body.licensePlan : undefined;
+      const licenseStatus = typeof req.body?.licenseStatus === 'string' ? req.body.licenseStatus : undefined;
+      const licenseKey = typeof req.body?.licenseKey === 'string' ? req.body.licenseKey : undefined;
+
+      const updateData: Record<string, any> = {
+        updatedAt: new Date().toISOString(),
+      };
+      if (email) updateData.email = email;
+      if (isUnlimited !== undefined) updateData.isUnlimited = isUnlimited;
+      if (licenseExpiresAt !== undefined) updateData.licenseExpiresAt = licenseExpiresAt;
+      if (licensePlan !== undefined) updateData.licensePlan = licensePlan;
+      if (licenseStatus !== undefined) updateData.licenseStatus = licenseStatus;
+      if (licenseKey !== undefined) updateData.licenseKey = licenseKey;
+
+      const userRef = doc(db, 'users', uid);
+      await setDoc(userRef, updateData, { merge: true });
+
+      const userLicRef = doc(db, 'user_licenses', uid);
+      await setDoc(userLicRef, {
+        userId: uid,
+        ...(email ? { email } : {}),
+        ...(isUnlimited !== undefined ? { isUnlimited } : {}),
+        ...(licenseExpiresAt !== undefined ? { expiresAt: licenseExpiresAt } : {}),
+        ...(licensePlan !== undefined ? { plan: licensePlan } : {}),
+        ...(licenseStatus !== undefined ? { status: licenseStatus } : {}),
+        updatedAt: new Date().toISOString(),
+      }, { merge: true });
+
+      // Update session in memory
+      const session = sessionManager.getSession(uid, email);
+      if (email) session.userEmail = email;
+      if (isUnlimited !== undefined) {
+        session.setSessionLicense(isUnlimited ? null : (licenseExpiresAt !== undefined ? licenseExpiresAt : null), isUnlimited);
+      } else if (licenseExpiresAt !== undefined) {
+        session.setSessionLicense(licenseExpiresAt, false);
+      }
+      if (licensePlan) session.sessionLicensePlan = licensePlan;
+      if (licenseKey) session.sessionLicenseKey = licenseKey;
+
+      res.json({ success: true, updated: updateData });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
     }
