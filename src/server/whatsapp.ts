@@ -49,6 +49,19 @@ const isSafeAuthFileName = (filename: string) =>
   !filename.includes('\\') &&
   filename.endsWith('.json');
 
+// Essential auth files for cloud backup:
+// Tier 1: creds.json (master paired phone credentials)
+// Tier 2: app-state-sync-key-* (chat app state sync)
+// Tier 3: app-state-sync-version-* (sync versions)
+// Volatile keys (sender-key-*, pre-key-*, session-*, sender-key-memory-*) STAY STRICTLY LOCAL
+// and are never uploaded to Firebase, saving 20,000+ daily writes.
+export const isEssentialCloudAuthFile = (filename: string): boolean => {
+  if (filename === 'creds.json') return true;
+  if (filename.startsWith('app-state-sync-key-')) return true;
+  if (filename.startsWith('app-state-sync-version-')) return true;
+  return false;
+};
+
 // Helper: Retrieve official SOLVATECH brand image as buffer for WhatsApp messages (.menu, welcome, etc.)
 export async function getSolvaBrandBuffer(): Promise<Buffer | null> {
   const candidatePaths = [
@@ -1460,8 +1473,10 @@ export class WhatsAppManager {
             const content = typeof data.content === 'string' ? data.content : '';
             if (!isSafeAuthFileName(filename) || !content) continue;
             fs.writeFileSync(path.join(this.authDir, filename), content, 'utf-8');
-            this.firebaseAuthFileIds.set(filename, authFile.id);
-            this.firebaseAuthFileHashes.set(filename, data.sha256 || hashSessionContent(content));
+            if (isEssentialCloudAuthFile(filename)) {
+              this.firebaseAuthFileIds.set(filename, authFile.id);
+              this.firebaseAuthFileHashes.set(filename, data.sha256 || hashSessionContent(content));
+            }
             restoredAny = true;
           }
           if (restoredAny) {
@@ -1611,6 +1626,8 @@ export class WhatsAppManager {
           const data = storedFile.data();
           const filename = typeof data.fileName === 'string' ? data.fileName : '';
           if (!isSafeAuthFileName(filename)) continue;
+          // Only track essential files in Firebase cache so volatile keys are never synced or deleted
+          if (!isEssentialCloudAuthFile(filename)) continue;
           this.firebaseAuthFileIds.set(filename, storedFile.id);
           if (typeof data.content === 'string') {
             this.firebaseAuthFileHashes.set(
@@ -1624,7 +1641,7 @@ export class WhatsAppManager {
 
       const localFiles = new Map<string, string>();
       for (const filename of fs.readdirSync(this.authDir)) {
-        if (!isSafeAuthFileName(filename) || filename.startsWith('app-state-sync-version-') || filename.startsWith('sender-key-status@')) {
+        if (!isSafeAuthFileName(filename) || !isEssentialCloudAuthFile(filename)) {
           continue;
         }
         localFiles.set(filename, fs.readFileSync(path.join(this.authDir, filename), 'utf-8'));
@@ -1832,12 +1849,20 @@ export class WhatsAppManager {
         this.isConnecting = true;
 
         const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
-        // Baileys may update signal keys without emitting creds.update. Mirror these
-        // file writes too, so a Railway disk replacement can restore the session.
+        // Baileys may update signal keys without emitting creds.update.
+        // Volatile keys (sender-key, pre-key, session) stay local on disk/memory.
+        // We only trigger Firebase backup if critical app-state keys changed.
         const saveSignalKeys = (state.keys as any).set.bind(state.keys);
         (state.keys as any).set = async (data: any) => {
           await saveSignalKeys(data);
-          this.scheduleFirebaseCredsSync();
+          if (data && typeof data === 'object') {
+            const hasEssentialKeys = Object.keys(data).some(
+              (k) => k.includes('app-state') || k === 'app-state-sync-key' || k === 'app-state-sync-version'
+            );
+            if (hasEssentialKeys) {
+              this.scheduleFirebaseCredsSync();
+            }
+          }
         };
 
         let version: [number, number, number] = [2, 3000, 1043857760];
