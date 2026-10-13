@@ -1882,7 +1882,7 @@ export class WhatsAppManager {
           },
           logger: pinoLogger,
           printQRInTerminal: false,
-          browser: Browsers.macOS('Chrome'),
+          browser: Browsers.ubuntu('Chrome'),
           connectTimeoutMs: 60000,
           defaultQueryTimeoutMs: 60000,
           keepAliveIntervalMs: 15000,

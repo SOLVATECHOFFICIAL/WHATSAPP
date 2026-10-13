@@ -109,7 +109,7 @@ export async function syncUserProfile(user: { uid: string; email: string | null;
 // Sign in with Google Popup
 export async function signInWithGoogle(): Promise<User> {
   if (!auth || typeof (auth as any).onAuthStateChanged !== 'function') {
-    throw new Error('Firebase Auth is not available. Please use developer Fast-Track sign in below.');
+    throw new Error('Firebase Authentication is currently initializing. Please retry in a moment.');
   }
   const result = await signInWithPopup(auth, googleProvider);
   const user = result.user;
@@ -120,7 +120,7 @@ export async function signInWithGoogle(): Promise<User> {
 // Sign in with Email / Password
 export async function signInWithEmail(email: string, pass: string): Promise<User> {
   if (!auth || typeof (auth as any).onAuthStateChanged !== 'function') {
-    throw new Error('Firebase Auth is not available. Please use developer Fast-Track sign in below.');
+    throw new Error('Firebase Authentication is currently initializing. Please retry in a moment.');
   }
   const result = await signInWithEmailAndPassword(auth, email, pass);
   await syncUserProfile(result.user);
@@ -130,7 +130,7 @@ export async function signInWithEmail(email: string, pass: string): Promise<User
 // Sign up with Email / Password
 export async function signUpWithEmail(email: string, pass: string, name?: string): Promise<User> {
   if (!auth || typeof (auth as any).onAuthStateChanged !== 'function') {
-    throw new Error('Firebase Auth is not available. Please use developer Fast-Track sign in below.');
+    throw new Error('Firebase Authentication is currently initializing. Please retry in a moment.');
   }
   const result = await createUserWithEmailAndPassword(auth, email, pass);
   if (name) {
@@ -155,7 +155,6 @@ export async function signOutUser(): Promise<void> {
     console.error('Sign out error:', e);
   }
   try {
-    localStorage.removeItem('solvatech_custom_user');
     for (const key of Object.keys(localStorage)) {
       if (key.startsWith('solvatech_')) {
         localStorage.removeItem(key);
@@ -167,63 +166,17 @@ export async function signOutUser(): Promise<void> {
 
 // Listen to Auth State
 export function onAuthChange(callback: (user: User | null) => void): () => void {
-  // Check local saved session first
-  const saved = localStorage.getItem('solvatech_custom_user');
-  if (saved) {
-    try {
-      const parsed = JSON.parse(saved);
-      callback(parsed as unknown as User);
-    } catch {
-      // Ignore
-    }
-  }
-
-  // Guard against uninitialized or mock auth instances
+  // Guard against uninitialized auth instances
   if (!auth || typeof (auth as any).onAuthStateChanged !== 'function') {
     return () => {};
   }
 
   try {
     return onAuthStateChanged(auth, (fbUser) => {
-      if (fbUser) {
-        callback(fbUser);
-      } else {
-        const custom = localStorage.getItem('solvatech_custom_user');
-        if (custom) {
-          try {
-            callback(JSON.parse(custom) as unknown as User);
-          } catch {
-            callback(null);
-          }
-        } else {
-          callback(null);
-        }
-      }
+      callback(fbUser || null);
     });
   } catch (err) {
     console.warn('onAuthStateChanged subscription skipped:', err);
     return () => {};
   }
-}
-
-// Instant Fast-Track Account Sign-In (For environments where Google Popup domain isn't whitelisted yet)
-export async function signInFastTrack(email: string, displayName: string): Promise<User> {
-  const cleanId = 'usr_' + email.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
-  const simulatedUser: Partial<User> = {
-    uid: cleanId,
-    email,
-    displayName,
-    photoURL: `https://api.dicebear.com/7.x/bottts/svg?seed=${cleanId}`,
-  };
-
-  // Sync to Firestore
-  await syncUserProfile({
-    uid: cleanId,
-    email,
-    displayName,
-    photoURL: simulatedUser.photoURL,
-  });
-
-  localStorage.setItem('solvatech_custom_user', JSON.stringify(simulatedUser));
-  return simulatedUser as User;
 }

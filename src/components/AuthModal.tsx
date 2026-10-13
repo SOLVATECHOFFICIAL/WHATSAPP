@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { signInWithGoogle, signInWithEmail, signUpWithEmail, signInFastTrack } from '../services/firebase';
+import { signInWithGoogle, signInWithEmail, signUpWithEmail } from '../services/firebase';
 import { firebaseConfig } from '../services/firebase-config';
 import { Shield, Copy, Check, AlertCircle, ExternalLink, Mail, Lock, User as UserIcon, ArrowRight } from 'lucide-react';
 import { User } from 'firebase/auth';
@@ -18,14 +18,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onSuccess, onClose
   const [copiedDomain, setCopiedDomain] = useState(false);
 
   // Email form fields
-  const [email, setEmail] = useState('awoyinfasolomon1@gmail.com');
+  const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [name, setName] = useState('Solomon Awoyinfa');
+  const [name, setName] = useState('');
 
   if (!isOpen) return null;
 
   const currentHost = typeof window !== 'undefined' ? window.location.hostname : '';
-  const isStudioEnv = typeof window !== 'undefined' && (currentHost.includes('europe-west2.run.app') || currentHost === 'localhost' || currentHost.includes('127.0.0.1'));
 
   const handleGoogleSignIn = async () => {
     setLoading(true);
@@ -46,27 +45,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onSuccess, onClose
 
       if (isDomainIssue) {
         setDomainError(true);
-        setError(`This domain (${currentHost}) is awaiting Firebase Authorized Domains whitelist.`);
+        setError(`This domain (${currentHost}) is awaiting Firebase Authorized Domains whitelist. You can use Email/Password sign-up below to create a direct Firebase account.`);
       } else if (err.code === 'auth/popup-blocked') {
         setError('Google login popup was blocked by your browser. Please allow popups.');
       } else {
         setError(err.message || 'Google sign-in encountered an issue.');
       }
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleFastTrack = async (customEmail?: string, customName?: string) => {
-    setLoading(true);
-    setError(null);
-    try {
-      const targetEmail = customEmail || email || 'taletroveanimation@gmail.com';
-      const targetName = customName || name || 'Studio Developer';
-      const user = await signInFastTrack(targetEmail, targetName);
-      onSuccess(user);
-    } catch (err: any) {
-      setError(err.message || 'Developer sign-in failed');
     } finally {
       setLoading(false);
     }

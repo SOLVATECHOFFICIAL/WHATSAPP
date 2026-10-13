@@ -35,7 +35,6 @@ import {
   signInWithGoogle,
   signInWithEmail,
   signUpWithEmail,
-  signInFastTrack,
 } from './services/firebase';
 import { COUNTRIES, Country } from './data/countries';
 import { CountrySelect } from './components/CountrySelect';
@@ -595,23 +594,6 @@ export default function App() {
       setNotifications([]);
     } catch (e) {
       console.error('Failed to clear notifications:', e);
-    }
-  };
-
-  // Fast-Track Developer / Instant sign-in handler (bypasses Google OAuth domain restriction completely)
-  const handleFastTrackGateway = async (customEmail?: string, customName?: string) => {
-    setAuthSubmitting(true);
-    setAuthError(null);
-    setDomainError(false);
-    try {
-      const targetEmail = customEmail || authEmail || 'taletroveanimation@gmail.com';
-      const targetName = customName || authName || 'Solvatech User';
-      const user = await signInFastTrack(targetEmail, targetName);
-      setCurrentUser(user);
-    } catch (err: any) {
-      setAuthError(err.message || 'Instant sign in encountered an issue.');
-    } finally {
-      setAuthSubmitting(false);
     }
   };
 
@@ -1222,15 +1204,20 @@ export default function App() {
                     <p>2. Click "Add domain" and paste your copied domain</p>
                   </div>
 
-                  <div className="pt-2 border-t border-amber-500/20">
+                  <div className="pt-2 border-t border-amber-500/20 text-center">
+                    <p className="text-[11px] text-amber-300/90 font-medium mb-2">
+                      You can create an account or sign in with Email & Password directly in Firebase!
+                    </p>
                     <button
                       type="button"
-                      onClick={() => handleFastTrackGateway()}
-                      disabled={authSubmitting}
-                      className="w-full py-2 px-3 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 text-slate-950 font-black text-xs shadow flex items-center justify-center gap-2 cursor-pointer transition-all"
+                      onClick={() => {
+                        setAuthMode('signup');
+                        setDomainError(false);
+                      }}
+                      className="w-full py-2.5 px-3 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 hover:from-emerald-400 text-slate-950 font-bold text-xs shadow flex items-center justify-center gap-2 cursor-pointer transition-all"
                     >
-                      <Sparkles className="w-3.5 h-3.5 text-slate-950" />
-                      <span>⚡ Continue with Instant Sign-In (No Whitelist Needed)</span>
+                      <UserIcon className="w-3.5 h-3.5 text-slate-950" />
+                      <span>Create Account with Email & Password</span>
                     </button>
                   </div>
                 </div>
@@ -1242,19 +1229,6 @@ export default function App() {
                   <span>{authError}</span>
                 </div>
               )}
-
-              {/* Instant Fast-Track fallback option */}
-              <div className="pt-1 text-center">
-                <button
-                  type="button"
-                  onClick={() => handleFastTrackGateway()}
-                  disabled={authSubmitting}
-                  className="text-[11px] text-emerald-400 hover:text-emerald-300 underline font-semibold cursor-pointer inline-flex items-center gap-1"
-                >
-                  <Sparkles className="w-3 h-3" />
-                  <span>Use Instant Developer Fast-Track Sign In</span>
-                </button>
-              </div>
             </div>
 
             {/* Feature Highlights */}
