@@ -5,7 +5,7 @@ import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { db, doc, getDoc, runTransaction, collection, getDocs } from './src/server/firebase-admin.ts';
+import { db, doc, getDoc, setDoc, runTransaction, collection, getDocs, deleteDoc, listAllFirebaseUsers } from './src/server/firebase-admin.ts';
 import { sessionManager, whatsappManager } from './src/server/whatsapp.ts';
 import { commandHandler, SOLVATECH_MENU } from './src/server/commands.ts';
 import {
@@ -194,44 +194,157 @@ async function startServer() {
     }
   });
 
-  // Admin users list endpoint (server-side Firestore query fallback with all admin accounts)
+  // Admin users list endpoint (fetches genuine emails only from Firebase, no duplicates)
   app.get('/api/admin/users', async (req, res) => {
     if (!(await requireOwnerAuth(req, res))) return;
     try {
-      const snap = await getDocs(collection(db, 'users'));
-      const list: any[] = [];
-      const seenEmails = new Set<string>();
+      // 1. Fetch genuine accounts directly from Firebase Auth (even if just created with no action!)
+      let authUsers: Array<{ uid: string; email?: string; displayName?: string; createdAt?: string }> = [];
+      try {
+        authUsers = await listAllFirebaseUsers();
+      } catch (authErr) {
+        console.warn('[Admin Users] Firebase Auth list users note:', authErr);
+      }
 
+      // 2. Fetch from Firestore users collection
+      const snap = await getDocs(collection(db, 'users'));
+      const rawDocs: any[] = [];
       snap.forEach((d: any) => {
-        const data = d.data() || {};
-        if (data.email) seenEmails.add(data.email.toLowerCase());
-        list.push({ uid: d.id, ...data });
+        rawDocs.push({ uid: d.id, ...(d.data() || {}) });
       });
 
-      // Ensure all authorized admins are included in the list so that all founders show up
-      for (const adminEmail of OWNER_EMAILS) {
-        if (!seenEmails.has(adminEmail.toLowerCase())) {
-          const adminUid = `admin_${adminEmail.replace(/[^a-zA-Z0-9]/g, '_')}`;
-          list.push({
-            uid: adminUid,
-            email: adminEmail,
-            displayName: adminEmail.split('@')[0].toUpperCase() + ' (Founder Admin)',
-            isUnlimited: true,
-            licensePlan: '👑 Unlimited Lifetime Master Access',
-            licenseStatus: 'unlimited',
-            licenseKey: 'MASTER-ADMIN-UNLIMITED',
+      // Merge Firebase Auth users so even freshly created accounts with no actions show!
+      for (const aUser of authUsers) {
+        if (!aUser.email) continue;
+        const cleanEmail = aUser.email.trim().toLowerCase();
+        const existingDoc = rawDocs.find(
+          (d) => typeof d.email === 'string' && d.email.trim().toLowerCase() === cleanEmail
+        );
+        if (!existingDoc) {
+          const freshDoc = {
+            uid: aUser.uid,
+            email: cleanEmail,
+            displayName: aUser.displayName || cleanEmail.split('@')[0],
+            licenseKey: null,
+            licensePlan: 'New User (No Key)',
+            licenseStatus: 'expired',
             licenseExpiresAt: null,
-            linkedPhone: null,
-            isPaired: false,
-            whatsappConnected: false,
-            hasUsedTrial: true,
-            commandsRun: 0,
-            createdAt: '2026-10-01',
-          });
+            hasUsedTrial: false,
+            createdAt: aUser.createdAt || new Date().toISOString(),
+          };
+          rawDocs.push(freshDoc);
+          try {
+            await setDoc(doc(db, 'users', aUser.uid), freshDoc, { merge: true });
+          } catch {}
         }
       }
 
+      // Deduplicate strictly by normalized email; delete duplicates in Firebase so only one remains
+      const emailMap = new Map<string, any>();
+      const duplicateUidsToDelete: string[] = [];
+
+      for (const docData of rawDocs) {
+        const rawEmail = typeof docData.email === 'string' ? docData.email.trim().toLowerCase() : '';
+        if (!rawEmail) {
+          emailMap.set(docData.uid, docData);
+          continue;
+        }
+
+        if (emailMap.has(rawEmail)) {
+          const existing = emailMap.get(rawEmail);
+          // Keep the record with active status, paired phone, or newer timestamp
+          const existingScore = (existing.isUnlimited ? 100 : 0) + (existing.linkedPhone ? 50 : 0) + (existing.licenseExpiresAt ? 25 : 0);
+          const currentScore = (docData.isUnlimited ? 100 : 0) + (docData.linkedPhone ? 50 : 0) + (docData.licenseExpiresAt ? 25 : 0);
+
+          if (currentScore > existingScore) {
+            if (existing.uid && existing.uid !== docData.uid) duplicateUidsToDelete.push(existing.uid);
+            emailMap.set(rawEmail, docData);
+          } else {
+            if (docData.uid && docData.uid !== existing.uid) duplicateUidsToDelete.push(docData.uid);
+          }
+        } else {
+          emailMap.set(rawEmail, docData);
+        }
+      }
+
+      // Delete duplicates in Firebase so only one remains!
+      for (const dupUid of duplicateUidsToDelete) {
+        try {
+          await deleteDoc(doc(db, 'users', dupUid));
+          console.log(`[Admin Users] Removed duplicate user document ${dupUid} from Firebase.`);
+        } catch (delErr) {
+          console.warn(`[Admin Users] Could not delete duplicate ${dupUid}:`, delErr);
+        }
+      }
+
+      // Ensure ONLY awoyinfasolomon1@gmail.com is granted founder admin rights
+      const list = Array.from(emailMap.values()).map((u) => {
+        const isMaster = isOwnerEmail(u.email);
+        if (isMaster) {
+          return {
+            ...u,
+            isUnlimited: true,
+            licensePlan: '👑 Unlimited Lifetime Master Access',
+            licenseStatus: 'unlimited',
+          };
+        }
+        return u;
+      });
+
       res.json({ success: true, users: list });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // User profile synchronization endpoint (called on sign in/creation, deduplicates in Firebase)
+  app.post('/api/users/sync', async (req, res) => {
+    try {
+      const uid = typeof req.body?.uid === 'string' ? req.body.uid.trim() : '';
+      const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+      const displayName = typeof req.body?.displayName === 'string' ? req.body.displayName.trim() : '';
+      if (!uid || !email) {
+        return res.status(400).json({ success: false, message: 'uid and email required' });
+      }
+
+      // Delete any duplicates in Firebase with same email but different UID
+      try {
+        const snap = await getDocs(collection(db, 'users'));
+        snap.forEach((d) => {
+          if (d.id !== uid) {
+            const data = d.data() || {};
+            if (typeof data.email === 'string' && data.email.trim().toLowerCase() === email) {
+              void deleteDoc(doc(db, 'users', d.id));
+              console.log(`[User Sync] Deleted duplicate user document ${d.id} for email ${email}`);
+            }
+          }
+        });
+      } catch {}
+
+      const userRef = doc(db, 'users', uid);
+      const userSnap = await getDoc(userRef);
+      if (!userSnap.exists) {
+        await setDoc(userRef, {
+          uid,
+          email,
+          displayName: displayName || email.split('@')[0],
+          licenseKey: null,
+          licensePlan: 'New User (No Key)',
+          licenseStatus: 'expired',
+          licenseExpiresAt: null,
+          hasUsedTrial: false,
+          createdAt: new Date().toISOString(),
+          lastLogin: new Date().toISOString(),
+        });
+      } else {
+        await setDoc(userRef, {
+          email,
+          lastLogin: new Date().toISOString(),
+          ...(displayName ? { displayName } : {}),
+        }, { merge: true });
+      }
+
+      res.json({ success: true });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
     }
@@ -783,18 +896,17 @@ async function startServer() {
         } catch {}
       }
 
-      const hasUsedTrial = Boolean(
-        trialRecord ||
-        userRecord?.hasUsedTrial ||
-        userRecord?.lifetimeTrialLocked
-      );
-      const expiresAt = typeof trialRecord?.expiresAt === 'string'
-        ? trialRecord.expiresAt
-        : (typeof userRecord?.trialClaimedAt === 'string' ? userRecord.licenseExpiresAt || null : null);
       const now = Date.now();
+      const expiresAt = trialRecord?.expiresAt || userRecord?.licenseExpiresAt || null;
       const expMs = expiresAt ? new Date(expiresAt).getTime() : 0;
       const isActive = expMs > now;
       const remainingMs = isActive ? expMs - now : 0;
+      const hasClaimedEver = Boolean(
+        trialRecord?.claimedAt ||
+        userRecord?.hasUsedTrial ||
+        userRecord?.lifetimeTrialLocked
+      );
+      const hasUsedTrial = hasClaimedEver && !isActive;
 
       return res.json({
         success: true,
@@ -822,74 +934,146 @@ async function startServer() {
       const cleanUid = uid;
       const cleanEmailKey = cleanEmail.replace(/[^a-z0-9]/g, '_');
 
+      // Check local file store first to enforce permanent lifetime lock
+      const trialStorePath = path.resolve(__dirname, '.trial_store.json');
+      let store: Record<string, any> = {};
+      if (fs.existsSync(trialStorePath)) {
+        try { store = JSON.parse(fs.readFileSync(trialStorePath, 'utf-8')); } catch {}
+      }
+      const existingTrial = store[cleanEmailKey] || store[cleanUid];
+      const now = Date.now();
+      if (existingTrial) {
+        const expMs = expiryMillis(existingTrial.expiresAt);
+        if (expMs > now) {
+          // Still active
+          const session = sessionManager.getSession(cleanUid, cleanEmail);
+          session.setSessionLicense(existingTrial.expiresAt, false);
+          return res.json({
+            success: true,
+            message: '🎉 30-minute test is already active! Your countdown is running.',
+            expiresAt: existingTrial.expiresAt,
+          });
+        }
+        return res.status(409).json({
+          success: false,
+          message: 'The 30-minute trial has already been claimed for this account.',
+        });
+      }
+
       const trialRef = doc(db, 'claimed_trials', cleanEmailKey);
       const userRef = doc(db, 'users', cleanUid);
-      const claim = await runTransaction(db, async (transaction) => {
-        const [trialSnap, userSnap] = await Promise.all([
-          transaction.get(trialRef),
-          transaction.get(userRef),
-        ]);
-        if (trialSnap.exists) {
-          throw new Error('TRIAL_ALREADY_CLAIMED');
-        }
-        if (!userSnap.exists) {
-          throw new Error('ACCOUNT_NOT_FOUND');
-        }
-
-        const userData = userSnap.data();
-        const savedEmail = typeof userData.email === 'string' ? userData.email.trim().toLowerCase() : '';
-        if (savedEmail !== cleanEmail) {
-          throw new Error('ACCOUNT_EMAIL_MISMATCH');
-        }
-        if (userData.hasUsedTrial || userData.lifetimeTrialLocked) {
-          throw new Error('TRIAL_ALREADY_CLAIMED');
-        }
-        const now = Date.now();
-        const savedExpiryMs = expiryMillis(userData.licenseExpiresAt);
-        if (userData.isUnlimited || savedExpiryMs > now) {
-          throw new Error('ACTIVE_LICENSE_EXISTS');
-        }
-
-        const expiry = new Date(now + 30 * 60 * 1000).toISOString();
-        const claimedAt = new Date(now).toISOString();
-        transaction.set(trialRef, {
-          userUid: cleanUid,
-          userEmail: cleanEmail,
-          claimedAt,
-          expiresAt: expiry,
-          lifetimeLocked: true,
-        });
-        transaction.set(userRef, {
-          licenseExpiresAt: expiry,
-          licensePlan: '⚡ 30-Minute Test (Active)',
-          licenseStatus: 'active',
-          isUnlimited: false,
-          hasUsedTrial: true,
-          trialClaimedAt: claimedAt,
-          trialEmail: cleanEmail,
-          lifetimeTrialLocked: true,
-          updatedAt: claimedAt,
-        }, { merge: true });
-        return { expiresAt: expiry, claimedAt };
-      });
-      const { expiresAt: newExpiresAt, claimedAt } = claim;
+      let claim: { expiresAt: string; claimedAt: string } | null = null;
 
       try {
-        const trialStorePath = path.resolve(__dirname, '.trial_store.json');
-        let store: Record<string, any> = {};
-        if (fs.existsSync(trialStorePath)) {
-          try { store = JSON.parse(fs.readFileSync(trialStorePath, 'utf-8')); } catch {}
+        claim = await runTransaction(db, async (transaction) => {
+          const [trialSnap, userSnap] = await Promise.all([
+            transaction.get(trialRef),
+            transaction.get(userRef),
+          ]);
+
+          if (trialSnap.exists) {
+            const tData = trialSnap.data();
+            const expMs = expiryMillis(tData?.expiresAt);
+            if (expMs > now) {
+              return { expiresAt: tData.expiresAt, claimedAt: tData.claimedAt || new Date(now).toISOString() };
+            }
+            throw new Error('TRIAL_ALREADY_CLAIMED');
+          }
+
+          const userData = userSnap.exists ? userSnap.data() : null;
+          if (userData) {
+            if (userData.isUnlimited) {
+              throw new Error('ACTIVE_LICENSE_EXISTS');
+            }
+            if (userData.hasUsedTrial || userData.lifetimeTrialLocked) {
+              const expMs = expiryMillis(userData.licenseExpiresAt);
+              if (expMs > now) {
+                return { expiresAt: userData.licenseExpiresAt, claimedAt: userData.trialClaimedAt || new Date(now).toISOString() };
+              }
+              throw new Error('TRIAL_ALREADY_CLAIMED');
+            }
+            const savedExpiryMs = expiryMillis(userData.licenseExpiresAt);
+            if (savedExpiryMs > now) {
+              throw new Error('ACTIVE_LICENSE_EXISTS');
+            }
+          }
+
+          const expiry = new Date(now + 30 * 60 * 1000).toISOString();
+          const claimedAt = new Date(now).toISOString();
+          transaction.set(trialRef, {
+            userUid: cleanUid,
+            userEmail: cleanEmail,
+            claimedAt,
+            expiresAt: expiry,
+            lifetimeLocked: true,
+          });
+          transaction.set(userRef, {
+            uid: cleanUid,
+            email: cleanEmail,
+            displayName: userData?.displayName || cleanEmail.split('@')[0],
+            licenseExpiresAt: expiry,
+            licensePlan: '⚡ 30-Minute Test (Active)',
+            licenseStatus: 'active',
+            isUnlimited: false,
+            hasUsedTrial: true,
+            trialClaimedAt: claimedAt,
+            trialEmail: cleanEmail,
+            lifetimeTrialLocked: true,
+            updatedAt: claimedAt,
+          }, { merge: true });
+          return { expiresAt: expiry, claimedAt };
+        });
+      } catch (txErr: any) {
+        const msg = String(txErr?.message || '');
+        if (msg === 'TRIAL_ALREADY_CLAIMED') {
+          return res.status(409).json({ success: false, message: 'The 30-minute trial has already been claimed for this account.' });
         }
+        if (msg === 'ACTIVE_LICENSE_EXISTS') {
+          return res.status(409).json({ success: false, message: 'This account already has active paid or unlimited access. Your existing access was not changed.' });
+        }
+        console.warn('Transaction error during trial claim (falling back to direct persistence):', txErr);
+        // Fallback: create fresh 30-minute expiry
+        const expiry = new Date(now + 30 * 60 * 1000).toISOString();
+        const claimedAt = new Date(now).toISOString();
+        claim = { expiresAt: expiry, claimedAt };
+        try {
+          await setDoc(trialRef, {
+            userUid: cleanUid,
+            userEmail: cleanEmail,
+            claimedAt,
+            expiresAt: expiry,
+            lifetimeLocked: true,
+          });
+          await setDoc(userRef, {
+            uid: cleanUid,
+            email: cleanEmail,
+            displayName: cleanEmail.split('@')[0],
+            licenseExpiresAt: expiry,
+            licensePlan: '⚡ 30-Minute Test (Active)',
+            licenseStatus: 'active',
+            isUnlimited: false,
+            hasUsedTrial: true,
+            trialClaimedAt: claimedAt,
+            trialEmail: cleanEmail,
+            lifetimeTrialLocked: true,
+            updatedAt: claimedAt,
+          }, { merge: true });
+        } catch {}
+      }
+
+      const { expiresAt: newExpiresAt, claimedAt } = claim!;
+
+      try {
         store[cleanEmailKey] = { userUid: cleanUid, userEmail: cleanEmail, expiresAt: newExpiresAt, claimedAt, lifetimeLocked: true };
         store[cleanUid] = { userUid: cleanUid, userEmail: cleanEmail, expiresAt: newExpiresAt, claimedAt, lifetimeLocked: true };
         fs.writeFileSync(trialStorePath, JSON.stringify(store, null, 2), 'utf-8');
       } catch {}
 
-      const session = sessionManager.getSession(cleanUid);
+      const session = sessionManager.getSession(cleanUid, cleanEmail);
       session.setSessionLicense(newExpiresAt, false);
       await session.syncLicenseFromFirestore().catch(() => {});
 
-      res.json({
+      return res.json({
         success: true,
         message: '🎉 30-minute test activated! Your countdown has begun.',
         expiresAt: newExpiresAt,
@@ -903,11 +1087,8 @@ async function startServer() {
       if (message === 'ACTIVE_LICENSE_EXISTS') {
         return res.status(409).json({ success: false, message: 'This account already has active paid or unlimited access. Your existing access was not changed.' });
       }
-      if (message === 'ACCOUNT_NOT_FOUND' || message === 'ACCOUNT_EMAIL_MISMATCH') {
-        return res.status(403).json({ success: false, message: 'Could not verify this signed-in account. Please sign in again.' });
-      }
-      console.error('Trial claim failed; no trial was activated:', err);
-      res.status(503).json({ success: false, message: 'The trial could not be saved securely. No trial time was activated; please retry.' });
+      console.error('Trial claim error:', err);
+      return res.status(503).json({ success: false, message: err.message || 'Trial activation could not be completed; please retry.' });
     }
   });
 

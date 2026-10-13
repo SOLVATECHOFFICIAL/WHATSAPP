@@ -612,7 +612,6 @@ export async function fetchAllUsers(): Promise<any[]> {
       if (data?.success && Array.isArray(data.users)) {
         for (const d of data.users) {
           const uid = d.uid;
-          if (usersMap.has(uid)) continue;
           const isOwner = isOwnerEmail(d.email);
           const rawExpiresAt = d.licenseExpiresAt || null;
           const expMs = rawExpiresAt ? new Date(rawExpiresAt).getTime() : 0;
@@ -627,25 +626,27 @@ export async function fetchAllUsers(): Promise<any[]> {
           const linkedPhone = liveStatus.phone || d.linkedPhone || d.phone || null;
           const isPaired = Boolean(liveStatus.isPaired || linkedPhone);
 
+          const existing = usersMap.get(uid);
           usersMap.set(uid, {
+            ...existing,
             uid,
-            email: d.email || `${uid}@solvatech.com`,
-            displayName: d.displayName || d.email?.split('@')[0] || (isOwner ? 'Admin Master' : 'Solvatech User'),
+            email: d.email || existing?.email || `${uid}@solvatech.com`,
+            displayName: d.displayName || existing?.displayName || d.email?.split('@')[0] || (isOwner ? 'Admin Master' : 'Solvatech User'),
             isUnlimited,
             licensePlan: isUnlimited
               ? '👑 Unlimited Lifetime (Admin Granted)'
-              : (isExpired ? 'Expired Plan' : (d.licensePlan || 'Active Plan')),
+              : (isExpired ? 'Expired Plan' : (d.licensePlan || existing?.licensePlan || 'Active Plan')),
             licenseStatus: isUnlimited ? 'unlimited' : (isExpired ? 'expired' : 'active'),
-            licenseKey: d.licenseKey || null,
-            licenseExpiresAt: rawExpiresAt,
-            linkedPhone,
-            isPaired,
-            whatsappConnected: isActuallyConnected,
-            hasUsedTrial: Boolean(d.hasUsedTrial),
-            trialClaimedAt: d.trialClaimedAt || null,
-            commandsRun: d.commandsRun || 0,
-            lastLogin: d.lastLogin || d.updatedAt || new Date().toISOString(),
-            memberSince: d.createdAt || '2026-10-01',
+            licenseKey: d.licenseKey || existing?.licenseKey || null,
+            licenseExpiresAt: rawExpiresAt || existing?.licenseExpiresAt,
+            linkedPhone: linkedPhone || existing?.linkedPhone,
+            isPaired: isPaired || existing?.isPaired,
+            whatsappConnected: isActuallyConnected || existing?.whatsappConnected,
+            hasUsedTrial: Boolean(d.hasUsedTrial || existing?.hasUsedTrial),
+            trialClaimedAt: d.trialClaimedAt || existing?.trialClaimedAt || null,
+            commandsRun: d.commandsRun || existing?.commandsRun || 0,
+            lastLogin: d.lastLogin || existing?.lastLogin || d.updatedAt || new Date().toISOString(),
+            memberSince: d.createdAt || existing?.memberSince || '2026-10-01',
           });
         }
       }
@@ -654,63 +655,55 @@ export async function fetchAllUsers(): Promise<any[]> {
     console.debug('Backend admin users fetch note:', apiErr);
   }
 
-  // 3. Ensure all authorized admins in OWNER_EMAILS are represented in the account list
-  for (const adminEmail of OWNER_EMAILS) {
-    const existing = Array.from(usersMap.values()).find(
-      (u) => u.email?.toLowerCase() === adminEmail.toLowerCase()
-    );
-    if (!existing) {
-      const adminUid = `admin_${adminEmail.replace(/[^a-zA-Z0-9]/g, '_')}`;
-      usersMap.set(adminUid, {
-        uid: adminUid,
-        email: adminEmail,
-        displayName: adminEmail.split('@')[0].toUpperCase() + ' (Founder Admin)',
+  // 3. Deduplicate strictly by normalized email; delete duplicates in Firebase so only one remains
+  const finalEmailMap = new Map<string, any>();
+  const duplicateUidsToDelete: string[] = [];
+
+  for (const user of usersMap.values()) {
+    const rawEmail = typeof user.email === 'string' ? user.email.trim().toLowerCase() : '';
+    if (!rawEmail) {
+      finalEmailMap.set(user.uid, user);
+      continue;
+    }
+
+    if (finalEmailMap.has(rawEmail)) {
+      const existing = finalEmailMap.get(rawEmail);
+      const existingScore = (existing.isUnlimited ? 100 : 0) + (existing.linkedPhone ? 50 : 0) + (existing.licenseExpiresAt ? 25 : 0);
+      const currentScore = (user.isUnlimited ? 100 : 0) + (user.linkedPhone ? 50 : 0) + (user.licenseExpiresAt ? 25 : 0);
+
+      if (currentScore > existingScore) {
+        if (existing.uid) duplicateUidsToDelete.push(existing.uid);
+        finalEmailMap.set(rawEmail, user);
+      } else {
+        if (user.uid) duplicateUidsToDelete.push(user.uid);
+      }
+    } else {
+      finalEmailMap.set(rawEmail, user);
+    }
+  }
+
+  // Delete duplicate documents from Firebase so only one remains!
+  for (const dupUid of duplicateUidsToDelete) {
+    try {
+      void deleteDoc(doc(db, 'users', dupUid));
+    } catch {}
+  }
+
+  // Ensure ONLY awoyinfasolomon1@gmail.com is granted owner unlimited master access
+  const resultUsers = Array.from(finalEmailMap.values()).map((u) => {
+    const isOwner = isOwnerEmail(u.email);
+    if (isOwner) {
+      return {
+        ...u,
         isUnlimited: true,
         licensePlan: '👑 Unlimited Lifetime Master Access',
         licenseStatus: 'unlimited',
-        licenseKey: 'MASTER-ADMIN-UNLIMITED',
-        licenseExpiresAt: null,
-        linkedPhone: null,
-        isPaired: false,
-        whatsappConnected: false,
-        hasUsedTrial: true,
-        commandsRun: 0,
-        lastLogin: new Date().toISOString(),
-        memberSince: '2026-10-01',
-      });
-    } else {
-      existing.isUnlimited = true;
-      existing.licenseStatus = 'unlimited';
-      existing.licensePlan = '👑 Unlimited Lifetime Master Access';
+      };
     }
-  }
+    return u;
+  });
 
-  // 4. Ensure currently authenticated user is also present
-  if (auth?.currentUser) {
-    const cur = auth.currentUser;
-    const isOwner = isOwnerEmail(cur.email);
-    if (!usersMap.has(cur.uid)) {
-      usersMap.set(cur.uid, {
-        uid: cur.uid,
-        email: cur.email || 'user@solvatech.com',
-        displayName: cur.displayName || cur.email?.split('@')[0] || (isOwner ? 'Admin Master' : 'Solvatech User'),
-        isUnlimited: isOwner,
-        licensePlan: isOwner ? '👑 Unlimited Lifetime Master Access' : 'Trial Plan',
-        licenseStatus: isOwner ? 'unlimited' : 'active',
-        licenseKey: isOwner ? 'MASTER-ADMIN-UNLIMITED' : null,
-        licenseExpiresAt: null,
-        linkedPhone: null,
-        isPaired: false,
-        whatsappConnected: false,
-        hasUsedTrial: false,
-        commandsRun: 0,
-        lastLogin: new Date().toISOString(),
-        memberSince: '2026-10-01',
-      });
-    }
-  }
-
-  return Array.from(usersMap.values());
+  return resultUsers;
 }
 
 // Countdown time calculator down to exact days, hours, minutes, seconds
@@ -789,9 +782,8 @@ export async function checkUserTrialStatus(
   if (!userUid && !userEmail) return false;
 
   const cleanEmail = (userEmail || '').trim().toLowerCase();
-  const cleanEmailKey = cleanEmail ? cleanEmail.replace(/[^a-z0-9]/g, '_') : '';
 
-  // 1. Check persistent server trial endpoint first (authoritative and protects Firestore quota)
+  // 1. Check persistent server trial endpoint first (authoritative)
   try {
     const q = new URLSearchParams();
     if (userUid) q.set('uid', userUid);
@@ -799,38 +791,25 @@ export async function checkUserTrialStatus(
     const res = await fetch(`/api/trial/status?${q.toString()}`);
     if (res.ok) {
       const data = await res.json();
-      if (data && data.success && data.hasUsedTrial === true) {
-        return true;
+      if (data && data.success) {
+        return data.hasUsedTrial === true;
       }
     }
   } catch (apiErr) {
     console.debug('Server trial status check note:', apiErr);
   }
 
-  // 2. Client-side fallback if server was unreachable and quota is available
+  // 2. Client-side fallback if server was unreachable
   if (!isFirestoreQuotaExhausted()) {
-    if (cleanEmailKey) {
-      try {
-        const trialRef = doc(db, 'claimed_trials', cleanEmailKey);
-        const snap = await getDoc(trialRef);
-        if (snap.exists()) {
-          const d = snap.data();
-          if (d?.claimedAt || d?.expiresAt || d?.userEmail) {
-            return true;
-          }
-        }
-      } catch (e: any) {
-        reportFirestoreError(e);
-      }
-    }
-
     if (userUid) {
       try {
         const userRef = doc(db, 'users', userUid);
         const snap = await getDoc(userRef);
         if (snap.exists()) {
           const data = snap.data();
-          if (data?.hasUsedTrial === true || data?.trialClaimedAt) {
+          const expMs = data?.licenseExpiresAt ? new Date(data.licenseExpiresAt).getTime() : 0;
+          const isActive = expMs > Date.now();
+          if ((data?.hasUsedTrial === true || data?.trialClaimedAt) && !isActive) {
             return true;
           }
         }
@@ -855,33 +834,7 @@ export async function claim30MinuteTrial(
   }
 
   const cleanEmail = userEmail.trim().toLowerCase();
-  const cleanEmailKey = cleanEmail.replace(/[^a-z0-9]/g, '_');
 
-  // Check with Firestore and server first: strictly once in a lifetime per email
-  const alreadyClaimed = await checkUserTrialStatus(userUid, cleanEmail);
-  if (alreadyClaimed) {
-    return {
-      success: false,
-      message: 'The 30-minute test has already been used on this account. It is strictly once in a lifetime per user permanently linked to your email in Firebase.',
-    };
-  }
-
-  // Direct Firestore verification to eliminate race conditions
-  try {
-    const trialRef = doc(db, 'claimed_trials', cleanEmailKey);
-    const trialSnap = await getDoc(trialRef);
-    if (trialSnap.exists()) {
-      return {
-        success: false,
-        message: 'The 30-minute test has already been claimed on this email in Firebase. It is strictly once in a lifetime.',
-      };
-    }
-  } catch (e) {
-    console.warn('Direct Firestore trial race check:', e);
-  }
-
-  // The server owns the trial start time, enforces a lifetime claim, and writes
-  // the resulting expiry atomically. Never extend a trial from a browser clock.
   let finalExpiresAt: string;
   try {
     const res = await fetch('/api/trial/claim', {
@@ -896,7 +849,7 @@ export async function claim30MinuteTrial(
     if (!res.ok || !data.success || typeof data.expiresAt !== 'string') {
       return {
         success: false,
-        message: data.message || 'Trial could not be saved; no trial time was activated.',
+        message: data?.message || 'The 30-minute test could not be activated.',
       };
     }
     finalExpiresAt = data.expiresAt;
@@ -904,26 +857,35 @@ export async function claim30MinuteTrial(
     console.debug('Backend trial claim network note:', apiErr);
     return {
       success: false,
-      message: 'Trial service is unavailable. No trial time was activated; please retry.',
+      message: 'Trial service is unavailable. Please retry in a moment.',
     };
   }
 
-  // The server transaction already persisted the canonical expiry and lifetime lock.
-  // Synchronization reads that saved record rather than accepting a client-supplied time.
+  // Update client Firestore user document directly for immediate reactive UI update
   try {
-    await fetch('/api/whatsapp/sync-license', {
+    const userRef = doc(db, 'users', userUid);
+    void setDoc(userRef, {
+      uid: userUid,
+      email: cleanEmail,
+      licenseExpiresAt: finalExpiresAt,
+      licensePlan: '⚡ 30-Minute Test (Active)',
+      licenseStatus: 'active',
+      isUnlimited: false,
+      hasUsedTrial: true,
+      trialClaimedAt: new Date().toISOString(),
+      trialEmail: cleanEmail,
+      lifetimeTrialLocked: true,
+    }, { merge: true });
+  } catch {}
+
+  // Trigger background socket synchronization
+  try {
+    void fetch('/api/whatsapp/sync-license', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId: userUid }),
-    });
-    await fetch('/api/whatsapp/reconnect', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId: userUid }),
-    });
-  } catch (err) {
-    console.warn('Trial saved, but live session synchronization will retry on the next status/license sync:', err);
-  }
+    }).catch(() => {});
+  } catch {}
 
   return {
     success: true,

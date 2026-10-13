@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { cert, getApp, getApps, initializeApp } from 'firebase-admin/app';
+import { getAuth } from 'firebase-admin/auth';
 import {
   FieldValue,
   getFirestore,
@@ -304,5 +305,24 @@ export function serverTimestamp(): any {
     return FieldValue.serverTimestamp();
   } catch {
     return new Date().toISOString();
+  }
+}
+
+export async function listAllFirebaseUsers(): Promise<Array<{ uid: string; email?: string; displayName?: string; createdAt?: string }>> {
+  if (isMock) return [];
+  try {
+    const adminApp = getApps().length ? getApp() : null;
+    if (!adminApp) return [];
+    const authAdmin = getAuth(adminApp);
+    const listResult = await authAdmin.listUsers(1000);
+    return listResult.users.map((u) => ({
+      uid: u.uid,
+      email: u.email || undefined,
+      displayName: u.displayName || undefined,
+      createdAt: u.metadata?.creationTime || undefined,
+    }));
+  } catch (err) {
+    console.warn('[Firebase Admin] Error listing auth users:', err);
+    return [];
   }
 }

@@ -21,7 +21,7 @@ export const PWAInstallButton: React.FC<{
   const [iosMessage, setIosMessage] = useState(false);
 
   // If already installed, banner dismissed, or no native prompt available (because app is already installed), hide completely!
-  if ((isInstalled || isBannerHidden || (!hasPrompt && !isIOS)) && !justInstalled && !justDismissed) {
+  if (isInstalled || isBannerHidden || (!hasPrompt && !isIOS)) {
     return null;
   }
 
@@ -29,18 +29,8 @@ export const PWAInstallButton: React.FC<{
     e.preventDefault();
     e.stopPropagation();
 
-    if (isIOS) {
+    if (isIOS || !hasPrompt) {
       markAsInstalledOnPhone();
-      setJustInstalled(true);
-      setTimeout(() => setJustInstalled(false), 3000);
-      return;
-    }
-
-    if (!hasPrompt) {
-      // Browser does not offer prompt because app is already installed on device
-      markAsInstalledOnPhone();
-      setJustInstalled(true);
-      setTimeout(() => setJustInstalled(false), 3000);
       return;
     }
 
@@ -48,13 +38,9 @@ export const PWAInstallButton: React.FC<{
     try {
       await install();
       markAsInstalledOnPhone();
-      setJustInstalled(true);
-      setTimeout(() => setJustInstalled(false), 3000);
     } catch (err) {
       console.warn('Install handled:', err);
       markAsInstalledOnPhone();
-      setJustInstalled(true);
-      setTimeout(() => setJustInstalled(false), 3000);
     } finally {
       setIsPrompting(false);
     }
@@ -64,16 +50,12 @@ export const PWAInstallButton: React.FC<{
     e.preventDefault();
     e.stopPropagation();
     markAsInstalledOnPhone();
-    setJustDismissed(true);
-    setTimeout(() => setJustDismissed(false), 2500);
   };
 
   const handleDismiss = (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
     dismissBannerPermanently();
-    setJustDismissed(true);
-    setTimeout(() => setJustDismissed(false), 2500);
   };
 
   if (justInstalled) {

@@ -8,24 +8,39 @@ interface BeforeInstallPromptEvent extends Event {
 const STORAGE_KEY_INSTALLED = 'solvatech_pwa_installed';
 const STORAGE_KEY_DISMISSED = 'solvatech_pwa_banner_hidden';
 
-export function usePWAInstall() {
-  const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
-  const [isInstalled, setIsInstalled] = useState<boolean>(() => {
-    if (typeof window === 'undefined') return false;
+function checkAlreadyInstalled(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
     const isStandalone =
       window.matchMedia('(display-mode: standalone)').matches ||
+      window.matchMedia('(display-mode: fullscreen)').matches ||
+      window.matchMedia('(display-mode: minimal-ui)').matches ||
       (window.navigator as unknown as { standalone?: boolean }).standalone === true ||
       document.referrer.includes('android-app://');
-    const storedInstalled = localStorage.getItem(STORAGE_KEY_INSTALLED) === 'true';
+    const storedInstalled =
+      localStorage.getItem(STORAGE_KEY_INSTALLED) === 'true' ||
+      localStorage.getItem('pwa_installed') === 'true' ||
+      sessionStorage.getItem(STORAGE_KEY_INSTALLED) === 'true';
     return isStandalone || storedInstalled;
-  });
+  } catch {
+    return false;
+  }
+}
+
+export function usePWAInstall() {
+  const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
+  const [isInstalled, setIsInstalled] = useState<boolean>(() => checkAlreadyInstalled());
 
   const [isBannerHidden, setIsBannerHidden] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
-    return (
-      localStorage.getItem(STORAGE_KEY_INSTALLED) === 'true' ||
-      localStorage.getItem(STORAGE_KEY_DISMISSED) === 'true'
-    );
+    try {
+      return (
+        checkAlreadyInstalled() ||
+        localStorage.getItem(STORAGE_KEY_DISMISSED) === 'true'
+      );
+    } catch {
+      return false;
+    }
   });
 
   const [isIOS, setIsIOS] = useState(false);
@@ -33,19 +48,10 @@ export function usePWAInstall() {
   const [isInAppBrowser, setIsInAppBrowser] = useState(false);
 
   useEffect(() => {
-    // Detect standalone mode (already installed or running as standalone PWA)
-    const isStandalone =
-      window.matchMedia('(display-mode: standalone)').matches ||
-      (window.navigator as unknown as { standalone?: boolean }).standalone === true ||
-      document.referrer.includes('android-app://');
-    const storedInstalled = localStorage.getItem(STORAGE_KEY_INSTALLED) === 'true';
-    const storedDismissed = localStorage.getItem(STORAGE_KEY_DISMISSED) === 'true';
-
-    if (isStandalone || storedInstalled) {
+    if (checkAlreadyInstalled()) {
       setIsInstalled(true);
       setIsBannerHidden(true);
-    } else if (storedDismissed) {
-      setIsBannerHidden(true);
+      return;
     }
 
     // Detect platform
@@ -94,12 +100,19 @@ export function usePWAInstall() {
       } catch {}
     };
 
+    const handleGlobalPwaInstalled = () => {
+      setIsInstalled(true);
+      setIsBannerHidden(true);
+    };
+
     window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
     window.addEventListener('appinstalled', handleAppInstalled);
+    window.addEventListener('solvatech:pwa-installed', handleGlobalPwaInstalled);
 
     return () => {
       window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
       window.removeEventListener('appinstalled', handleAppInstalled);
+      window.removeEventListener('solvatech:pwa-installed', handleGlobalPwaInstalled);
     };
   }, []);
 
@@ -108,7 +121,10 @@ export function usePWAInstall() {
     setIsBannerHidden(true);
     try {
       localStorage.setItem(STORAGE_KEY_INSTALLED, 'true');
+      localStorage.setItem('pwa_installed', 'true');
       localStorage.setItem(STORAGE_KEY_DISMISSED, 'true');
+      sessionStorage.setItem(STORAGE_KEY_INSTALLED, 'true');
+      window.dispatchEvent(new Event('solvatech:pwa-installed'));
     } catch {}
   }, []);
 

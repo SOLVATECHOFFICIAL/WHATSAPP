@@ -101,6 +101,17 @@ export async function syncUserProfile(user: { uid: string; email: string | null;
     } else {
       await setDoc(userRef, { lastLogin: serverTimestamp() }, { merge: true });
     }
+    if (user.uid && user.email) {
+      void fetch('/api/users/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          uid: user.uid,
+          email: user.email,
+          displayName: user.displayName || user.email.split('@')[0],
+        }),
+      }).catch(() => {});
+    }
   } catch (e) {
     console.warn('Firestore profile sync note:', e);
   }
@@ -173,6 +184,9 @@ export function onAuthChange(callback: (user: User | null) => void): () => void 
 
   try {
     return onAuthStateChanged(auth, (fbUser) => {
+      if (fbUser) {
+        void syncUserProfile(fbUser);
+      }
       callback(fbUser || null);
     });
   } catch (err) {

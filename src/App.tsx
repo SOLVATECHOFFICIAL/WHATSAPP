@@ -337,10 +337,27 @@ export default function App() {
       setAuthLoading(false);
 
       if (user) {
-        // Query trial status from Firestore for this specific account
-        checkUserTrialStatus(user.uid, user.email).then((claimed) => {
-          setHasClaimedTrial(claimed);
-        });
+        // Query authoritative trial status and active expiration for this specific account
+        fetch(`/api/trial/status?uid=${encodeURIComponent(user.uid)}&email=${encodeURIComponent(user.email || '')}`)
+          .then((r) => r.json())
+          .then((data) => {
+            if (data?.success) {
+              setHasClaimedTrial(data.hasUsedTrial);
+              if (data.isActive && data.expiresAt) {
+                setUserLicenseData((prev) => ({
+                  ...prev,
+                  expiresAt: data.expiresAt,
+                  plan: '⚡ 30-Minute Test (Active)',
+                  isUnlimited: false,
+                }));
+              }
+            }
+          })
+          .catch(() => {
+            checkUserTrialStatus(user.uid, user.email).then((claimed) => {
+              setHasClaimedTrial(claimed);
+            });
+          });
 
         // Real-time Firestore sync
         try {
@@ -352,7 +369,9 @@ export default function App() {
                 if (data.hasUsedTrial === false) {
                   setHasClaimedTrial(false);
                 } else if (data.hasUsedTrial === true) {
-                  setHasClaimedTrial(true);
+                  const expMs = data.licenseExpiresAt ? new Date(data.licenseExpiresAt).getTime() : 0;
+                  const isTrialStillActive = expMs > Date.now();
+                  setHasClaimedTrial(!isTrialStillActive);
                 }
 
                 const hasFiniteExpiry = Boolean(data.licenseExpiresAt);
@@ -909,7 +928,7 @@ export default function App() {
         currentUser.email || `${currentUser.uid}@solvatech.com`
       );
       if (res.success) {
-        setHasClaimedTrial(true);
+        setHasClaimedTrial(false);
         setTrialMessage({ type: 'success', text: res.message });
         setUserLicenseData((prev) => ({
           ...prev,
@@ -927,7 +946,9 @@ export default function App() {
         setTimeout(() => setToastNotification(null), 5000);
       } else {
         setTrialMessage({ type: 'error', text: res.message });
-        setHasClaimedTrial(true);
+        if (res.message.includes('already been used') || res.message.includes('already been claimed')) {
+          setHasClaimedTrial(true);
+        }
       }
     } catch (err: any) {
       setTrialMessage({ type: 'error', text: err.message || 'Error claiming 30-minute trial' });
