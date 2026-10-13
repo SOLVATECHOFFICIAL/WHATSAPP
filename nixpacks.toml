@@ -8,5 +8,8 @@ cmds = ["npm install --legacy-peer-deps"]
 [phases.build]
 cmds = ["npm run build"]
 
+[variables]
+NODE_OPTIONS = "--max-old-space-size=384 --expose-gc"
+
 [start]
 cmd = "npm start"

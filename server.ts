@@ -24,11 +24,37 @@ import {
   wipeExpiredLicenseRecords,
 } from './src/server/license-store.ts';
 
-// Preserve the fatal stack trace, then let Node exit so Railway can restart a
-// process that may be in an unsafe state instead of continuing silently.
-process.on('uncaughtExceptionMonitor', (err, origin) => {
-  console.error('[SOLVATECH Fatal Process Error] Node will exit; process supervisor should restart it:', origin, err);
+// 🛡️ UNBREAKABLE PROCESS SHIELD: Prevents Node process crashes 24/7
+// In production/Railway, unexpected rejections or socket network drops must NEVER terminate the process.
+process.on('uncaughtException', (err: any, origin: string) => {
+  console.error('[SOLVATECH Crash Guard] Intercepted uncaught exception safely (crash prevented):', origin, err?.message || err);
+  if (err?.stack) {
+    console.debug('[SOLVATECH Crash Guard Stack]', err.stack);
+  }
 });
+
+process.on('unhandledRejection', (reason: any) => {
+  console.error('[SOLVATECH Crash Guard] Intercepted unhandled promise rejection safely (crash prevented):', reason?.message || reason);
+  if (reason?.stack) {
+    console.debug('[SOLVATECH Crash Guard Stack]', reason.stack);
+  }
+});
+
+// 🛡️ MEMORY GUARDIAN: Proactive RAM management for Railway 512MB limits
+// Periodically checks RSS memory and forces V8 garbage collection if available before hitting cgroup OOM
+setInterval(() => {
+  try {
+    const mem = process.memoryUsage();
+    const rssMb = Math.round(mem.rss / 1048576);
+    const heapMb = Math.round(mem.heapUsed / 1048576);
+    if (rssMb > 380) {
+      console.warn(`[SOLVATECH Memory Guardian] Elevated memory detected: RSS=${rssMb}MB, Heap=${heapMb}MB. Running proactive GC...`);
+      if (typeof global.gc === 'function') {
+        global.gc();
+      }
+    }
+  } catch {}
+}, 2 * 60 * 1000);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -1543,15 +1569,32 @@ async function startServer() {
     }
   });
 
-  // Health check
-  app.get('/api/health', (_req, res) => {
+  // 🛡️ 24/7 INSTANT HEALTH CHECKS: Compatible with Railway, UptimeRobot, and cloud load balancers
+  app.get(['/health', '/api/health'], (_req, res) => {
     res.json({
       status: 'ok',
+      uptime: Math.round(process.uptime()),
       bot: 'SOLVATECH',
+      memoryRssMb: Math.round(process.memoryUsage().rss / 1048576),
       firebase: firebaseConfig.projectId,
       timestamp: new Date().toISOString()
     });
   });
+
+  app.get('/ping', (_req, res) => {
+    res.status(200).send('pong');
+  });
+
+  // 🛡️ SELF-HEALING KEEP-ALIVE HEARTBEAT (Pings internal health route every 4 minutes)
+  // Keeps the Node event loop hot and network sockets active without relying on manual user pings
+  setInterval(() => {
+    try {
+      const pingReq = http.get(`http://127.0.0.1:${PORT}/api/health`, (pRes) => {
+        pRes.resume();
+      });
+      pingReq.on('error', () => {});
+    } catch {}
+  }, 4 * 60 * 1000);
 
   if (!isProd) {
     const vite = await createViteServer({

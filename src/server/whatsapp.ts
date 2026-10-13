@@ -1979,6 +1979,21 @@ export class WhatsAppManager {
         } as any);
 
         this.sock = sock;
+
+        // 🛡️ Intercept low-level WebSocket network resets or Baileys internal event emitter errors
+        try {
+          if (sock.ws && typeof (sock.ws as any).on === 'function') {
+            (sock.ws as any).on('error', (wsErr: any) => {
+              console.warn(`[Baileys WS Guard (${this.userId})] Low-level socket network event intercepted:`, wsErr?.message || wsErr);
+            });
+          }
+          if (typeof (sock.ev as any).on === 'function') {
+            (sock.ev as any).on('error', (evErr: any) => {
+              console.warn(`[Baileys Event Guard (${this.userId})] Event emitter notice:`, evErr?.message || evErr);
+            });
+          }
+        } catch {}
+
         this.start247Heartbeat();
 
         sock.ev.on('creds.update', (creds) => {

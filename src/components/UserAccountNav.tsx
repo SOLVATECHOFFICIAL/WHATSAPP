@@ -114,8 +114,11 @@ export const UserAccountNav: React.FC<UserAccountNavProps> = ({ user, onOpenAuth
             className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-xl bg-rose-950/40 hover:bg-rose-950/60 border border-rose-500/30 text-rose-300 text-xs font-bold transition-colors cursor-pointer active:scale-98"
           >
             <LogOut className="w-3.5 h-3.5" />
-            <span>Sign Out / Logout</span>
+            <span>Sign Out of Dashboard</span>
           </button>
+          <p className="text-[10px] text-slate-400 text-center mt-1.5 leading-tight">
+            🛡️ Your WhatsApp bot stays active and connected 24/7 on the server after sign out.
+          </p>
         </div>
       )}
     </div>
