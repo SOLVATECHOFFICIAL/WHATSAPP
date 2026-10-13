@@ -151,3 +151,23 @@ export function wipeExpiredLicenseRecords(): number {
   }
   return count;
 }
+
+export function findActiveLicenseByUser(userId: string, userEmail?: string): ServerLicenseRecord | null {
+  const store = readStore();
+  const cleanEmail = (userEmail || '').trim().toLowerCase();
+  const now = Date.now();
+  let best: ServerLicenseRecord | null = null;
+  let bestExp = 0;
+  for (const record of Object.values(store)) {
+    const matchesUser = (userId && record.claimedBy === userId) || (cleanEmail && record.claimedEmail?.toLowerCase() === cleanEmail);
+    if (matchesUser && record.expiresAt) {
+      const expMs = new Date(record.expiresAt).getTime();
+      if (!isNaN(expMs) && expMs > now && expMs > bestExp) {
+        best = record;
+        bestExp = expMs;
+      }
+    }
+  }
+  return best;
+}
+

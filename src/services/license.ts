@@ -1,5 +1,5 @@
-import { auth, db, isFirestoreQuotaExhausted, reportFirestoreError } from './firebase';
-import { OWNER_EMAIL, OWNER_EMAILS, isOwnerEmail } from './admin-config';
+import { auth, db, isFirestoreQuotaExhausted, reportFirestoreError } from './firebase.ts';
+import { OWNER_EMAIL, OWNER_EMAILS, isOwnerEmail } from './admin-config.ts';
 import {
   collection,
   doc,

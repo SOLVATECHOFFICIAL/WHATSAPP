@@ -23,6 +23,10 @@ import { commandHandler, parseSpamArgs, GROUP_ONLY_COMMANDS } from './commands.t
 import { isFirestoreQuotaExhausted, reportFirestoreError } from '../services/firestore-status.ts';
 import { db, doc, getDoc, setDoc, deleteDoc, collection, getDocs, writeBatch } from './firebase-admin.ts';
 import { isOwnerEmail } from '../services/admin-config.ts';
+import { findActiveLicenseByUser } from './license-store.ts';
+
+// Prevent sharp/libvips from hoarding unmanaged memory in Node (essential for Railway 512MB RAM stability)
+sharp.cache(false);
 
 const MAX_PROCESS_MEDIA_CACHE_BYTES = 64 * 1024 * 1024;
 const processMediaCache = new Map<string, { size: number; evict: () => void }>();
@@ -354,7 +358,7 @@ export async function convertAntiSticker(
 
 export interface WhatsAppNotification {
   id: string;
-  type: 'pairing' | 'connection' | 'message_received' | 'message_sent' | 'system' | 'error' | 'command';
+  type: 'pairing' | 'connection' | 'message_received' | 'message_sent' | 'system' | 'error' | 'command' | 'warning';
   title: string;
   body: string;
   timestamp: string;
@@ -459,6 +463,7 @@ export class WhatsAppManager {
   private notifications: WhatsAppNotification[] = [];
   private mediaCacheDir: string;
   private reconnectingStartedAt: number | null = null;
+  private reconnectTimedOut = false;
   private recoveringMessageIds = new Set<string>();
   private messageCache = new Map<string, {
     key: proto.IMessageKey;
@@ -708,11 +713,13 @@ export class WhatsAppManager {
         if (parsed.licensePlan) {
           this.sessionLicensePlan = parsed.licensePlan;
         }
-        // Strict rule: if user is not the owner and has an explicit expiresAt, they are timed (NOT unlimited)
-        if (this.isOwnerEmail()) {
+        // If user is owner or explicitly granted unlimited, they are unlimited
+        if (this.isOwnerEmail() || parsed.isUnlimited === true) {
           this.isSessionUnlimited = true;
+          this.sessionLicenseExpiresAt = null;
         } else if (parsed.expiresAt) {
           this.isSessionUnlimited = false;
+          this.sessionLicenseExpiresAt = parsed.expiresAt;
         } else if (typeof parsed.isUnlimited === 'boolean') {
           this.isSessionUnlimited = parsed.isUnlimited;
         }
@@ -794,6 +801,20 @@ export class WhatsAppManager {
             }
           } catch {}
         }
+
+        // Check if there is an active redeemed license in .licenses_store.json
+        try {
+          const diskLic = findActiveLicenseByUser(this.userId, this.userEmail);
+          if (diskLic?.expiresAt) {
+            const dExpMs = new Date(diskLic.expiresAt).getTime();
+            const currExpMs = expAt ? new Date(expAt).getTime() : 0;
+            if (dExpMs > Date.now() && dExpMs > currExpMs) {
+              expAt = diskLic.expiresAt;
+              if (!this.sessionLicensePlan && diskLic.planName) this.sessionLicensePlan = diskLic.planName;
+              if (!this.sessionLicenseKey && diskLic.key) this.sessionLicenseKey = diskLic.key;
+            }
+          }
+        } catch {}
 
         // Preserve current active session license if incoming expAt is null or older
         if (this.sessionLicenseExpiresAt) {
@@ -973,7 +994,7 @@ export class WhatsAppManager {
         return;
       }
 
-      if (this.isIntentionalClosure) return;
+      if (this.isIntentionalClosure || this.reconnectTimedOut) return;
 
       const credsFile = path.join(this.authDir, 'creds.json');
       const hasCreds = fs.existsSync(credsFile);
@@ -992,6 +1013,7 @@ export class WhatsAppManager {
   private reconnectSocketSafely() {
     if (
       this.isIntentionalClosure ||
+      this.reconnectTimedOut ||
       this.isLicenseExpired() ||
       this.isConnecting ||
       this.initPromise ||
@@ -1309,6 +1331,13 @@ export class WhatsAppManager {
         this.currentStatus.pairingStage = 'connected';
         this.currentStatus.pairingCode = undefined;
         this.currentStatus.reconnectRemainingSeconds = undefined;
+      } else if (this.reconnectTimedOut) {
+        this.currentStatus.isConnected = false;
+        this.currentStatus.state = 'disconnected';
+        this.currentStatus.pairingStage = 'connected';
+        this.currentStatus.pairingCode = undefined;
+        this.currentStatus.reconnectRemainingSeconds = undefined;
+        this.currentStatus.lastError = 'Unable to reach your WhatsApp device after 5 minutes of retrying. The bot has paused reconnection to save resources. Please click reconnect or repair when ready.';
       } else {
         // Automatically reconnect 24/7 in background (e.g., after Railway restart or network drop)
         if (!this.sock && !this.isConnecting && !this.isLicenseExpired()) {
@@ -1327,6 +1356,7 @@ export class WhatsAppManager {
           // STRICT USER REQUIREMENT:
           // "if he try it for Good 5 min and no avail then relax and disconnect and wait for the user to come and repair it self maybe the user already disconnect it from WhatsApp"
           console.log(`[Baileys Reconnect ${this.userId}] 5 minutes elapsed without reaching WhatsApp phone. Relaxing socket attempts and waiting for user repair.`);
+          this.reconnectTimedOut = true;
           this.reconnectingStartedAt = null;
           this.isConnecting = false;
           if (this.sock) {
@@ -1852,6 +1882,11 @@ export class WhatsAppManager {
     } catch {}
   }
 
+  public resetReconnectTimeout(): void {
+    this.reconnectTimedOut = false;
+    this.reconnectingStartedAt = Date.now();
+  }
+
   public async initSocket(isFreshPairing = false): Promise<WASocket> {
     if (this.isLicenseExpired()) {
       throw new Error('Cannot connect WhatsApp: this account has no active license.');
@@ -1866,6 +1901,7 @@ export class WhatsAppManager {
 
     // A license pause is intentional, but a later valid renewal must be allowed to reconnect.
     this.isIntentionalClosure = false;
+    this.reconnectTimedOut = false;
     this.initPromise = (async () => {
       try {
         if (this.sock) {
@@ -5116,18 +5152,11 @@ export class WhatsAppSessionManager {
         totalChecked++;
         try {
           const session = this.getSession(uid);
-          const licenseVerified = await session.syncLicenseFromFirestore();
-          if (!licenseVerified) {
-            // Do not keep an active socket running against an unverified license.
-            if (session.getStatus().isConnected) {
-              await session.pauseSocket('License could not be verified');
-            }
-            continue;
-          }
+          await session.syncLicenseFromFirestore().catch(() => {});
           const license = session.getLicenseDetails();
           const isUnlimited = license.isUnlimited;
 
-          // Strict license enforcement
+          // Strict license enforcement: Only pause if license is genuinely expired
           const isExpired = session.isLicenseExpired();
 
           if (isExpired) {

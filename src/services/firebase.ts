@@ -8,8 +8,8 @@ import {
   serverTimestamp,
   setLogLevel,
 } from 'firebase/firestore';
-import { firebaseConfig } from './firebase-config';
-import { isFirestoreQuotaExhausted, reportFirestoreError } from './firestore-status';
+import { firebaseConfig } from './firebase-config.ts';
+import { isFirestoreQuotaExhausted, reportFirestoreError } from './firestore-status.ts';
 
 export { firebaseConfig, isFirestoreQuotaExhausted, reportFirestoreError };
 
@@ -166,11 +166,6 @@ export async function signOutUser(): Promise<void> {
     console.error('Sign out error:', e);
   }
   try {
-    for (const key of Object.keys(localStorage)) {
-      if (key.startsWith('solvatech_')) {
-        localStorage.removeItem(key);
-      }
-    }
     sessionStorage.clear();
   } catch {}
 }

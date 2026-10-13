@@ -1528,10 +1528,8 @@ async function startServer() {
         return res.status(400).json({ success: false, error: 'User ID is required.' });
       }
       const session = sessionManager.getSession(userId);
-      const licenseVerified = await session.syncLicenseFromFirestore();
-      if (!licenseVerified) {
-        return res.status(503).json({ success: false, error: 'Could not verify this account license from Firebase.' });
-      }
+      session.resetReconnectTimeout();
+      await session.syncLicenseFromFirestore().catch(() => {});
       if (session.isLicenseExpired()) {
         return res.status(403).json({
           success: false,

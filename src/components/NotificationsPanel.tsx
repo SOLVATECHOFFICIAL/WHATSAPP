@@ -3,7 +3,7 @@ import { Bell, MessageSquare, Link2, AlertCircle, Info, Trash2, CheckCircle2, Se
 
 export interface WhatsAppNotification {
   id: string;
-  type: 'pairing' | 'connection' | 'message_received' | 'message_sent' | 'system' | 'error' | 'command';
+  type: 'pairing' | 'connection' | 'message_received' | 'message_sent' | 'system' | 'error' | 'command' | 'warning';
   title: string;
   body: string;
   timestamp: string;
@@ -109,6 +109,8 @@ export const NotificationsPanel: React.FC<NotificationsPanelProps> = ({
         return <Send className="w-4 h-4 text-blue-500" />;
       case 'command':
         return <Terminal className="w-4 h-4 text-amber-500" />;
+      case 'warning':
+        return <AlertCircle className="w-4 h-4 text-amber-500" />;
       case 'error':
         return <AlertCircle className="w-4 h-4 text-rose-500" />;
       default:
