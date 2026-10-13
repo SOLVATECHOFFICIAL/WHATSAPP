@@ -5,7 +5,7 @@ import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { db, doc, getDoc, runTransaction } from './src/server/firebase-admin.ts';
+import { db, doc, getDoc, runTransaction, collection, getDocs } from './src/server/firebase-admin.ts';
 import { sessionManager, whatsappManager } from './src/server/whatsapp.ts';
 import { commandHandler, SOLVATECH_MENU } from './src/server/commands.ts';
 import {
@@ -177,6 +177,36 @@ async function startServer() {
     try {
       const statusMap = await sessionManager.getAllStatuses();
       res.json({ success: true, statuses: statusMap });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // Admin users list endpoint (server-side Firestore query fallback)
+  app.get('/api/admin/users', async (req, res) => {
+    if (!(await requireOwnerAuth(req, res))) return;
+    try {
+      const snap = await getDocs(collection(db, 'users'));
+      const list: any[] = [];
+      snap.forEach((d: any) => {
+        list.push({ uid: d.id, ...(d.data() || {}) });
+      });
+      res.json({ success: true, users: list });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // Admin users list endpoint (server-side Firestore query fallback)
+  app.get('/api/admin/users', async (req, res) => {
+    if (!(await requireOwnerAuth(req, res))) return;
+    try {
+      const snap = await getDocs(collection(db, 'users'));
+      const list: any[] = [];
+      snap.forEach((d: any) => {
+        list.push({ uid: d.id, ...(d.data() || {}) });
+      });
+      res.json({ success: true, users: list });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
     }

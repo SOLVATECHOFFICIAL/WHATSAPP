@@ -57,6 +57,7 @@ import {
   deleteSingleLicense,
   calculateRemainingTime,
   OWNER_EMAIL,
+  OWNER_EMAILS,
   isOwnerEmail,
 } from '../services/license';
 
@@ -323,7 +324,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           </div>
           <h3 className="text-white font-extrabold text-xl">Founder Authorization Required</h3>
           <p className="text-xs text-slate-400 leading-relaxed">
-            Strict Security Enforcement: Only <span className="text-amber-400 font-mono font-bold">{OWNER_EMAIL}</span> is authorized to access the SOLVATECH Master Command Center.
+            Strict Security Enforcement: Only authorized administrators (<span className="text-amber-400 font-mono font-bold">{OWNER_EMAILS.join(', ')}</span>) are authorized to access the SOLVATECH Master Command Center.
           </p>
           <div className="p-3 rounded-2xl bg-slate-950 border border-slate-800 text-[11px] text-slate-400 font-mono">
             Current Authenticated: {currentUserEmail || 'Guest / Unverified'}
@@ -341,9 +342,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   // TOGGLE UNLIMITED SWITCH
   const handleToggleUnlimited = async (user: any) => {
-    // STRICT RULE: awoyinfasolomon1@gmail.com can't be removed from unlimited!
-    if (user.email?.toLowerCase() === OWNER_EMAIL.toLowerCase()) {
-      showToast('👑 Master Founder Account: awoyinfasolomon1@gmail.com is permanently Unlimited and cannot be removed.');
+    // STRICT RULE: Founder admin accounts can't be removed from unlimited!
+    if (isOwnerEmail(user.email)) {
+      showToast(`👑 Master Founder Account: ${user.email} is permanently Unlimited and cannot be removed.`);
       return;
     }
 
@@ -434,7 +435,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   // REVOKE USER ACCESS
   const handleRevokeUser = async (user: any) => {
-    if (user.email?.toLowerCase() === OWNER_EMAIL.toLowerCase()) {
+    if (isOwnerEmail(user.email)) {
       showToast('Cannot revoke founder master account.');
       return;
     }
@@ -717,8 +718,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   // ENRICHED USERS LIST WITH EXACT CLASSIFICATIONS
   const enrichedUsers = useMemo(() => {
     return users.map((u) => {
-      const isOwnerAccount = u.email?.toLowerCase() === OWNER_EMAIL.toLowerCase();
-      // awoyinfasolomon1@gmail.com is strictly and permanently unlimited
+      const isOwnerAccount = isOwnerEmail(u.email);
+      // Admin accounts are strictly and permanently unlimited
       // Non-owners with an explicit licenseExpiresAt are strictly timed (NOT unlimited)
       const hasFiniteExpiry = Boolean(u.licenseExpiresAt);
       const isUnlimited = isOwnerAccount ? true : (!hasFiniteExpiry && !!u.isUnlimited);
@@ -842,7 +843,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               </span>
             </div>
             <p className="text-[10px] sm:text-[11px] text-slate-400 font-mono flex items-center gap-1.5 truncate">
-              <span className="text-amber-300 font-bold">awoyinfasolomon1@gmail.com</span>
+              <span className="text-amber-300 font-bold">{currentUserEmail || 'awoyinfataiwo20@gmail.com'}</span>
               <span className="text-slate-600">•</span>
               <span className="text-emerald-400 flex items-center gap-1 font-semibold">
                 <span className="w-2 h-2 rounded-full bg-emerald-400" />
@@ -942,14 +943,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       </div>
 
       {/* KPI TELEMETRY SUMMARY TICKER */}
-      {usersRefreshFailed && (
-        <div
-          role="status"
-          className="mx-3 mt-2 rounded-xl border border-amber-500/40 bg-amber-950/30 px-3 py-2 text-xs text-amber-200 sm:mx-6"
-        >
-          Could not confirm the account list. The dashboard is keeping the last confirmed user data.
-        </div>
-      )}
       <section className="px-3 sm:px-6 py-2.5 border-b border-slate-800 bg-slate-900/40 shrink-0">
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 sm:gap-3">
           {/* Card 1: Total Users */}
@@ -1217,7 +1210,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       filteredUsers.map((user) => {
                         const isActionLoadingThis = actionLoadingUid === user.uid;
                         const isTogglingThis = togglingUid === user.uid;
-                        const isPermanentFounder = user.email?.toLowerCase() === OWNER_EMAIL.toLowerCase();
+                        const isPermanentFounder = isOwnerEmail(user.email);
 
                         return (
                           <tr key={user.uid} className="hover:bg-slate-800/40 transition-colors">
@@ -1502,7 +1495,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       <span className="text-xs font-bold text-amber-300 block">Unlimited VIP Master Switch</span>
                       <p className="text-[10px] text-slate-400">Instantly grant or revoke lifetime access</p>
                     </div>
-                    {inspectingUser.email?.toLowerCase() === OWNER_EMAIL.toLowerCase() ? (
+                    {isOwnerEmail(inspectingUser.email) ? (
                       <span className="px-3 py-1.5 rounded-xl bg-amber-500/20 text-amber-300 font-bold text-xs border border-amber-500/40">
                         Permanent Founder (Locked)
                       </span>

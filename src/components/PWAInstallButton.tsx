@@ -8,6 +8,7 @@ export const PWAInstallButton: React.FC<{
   const {
     isInstalled,
     isBannerHidden,
+    hasPrompt,
     isIOS,
     install,
     markAsInstalledOnPhone,
@@ -19,8 +20,8 @@ export const PWAInstallButton: React.FC<{
   const [justDismissed, setJustDismissed] = useState(false);
   const [iosMessage, setIosMessage] = useState(false);
 
-  // If already installed or banner hidden, do not show banner
-  if ((isInstalled || isBannerHidden) && !justInstalled && !justDismissed) {
+  // If already installed, banner dismissed, or no native prompt available (because app is already installed), hide completely!
+  if ((isInstalled || isBannerHidden || (!hasPrompt && !isIOS)) && !justInstalled && !justDismissed) {
     return null;
   }
 
@@ -31,6 +32,14 @@ export const PWAInstallButton: React.FC<{
     if (isIOS) {
       setIosMessage(true);
       setTimeout(() => setIosMessage(false), 5000);
+      return;
+    }
+
+    if (!hasPrompt) {
+      // Browser does not offer prompt because app is already installed on device
+      markAsInstalledOnPhone();
+      setJustInstalled(true);
+      setTimeout(() => setJustInstalled(false), 3500);
       return;
     }
 

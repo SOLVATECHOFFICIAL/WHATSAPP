@@ -58,6 +58,20 @@ export function usePWAInstall() {
     setIsAndroid(isAndroidDevice);
     setIsInAppBrowser(inApp);
 
+    // If browser supports getInstalledRelatedApps, query if app is already installed on device
+    if ('getInstalledRelatedApps' in window.navigator) {
+      (window.navigator as any).getInstalledRelatedApps().then((relatedApps: any[]) => {
+        if (Array.isArray(relatedApps) && relatedApps.length > 0) {
+          setIsInstalled(true);
+          setIsBannerHidden(true);
+          try {
+            localStorage.setItem(STORAGE_KEY_INSTALLED, 'true');
+            localStorage.setItem(STORAGE_KEY_DISMISSED, 'true');
+          } catch {}
+        }
+      }).catch(() => {});
+    }
+
     if ((window as any).__pwaPrompt) {
       setDeferredPrompt((window as any).__pwaPrompt as BeforeInstallPromptEvent);
     }
