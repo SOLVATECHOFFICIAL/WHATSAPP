@@ -396,15 +396,26 @@ export default function App() {
                 // Non-owners with an explicit expiry date are strictly timed (NOT unlimited)
                 const isUserUnlimited = isOwner || (!hasFiniteExpiry && !!data.isUnlimited);
 
-                setUserLicenseData({
-                  expiresAt: data.licenseExpiresAt || null,
-                  isUnlimited: isUserUnlimited,
-                  plan:
-                    data.licensePlan ||
-                    (isUserUnlimited
-                      ? '👑 Unlimited Lifetime (Admin Granted)'
-                      : 'Active Plan'),
-                  key: data.licenseKey || null,
+                setUserLicenseData((prev) => {
+                  const now = Date.now();
+                  const prevExpMs = prev.expiresAt ? new Date(prev.expiresAt).getTime() : 0;
+                  const newExpMs = data.licenseExpiresAt ? new Date(data.licenseExpiresAt).getTime() : 0;
+
+                  let finalExpiresAt = data.licenseExpiresAt || null;
+                  let finalPlan = data.licensePlan || (isUserUnlimited ? '👑 Unlimited Lifetime (Admin Granted)' : 'Active Plan');
+
+                  // If current active countdown is still running and snapshot has null/older, retain the active countdown
+                  if (prevExpMs > now && (!newExpMs || newExpMs < prevExpMs)) {
+                    finalExpiresAt = prev.expiresAt;
+                    finalPlan = prev.plan;
+                  }
+
+                  return {
+                    expiresAt: finalExpiresAt,
+                    isUnlimited: isUserUnlimited,
+                    plan: isUserUnlimited ? '👑 Unlimited Lifetime (Admin Granted)' : finalPlan,
+                    key: data.licenseKey || prev.key || null,
+                  };
                 });
               }
             },
@@ -729,7 +740,16 @@ export default function App() {
 
     // Check License: NEVER should a user be connected to bot while license key is expired
     const isActuallyUnlimited = isOwner || (!userLicenseData.expiresAt && userLicenseData.isUnlimited);
-    const licenseCheck = calculateRemainingTime(userLicenseData.expiresAt, isActuallyUnlimited, Date.now() + serverClockOffsetMs);
+    let effectiveExpiry = userLicenseData.expiresAt;
+    if (!effectiveExpiry && currentUser?.uid) {
+      try {
+        const cached = localStorage.getItem(`solvatech_license_expiresAt_${currentUser.uid}`);
+        if (cached && new Date(cached).getTime() > Date.now()) {
+          effectiveExpiry = cached;
+        }
+      } catch {}
+    }
+    const licenseCheck = calculateRemainingTime(effectiveExpiry, isActuallyUnlimited, Date.now() + serverClockOffsetMs);
     if (!isActuallyUnlimited && licenseCheck.isExpired) {
       setActiveTab('license');
       setInTabError('🚨 Pairing Blocked: Your license key has expired! Users can NEVER connect to the WhatsApp bot while their license is expired. Please redeem a valid key or choose a plan below.');
@@ -769,7 +789,7 @@ export default function App() {
           userEmail: currentUser?.email,
           isExpired: licenseCheck.isExpired,
           isUnlimited: isOwner || userLicenseData.isUnlimited,
-          licenseExpiresAt: userLicenseData.expiresAt,
+          licenseExpiresAt: effectiveExpiry || userLicenseData.expiresAt,
           force: isForce,
         }),
       });

@@ -13,6 +13,16 @@ import {
 } from './src/services/firebase-config.ts';
 import { isFirestoreQuotaExhausted, reportFirestoreError } from './src/services/firestore-status.ts';
 import { OWNER_EMAIL, OWNER_EMAILS, isOwnerEmail } from './src/services/admin-config.ts';
+import {
+  findLicenseByKey,
+  saveLicenseRecord,
+  saveBatchLicenseRecords,
+  markLicenseRedeemed,
+  getAllLicenseRecords,
+  deleteLicenseRecord,
+  wipeUnusedLicenseRecords,
+  wipeExpiredLicenseRecords,
+} from './src/server/license-store.ts';
 
 // Preserve the fatal stack trace, then let Node exit so Railway can restart a
 // process that may be in an unsafe state instead of continuing silently.
@@ -370,8 +380,106 @@ async function startServer() {
     });
   });
 
-  // Redeem keys on the server so the expiry is based on server time, not the
-  // browser clock, and key + account records commit atomically.
+  // -------------------------------------------------------------
+  // LICENSE MANAGEMENT & REDEMPTION (BIDIRECTIONAL PERSISTENT STORE)
+  // -------------------------------------------------------------
+
+  // Save single minted key to persistent store & server db
+  app.post('/api/licenses/create', async (req, res) => {
+    try {
+      const record = req.body;
+      if (!record || !record.key) {
+        return res.status(400).json({ success: false, error: 'Valid license record required' });
+      }
+      const saved = saveLicenseRecord(record);
+      // Also register into server db
+      try {
+        await setDoc(doc(db, 'licenses', saved.key), saved);
+      } catch {}
+      res.json({ success: true, license: saved });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // Batch save minted keys to persistent store & server db
+  app.post('/api/licenses/batch-create', async (req, res) => {
+    try {
+      const licenses = req.body?.licenses || [];
+      if (!Array.isArray(licenses)) {
+        return res.status(400).json({ success: false, error: 'Array of licenses required' });
+      }
+      const saved = saveBatchLicenseRecords(licenses);
+      for (const lic of saved) {
+        try {
+          await setDoc(doc(db, 'licenses', lic.key), lic);
+        } catch {}
+      }
+      res.json({ success: true, count: saved.length, licenses: saved });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // List all licenses (merging server persistent store and Firestore)
+  app.get('/api/licenses', async (req, res) => {
+    try {
+      const map = new Map<string, any>();
+      // 1. From persistent store
+      const fileLicenses = getAllLicenseRecords();
+      for (const l of fileLicenses) {
+        map.set(l.key, l);
+      }
+      // 2. From Firestore / server db
+      try {
+        const snap = await getDocs(collection(db, 'licenses'));
+        snap.forEach((d: any) => {
+          const data = d.data() || {};
+          const k = data.key || d.id;
+          if (k) {
+            const existing = map.get(k) || {};
+            map.set(k, { ...existing, ...data, key: k });
+          }
+        });
+      } catch {}
+      res.json({ success: true, licenses: Array.from(map.values()) });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  // Delete a license
+  app.delete('/api/licenses/:key', async (req, res) => {
+    const key = (req.params.key || '').trim().toUpperCase();
+    deleteLicenseRecord(key);
+    try {
+      await deleteDoc(doc(db, 'licenses', key));
+    } catch {}
+    res.json({ success: true, message: `License ${key} deleted` });
+  });
+
+  // Wipe unused licenses
+  app.post('/api/licenses/wipe-unused', async (req, res) => {
+    const count = wipeUnusedLicenseRecords();
+    try {
+      const snap = await getDocs(collection(db, 'licenses'));
+      for (const d of snap.docs) {
+        const data = d.data() || {};
+        if (data.status === 'unclaimed' && !data.claimedBy) {
+          await deleteDoc(doc(db, 'licenses', d.id)).catch(() => {});
+        }
+      }
+    } catch {}
+    res.json({ success: true, count, message: `Wiped ${count} unused licenses` });
+  });
+
+  // Wipe expired licenses
+  app.post('/api/licenses/wipe-expired', async (req, res) => {
+    const count = wipeExpiredLicenseRecords();
+    res.json({ success: true, count, message: `Wiped ${count} expired licenses` });
+  });
+
+  // Redeem keys on the server with authoritative time stacking
   app.post('/api/license/redeem', async (req, res) => {
     const userId = typeof req.body?.userId === 'string' ? req.body.userId.trim() : '';
     const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
@@ -381,55 +489,106 @@ async function startServer() {
     }
 
     try {
-      const result = await runTransaction(db, async (transaction) => {
-        const licenseRef = doc(db, 'licenses', key);
-        const userRef = doc(db, 'users', userId);
-        const userLicenseRef = doc(db, 'user_licenses', userId);
-        const [licenseSnap, userSnap] = await Promise.all([
-          transaction.get(licenseRef),
-          transaction.get(userRef),
-        ]);
+      // 1. Look up license in persistent store first, then server db
+      let license = findLicenseByKey(key);
+      const licenseRef = doc(db, 'licenses', key);
+      const userRef = doc(db, 'users', userId);
+      const userLicenseRef = doc(db, 'user_licenses', userId);
 
-        if (!licenseSnap.exists) throw new Error('INVALID_KEY');
-        if (!userSnap.exists) throw new Error('ACCOUNT_NOT_FOUND');
-        const license = licenseSnap.data();
-        const user = userSnap.data();
-        const savedEmail = typeof user.email === 'string' ? user.email.trim().toLowerCase() : '';
-        if (savedEmail !== email) throw new Error('ACCOUNT_EMAIL_MISMATCH');
-        if (license.status === 'revoked') throw new Error('KEY_REVOKED');
-        if (license.status !== 'unclaimed' || license.claimedBy) {
-          if (
-            license.status === 'active' &&
-            license.claimedBy === userId &&
-            license.claimedEmail === email &&
-            typeof license.expiresAt === 'string'
-          ) {
-            throw new Error('KEY_ALREADY_REDEEMED_BY_THIS_ACCOUNT');
+      if (!license) {
+        try {
+          const snap = await getDoc(licenseRef);
+          if (snap.exists) {
+            license = snap.data();
+            saveLicenseRecord(license as any);
           }
-          throw new Error('KEY_ALREADY_USED');
-        }
+        } catch {}
+      }
 
-        const addedDays = Number(license.durationDays);
-        const addedMinutes = Number(license.durationMinutes || 0);
-        if (!Number.isFinite(addedDays) || addedDays <= 0 || !Number.isFinite(addedMinutes) || addedMinutes < 0) {
-          throw new Error('KEY_DURATION_INVALID');
-        }
+      if (!license) {
+        return res.status(404).json({ success: false, message: 'Invalid license key. No matching key found in the system.' });
+      }
 
-        const now = Date.now();
-        const currentExpiryTime = expiryMillis(user.licenseExpiresAt);
-        const isOwner = isOwnerEmail(savedEmail);
-        if (isOwner || (user.isUnlimited && currentExpiryTime <= now)) {
-          throw new Error('ACCOUNT_UNLIMITED');
-        }
-        const currentRemainingMs = Number.isFinite(currentExpiryTime) && currentExpiryTime > now
-          ? currentExpiryTime - now
-          : 0;
-        const expiresAt = new Date(
-          now + currentRemainingMs + addedDays * 24 * 60 * 60 * 1000 + addedMinutes * 60 * 1000
-        ).toISOString();
-        const claimedAt = new Date(now).toISOString();
+      if (license.status === 'revoked') {
+        return res.status(403).json({ success: false, message: 'This license key has been revoked by administration.' });
+      }
 
-        transaction.set(licenseRef, {
+      if (license.status !== 'unclaimed' || license.claimedBy) {
+        if (
+          license.status === 'active' &&
+          license.claimedBy === userId &&
+          license.claimedEmail === email &&
+          typeof license.expiresAt === 'string'
+        ) {
+          return res.status(409).json({
+            success: false,
+            message: 'This key was already redeemed by your account. It was not applied again, so no extra time was added.',
+          });
+        }
+        return res.status(409).json({ success: false, message: 'This license key has already been used and cannot be redeemed again.' });
+      }
+
+      const addedDays = Number(license.durationDays);
+      const addedMinutes = Number(license.durationMinutes || 0);
+      if (!Number.isFinite(addedDays) || addedDays <= 0 || !Number.isFinite(addedMinutes) || addedMinutes < 0) {
+        return res.status(422).json({ success: false, message: 'This license key has an invalid duration. No time was added.' });
+      }
+
+      // Check current user record (gracefully initialize if not in db yet)
+      let user: any = null;
+      try {
+        const userSnap = await getDoc(userRef);
+        user = userSnap.exists ? userSnap.data() : null;
+      } catch {}
+
+      if (!user) {
+        user = { uid: userId, email, licenseStatus: 'expired' };
+      }
+
+      const isOwner = isOwnerEmail(email);
+      if (isOwner) {
+        return res.status(409).json({ success: false, message: 'This account is Owner and already has permanent unlimited access.' });
+      }
+
+      const now = Date.now();
+      // Calculate current active expiry (time stacking)
+      let currentExpiryTime = 0;
+      if (user.licenseExpiresAt) {
+        const uExp = expiryMillis(user.licenseExpiresAt);
+        if (uExp > currentExpiryTime) currentExpiryTime = uExp;
+      }
+      // Check session
+      const session = sessionManager.getSession(userId, email);
+      if (session.sessionLicenseExpiresAt) {
+        const sExp = expiryMillis(session.sessionLicenseExpiresAt);
+        if (sExp > currentExpiryTime) currentExpiryTime = sExp;
+      }
+      // Check trial store
+      const trialStorePath = path.resolve(__dirname, '.trial_store.json');
+      if (fs.existsSync(trialStorePath)) {
+        try {
+          const tStore = JSON.parse(fs.readFileSync(trialStorePath, 'utf-8'));
+          const emailKey = email.replace(/[^a-z0-9]/g, '_');
+          const tRec = tStore[emailKey] || tStore[userId];
+          if (tRec?.expiresAt) {
+            const tExp = expiryMillis(tRec.expiresAt);
+            if (tExp > currentExpiryTime) currentExpiryTime = tExp;
+          }
+        } catch {}
+      }
+
+      const currentRemainingMs = currentExpiryTime > now ? currentExpiryTime - now : 0;
+      const expiresAt = new Date(
+        now + currentRemainingMs + addedDays * 86400000 + addedMinutes * 60000
+      ).toISOString();
+      const claimedAt = new Date(now).toISOString();
+
+      // Mark redeemed in persistent store
+      markLicenseRedeemed(key, userId, email, expiresAt);
+
+      // Save to server db
+      try {
+        await setDoc(licenseRef, {
           ...license,
           status: 'active',
           claimedBy: userId,
@@ -437,7 +596,9 @@ async function startServer() {
           claimedAt,
           expiresAt,
         });
-        transaction.set(userRef, {
+
+        await setDoc(userRef, {
+          uid: userId,
           email,
           licenseKey: key,
           licensePlan: license.planName,
@@ -446,7 +607,8 @@ async function startServer() {
           isUnlimited: false,
           updatedAt: claimedAt,
         }, { merge: true });
-        transaction.set(userLicenseRef, {
+
+        await setDoc(userLicenseRef, {
           userId,
           email,
           activeKey: key,
@@ -455,39 +617,27 @@ async function startServer() {
           expiresAt,
           updatedAt: claimedAt,
         }, { merge: true });
-
-        return {
-          planName: String(license.planName || 'License'),
-          addedDays,
-          addedMinutes,
-          expiresAt,
-          currentRemainingMs,
-        };
-      });
-
-      const session = sessionManager.getSession(userId);
-      // The transaction result is authoritative. Apply it immediately so a
-      // newly renewed paired device can reconnect even if a follow-up read is slow.
-      session.setSessionLicense(result.expiresAt, false);
-      await session.syncLicenseFromFirestore();
-      res.json({ success: true, ...result });
-    } catch (err: any) {
-      const code = String(err?.message || '');
-      if (code === 'INVALID_KEY') return res.status(404).json({ success: false, message: 'Invalid license key. No matching key found in the system.' });
-      if (code === 'KEY_REVOKED') return res.status(403).json({ success: false, message: 'This license key has been revoked by administration.' });
-      if (code === 'KEY_ALREADY_REDEEMED_BY_THIS_ACCOUNT') {
-        return res.status(409).json({
-          success: false,
-          message: 'This key was already redeemed by your account. It was not applied again, so no extra time was added.',
-        });
+      } catch (dbErr) {
+        console.warn('Server db license write note:', dbErr);
       }
-      if (code === 'KEY_ALREADY_USED') return res.status(409).json({ success: false, message: 'This license key has already been used and cannot be redeemed again.' });
-      if (code === 'KEY_DURATION_INVALID') return res.status(422).json({ success: false, message: 'This license key has an invalid duration. No time was added.' });
-      if (code === 'ACCOUNT_UNLIMITED') return res.status(409).json({ success: false, message: 'This account already has unlimited access. Its access was not changed and the key remains unused.' });
-      if (code === 'ACCOUNT_NOT_FOUND' || code === 'ACCOUNT_EMAIL_MISMATCH') return res.status(403).json({ success: false, message: 'Could not verify this signed-in account. Please sign in again.' });
+
+      // Apply to session immediately
+      session.setSessionLicense(expiresAt, false);
+      session.sessionLicenseKey = key;
+      session.sessionLicensePlan = license.planName;
+
+      return res.json({
+        success: true,
+        planName: String(license.planName || 'License'),
+        addedDays,
+        addedMinutes,
+        expiresAt,
+        currentRemainingMs,
+      });
+    } catch (err: any) {
       reportFirestoreError(err);
-      console.error('Atomic license redemption failed:', err);
-      res.status(503).json({ success: false, message: 'License could not be saved. No time was added and the key was not consumed; please retry.' });
+      console.error('License redemption error:', err);
+      res.status(500).json({ success: false, message: err.message || 'License could not be saved. Please retry.' });
     }
   });
 
@@ -559,17 +709,36 @@ async function startServer() {
       if (isAccountOwner) {
         session.setSessionLicense(null, true);
       } else {
-        const licenseVerified = await session.syncLicenseFromFirestore();
-        if (!licenseVerified) {
-          if (req.body?.isUnlimited) {
-            session.setSessionLicense(null, true);
-          } else if (req.body?.licenseExpiresAt && new Date(req.body.licenseExpiresAt).getTime() > Date.now()) {
-            session.setSessionLicense(req.body.licenseExpiresAt, false);
-          } else {
-            return res.status(403).json({
-              success: false,
-              error: 'Please activate your 30-minute free trial or redeem a license key to connect.',
-            });
+        // 1. Check if session already has a valid active license
+        const isSessionValid = session.sessionLicenseExpiresAt && new Date(session.sessionLicenseExpiresAt).getTime() > Date.now();
+        // 2. Check if .trial_store.json has an active trial
+        let isTrialActive = false;
+        const trialStorePath = path.resolve(__dirname, '.trial_store.json');
+        if (fs.existsSync(trialStorePath)) {
+          try {
+            const tStore = JSON.parse(fs.readFileSync(trialStorePath, 'utf-8'));
+            const emailKey = userEmail ? userEmail.replace(/[^a-z0-9]/g, '_') : '';
+            const tRec = (emailKey && tStore[emailKey]) || (userId && tStore[userId]);
+            if (tRec?.expiresAt && new Date(tRec.expiresAt).getTime() > Date.now()) {
+              session.setSessionLicense(tRec.expiresAt, false);
+              isTrialActive = true;
+            }
+          } catch {}
+        }
+
+        if (!isSessionValid && !isTrialActive) {
+          const licenseVerified = await session.syncLicenseFromFirestore();
+          if (!licenseVerified) {
+            if (req.body?.isUnlimited) {
+              session.setSessionLicense(null, true);
+            } else if (req.body?.licenseExpiresAt && new Date(req.body.licenseExpiresAt).getTime() > Date.now()) {
+              session.setSessionLicense(req.body.licenseExpiresAt, false);
+            } else {
+              return res.status(403).json({
+                success: false,
+                error: 'Please activate your 30-minute free trial or redeem a license key to connect.',
+              });
+            }
           }
         }
       }

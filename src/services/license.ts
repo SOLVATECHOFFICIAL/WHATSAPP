@@ -88,38 +88,33 @@ export async function createLicense(plan: LicensePlan, createdBy: string = OWNER
       planId: plan.id,
       planName: plan.name,
       durationDays: plan.durationDays,
+      durationMinutes: plan.durationMinutes || 0,
       status: 'unclaimed',
       createdAt: new Date().toISOString(),
     };
     pendingLicenseWrites.set(attemptId, record);
   }
 
-  let timeout: ReturnType<typeof setTimeout> | undefined;
+  // 1. Immediately persist on the server (authoritative backend store)
   try {
-    const docRef = doc(db, 'licenses', record.key);
-    await Promise.race([
-      setDoc(docRef, record),
-      new Promise<never>((_, reject) => {
-        timeout = setTimeout(
-          () => reject(new Error('LICENSE_SAVE_TIMEOUT')),
-          LICENSE_WRITE_TIMEOUT_MS
-        );
-      }),
-    ]);
-    pendingLicenseWrites.delete(attemptId);
-  } catch (err) {
-    console.warn('Firestore license write:', err);
-    if (err instanceof Error && err.message === 'LICENSE_SAVE_TIMEOUT') {
-      throw new Error(
-        'Firebase has not confirmed the save yet. Tap “Mint 1 Key” again to safely retry the same key.'
-      );
-    }
-    pendingLicenseWrites.delete(attemptId);
-    throw new Error('The license key could not be saved. No usable key was issued; please retry.');
-  } finally {
-    if (timeout) clearTimeout(timeout);
+    await fetch('/api/licenses/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(record),
+    });
+  } catch (srvErr) {
+    console.warn('Server license write note:', srvErr);
   }
 
+  // 2. Also save to Firestore
+  try {
+    const docRef = doc(db, 'licenses', record.key);
+    await setDoc(docRef, record);
+  } catch (err) {
+    console.warn('Firestore license write:', err);
+  }
+
+  pendingLicenseWrites.delete(attemptId);
   return record;
 }
 
@@ -407,13 +402,38 @@ export async function batchCreateLicenses(
     const lic = await createLicense(plan, createdBy);
     created.push(lic);
   }
+  try {
+    await fetch('/api/licenses/batch-create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ licenses: created }),
+    });
+  } catch {}
   return created;
 }
 
-// Fetch all licenses from Firestore and localStorage (only genuinely minted keys)
+// Fetch all licenses from server backend store and Firestore
 export async function fetchAllLicenses(): Promise<LicenseRecord[]> {
   const map = new Map<string, LicenseRecord>();
 
+  // 1. Fetch from server backend store
+  try {
+    const res = await fetch('/api/licenses');
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data.licenses)) {
+        for (const lic of data.licenses) {
+          if (lic && lic.key) {
+            map.set(lic.key, lic);
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.debug('Server licenses fetch note:', e);
+  }
+
+  // 2. Merge with Firestore
   try {
     const colRef = collection(db, 'licenses');
     const snap = await getDocs(colRef);
@@ -421,6 +441,7 @@ export async function fetchAllLicenses(): Promise<LicenseRecord[]> {
       const data = d.data() || {};
       const key = data.key || d.id;
       if (key) {
+        const existing = map.get(key) || {};
         map.set(key, {
           key,
           planId: data.planId || '1d',
@@ -428,6 +449,7 @@ export async function fetchAllLicenses(): Promise<LicenseRecord[]> {
           durationDays: data.durationDays || 1,
           status: data.status || 'unclaimed',
           createdAt: data.createdAt || new Date().toISOString(),
+          ...existing,
           ...data,
         } as LicenseRecord);
       }
@@ -439,9 +461,17 @@ export async function fetchAllLicenses(): Promise<LicenseRecord[]> {
   return Array.from(map.values());
 }
 
-// WIPE ALL UNUSED KEYS FROM FIREBASE TO PREVENT UNAUTHORIZED REDEMPTION & CLEAR SPACE
+// WIPE ALL UNUSED KEYS FROM SYSTEM TO CLEAR SPACE
 export async function wipeAllUnusedLicenses(): Promise<{ count: number; message: string }> {
   let wipedCount = 0;
+
+  try {
+    const res = await fetch('/api/licenses/wipe-unused', { method: 'POST' });
+    if (res.ok) {
+      const d = await res.json();
+      wipedCount = d.count || 0;
+    }
+  } catch {}
 
   // 1. Delete from Firestore
   try {
@@ -453,7 +483,6 @@ export async function wipeAllUnusedLicenses(): Promise<{ count: number; message:
       const data = d.data() || {};
       const status = data.status || 'unclaimed';
       const claimedBy = data.claimedBy;
-      // If status is unclaimed and nobody claimed it
       if (status === 'unclaimed' && !claimedBy) {
         deletePromises.push(deleteDoc(doc(db, 'licenses', d.id)));
         wipedCount++;
@@ -467,14 +496,22 @@ export async function wipeAllUnusedLicenses(): Promise<{ count: number; message:
 
   return {
     count: wipedCount,
-    message: `Wiped ${wipedCount} unused license keys from Firebase Firestore. Space cleared!`,
+    message: `Wiped unused license keys from system. Space cleared!`,
   };
 }
 
-// WIPE ALL EXPIRED KEYS FROM FIREBASE TO CLEAR SPACE
+// WIPE ALL EXPIRED KEYS FROM SYSTEM TO CLEAR SPACE
 export async function wipeAllExpiredLicenses(): Promise<{ count: number; message: string }> {
   let wipedCount = 0;
   const now = Date.now();
+
+  try {
+    const res = await fetch('/api/licenses/wipe-expired', { method: 'POST' });
+    if (res.ok) {
+      const d = await res.json();
+      wipedCount = d.count || 0;
+    }
+  } catch {}
 
   // 1. Delete from Firestore
   try {
@@ -499,12 +536,16 @@ export async function wipeAllExpiredLicenses(): Promise<{ count: number; message
 
   return {
     count: wipedCount,
-    message: `Wiped ${wipedCount} expired license keys from Firebase Firestore. Space cleared!`,
+    message: `Wiped expired license keys from system. Space cleared!`,
   };
 }
 
 // DELETE A SINGLE SPECIFIC LICENSE KEY
 export async function deleteSingleLicense(key: string): Promise<{ success: boolean; message: string }> {
+  try {
+    await fetch(`/api/licenses/${encodeURIComponent(key)}`, { method: 'DELETE' });
+  } catch {}
+
   try {
     await deleteDoc(doc(db, 'licenses', key));
   } catch (e) {

@@ -767,10 +767,37 @@ export class WhatsAppManager {
             reportFirestoreError(ulErr);
           }
         }
+        // Check if there is an active trial in .trial_store.json
+        const trialStorePath = path.resolve(__dirname, '../../.trial_store.json');
+        if (fs.existsSync(trialStorePath)) {
+          try {
+            const tStore = JSON.parse(fs.readFileSync(trialStorePath, 'utf-8'));
+            const emailKey = this.userEmail ? this.userEmail.toLowerCase().replace(/[^a-z0-9]/g, '_') : '';
+            const tRec = (emailKey && tStore[emailKey]) || (this.userId && tStore[this.userId]);
+            if (tRec?.expiresAt) {
+              const tExpMs = new Date(tRec.expiresAt).getTime();
+              const currExpMs = expAt ? new Date(expAt).getTime() : 0;
+              if (tExpMs > Date.now() && tExpMs > currExpMs) {
+                expAt = tRec.expiresAt;
+                if (!this.sessionLicensePlan) this.sessionLicensePlan = '⚡ 30-Minute Free Test (Active)';
+              }
+            }
+          } catch {}
+        }
+
+        // Preserve current active session license if incoming expAt is null or expired
+        if (this.sessionLicenseExpiresAt) {
+          const sExpMs = new Date(this.sessionLicenseExpiresAt).getTime();
+          const newExpMs = expAt ? new Date(expAt).getTime() : 0;
+          if (sExpMs > Date.now() && sExpMs > newExpMs) {
+            expAt = this.sessionLicenseExpiresAt;
+          }
+        }
+
         // A saved finite expiry always wins over an unlimited flag.
         const isUnlim = this.isOwnerEmail() || (!expAt && Boolean(d?.isUnlimited));
         this.setSessionLicense(expAt, isUnlim);
-        console.log(`[License Sync (${this.userId})] Synced from Firestore: expiresAt=${this.sessionLicenseExpiresAt}, key=${this.sessionLicenseKey}, plan=${this.sessionLicensePlan}`);
+        console.log(`[License Sync (${this.userId})] Synced: expiresAt=${this.sessionLicenseExpiresAt}, key=${this.sessionLicenseKey}, plan=${this.sessionLicensePlan}`);
         return true;
       }
     } catch (err: any) {
