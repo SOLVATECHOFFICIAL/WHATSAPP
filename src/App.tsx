@@ -1604,13 +1604,11 @@ export default function App() {
                         <div className="flex items-center gap-2">
                           <h3 className="font-bold text-sm text-white">Reconnecting to WhatsApp...</h3>
                           <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[9px] font-bold uppercase tracking-wider animate-pulse">
-                            {status.reconnectRemainingSeconds !== undefined && status.reconnectRemainingSeconds !== null
-                              ? `${status.reconnectRemainingSeconds}s REMAINING`
-                              : 'CONNECTING 24/7'}
+                            24/7 AUTO-CONNECTING
                           </span>
                         </div>
                         <p className="text-[11px] text-emerald-300 font-mono">
-                          {status.user?.phone || status.targetPhone || 'Paired Phone'}
+                          {status.user?.phone || status.targetPhone || 'Locked Paired Phone'}
                         </p>
                       </div>
                     </div>
@@ -1621,32 +1619,18 @@ export default function App() {
                       title="Unlink and pair a new number immediately"
                     >
                       <LogOut className="w-3.5 h-3.5" />
-                      <span>Change Number</span>
+                      <span>Unlink / Change Number</span>
                     </button>
                   </div>
 
-                  {/* Background Reconnection Progress Indicator */}
-                  <div className="space-y-1.5 pt-1">
-                    <div className="flex items-center justify-between text-[11px]">
-                      <span className="text-slate-300">
-                        Checking if WhatsApp on your phone can be reached (up to 60s)...
-                      </span>
-                      <span className="font-mono text-emerald-400 font-bold">
-                        {status.reconnectRemainingSeconds !== undefined && status.reconnectRemainingSeconds !== null
-                          ? `${status.reconnectRemainingSeconds}s remaining`
-                          : 'Connecting...'}
-                      </span>
+                  {/* Background Reconnection Cloud Assurance */}
+                  <div className="p-2.5 rounded-xl bg-slate-950/60 border border-emerald-500/30 space-y-1">
+                    <div className="flex items-center gap-2 text-xs text-emerald-300 font-medium">
+                      <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <span>Persistent Cloud Lock Active</span>
                     </div>
-                    <div className="w-full bg-slate-800/80 h-1.5 rounded-full overflow-hidden">
-                      <div
-                        className="bg-gradient-to-r from-emerald-500 to-teal-400 h-full rounded-full transition-all duration-1000"
-                        style={{
-                          width: `${Math.min(100, Math.max(5, (((status.reconnectRemainingSeconds ?? 60) / 60) * 100)))}%`,
-                        }}
-                      />
-                    </div>
-                    <p className="text-[10px] text-slate-400 leading-relaxed">
-                      The Railway watchdog reconnects automatically. If the saved session cannot reconnect after 60 seconds and your license is active, it clears the stale link so you can pair again.
+                    <p className="text-[10px] text-slate-300 leading-relaxed">
+                      Your phone number is locked in cloud storage. Even if Railway restarts, crashes, or is redeployed, your session keys are safely backed up. The Railway 1-minute heartbeat automatically restores your keys and reconnects your bot in the background so you can execute commands 24/7.
                     </p>
                   </div>
                 </div>
