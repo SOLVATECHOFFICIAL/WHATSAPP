@@ -275,8 +275,11 @@ export default function App() {
     if (!currentUser?.uid) return;
     setIsRefreshingStatus(true);
     try {
+      const userEmailParam = currentUser.email ? `&userEmail=${encodeURIComponent(currentUser.email)}` : '';
       const [resStatus, resNotifs] = await Promise.all([
-        fetch(`/api/whatsapp/status?userId=${encodeURIComponent(currentUser.uid)}`).catch(() => null),
+        fetch(`/api/whatsapp/status?userId=${encodeURIComponent(currentUser.uid)}${userEmailParam}`, {
+          headers: { 'x-user-email': currentUser.email || '' },
+        }).catch(() => null),
         fetch(`/api/whatsapp/notifications?userId=${encodeURIComponent(currentUser.uid)}`).catch(() => null),
         fetchAntiDeleteStatus(currentUser.uid),
       ]);
@@ -458,8 +461,10 @@ export default function App() {
               }
             },
             (err) => {
-              console.debug('Firestore user listener in offline mode:', err?.message || err);
-              fetch(`/api/whatsapp/status?userId=${encodeURIComponent(user.uid)}`)
+              const uEmail = user.email ? `&userEmail=${encodeURIComponent(user.email)}` : '';
+              fetch(`/api/whatsapp/status?userId=${encodeURIComponent(user.uid)}${uEmail}`, {
+                headers: { 'x-user-email': user.email || '' },
+              })
                 .then((r) => r.json())
                 .then((st) => {
                   if (st?.status?.licenseExpiresAt) {
@@ -536,8 +541,12 @@ export default function App() {
 
     const fetchData = async () => {
       try {
+        const curEmail = currentUser?.email || '';
+        const emailParam = curEmail ? `&userEmail=${encodeURIComponent(curEmail)}` : '';
         const [resStatus, resNotifs] = await Promise.all([
-          fetch(`/api/whatsapp/status?userId=${encodeURIComponent(userId)}`).catch(() => null),
+          fetch(`/api/whatsapp/status?userId=${encodeURIComponent(userId)}${emailParam}`, {
+            headers: { 'x-user-email': curEmail },
+          }).catch(() => null),
           fetch(`/api/whatsapp/notifications?userId=${encodeURIComponent(userId)}`).catch(() => null),
         ]);
         if (stopped) return;
@@ -606,7 +615,10 @@ export default function App() {
   useEffect(() => {
     const onVisibilityChange = () => {
       if (document.visibilityState === 'visible' && currentUser?.uid) {
-        fetch(`/api/whatsapp/status?userId=${encodeURIComponent(currentUser.uid)}`)
+        const uEmail = currentUser.email ? `&userEmail=${encodeURIComponent(currentUser.email)}` : '';
+        fetch(`/api/whatsapp/status?userId=${encodeURIComponent(currentUser.uid)}${uEmail}`, {
+          headers: { 'x-user-email': currentUser.email || '' },
+        })
           .then((r) => safeParseJson(r))
           .then((data) => {
             if (data?.status) {

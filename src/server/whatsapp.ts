@@ -1490,6 +1490,25 @@ export class WhatsAppManager {
     }
   }
 
+  public async resolveUserEmail(): Promise<string> {
+    if (this.userEmail && this.userEmail.includes('@')) {
+      return this.userEmail.toLowerCase().trim();
+    }
+    if (this.userId && this.userId !== 'default' && !isFirestoreQuotaExhausted()) {
+      try {
+        const uSnap = await getDoc(doc(db, 'users', this.userId));
+        if (uSnap.exists) {
+          const uData = uSnap.data();
+          if (typeof uData?.email === 'string' && uData.email.includes('@')) {
+            this.userEmail = uData.email.toLowerCase().trim();
+            return this.userEmail;
+          }
+        }
+      } catch {}
+    }
+    return (this.userEmail || '').toLowerCase().trim();
+  }
+
   private restorePromise: Promise<boolean> | null = null;
 
   public async ensureRestored(): Promise<boolean> {
@@ -1507,7 +1526,7 @@ export class WhatsAppManager {
     return res;
   }
 
-  // Restore session credentials from Firebase Firestore if local container disk was wiped/restarted
+  // Restore session credentials from Firebase Firestore 'column' collection
   private async restoreAuthFromFirebaseIfMissing(): Promise<boolean> {
     try {
       this.ensureAuthDir();
@@ -1540,25 +1559,42 @@ export class WhatsAppManager {
 
       let restoredAny = false;
       const sessionDocId = `session_${this.sanitizedUserId}`;
+      const cleanEmail = await this.resolveUserEmail();
+
       if (!isFirestoreQuotaExhausted()) {
-        // Priority 1: Fast Single-Document Bundle Fetch (1 single read, restores instantly on Railway boot)
+        // Priority 1: Check Firebase Firestore collection 'column' (User email, phone, and 3 keys)
         try {
-          let fullSnap: any = await getDoc(doc(db, 'whatsapp_sessions', sessionDocId));
-          if (!fullSnap.exists && this.sanitizedUserId === 'default') {
-            fullSnap = await getDoc(doc(db, 'whatsapp_sessions', 'current_session'));
+          let colSnap: any = null;
+          // Step 1: Check document keyed by user email
+          if (cleanEmail) {
+            colSnap = await getDoc(doc(db, 'column', cleanEmail));
+          }
+          // Step 2: Check document keyed by sessionDocId
+          if (!colSnap || !colSnap.exists) {
+            colSnap = await getDoc(doc(db, 'column', sessionDocId));
+          }
+          // Step 3: Default fallback
+          if ((!colSnap || !colSnap.exists) && this.sanitizedUserId === 'default') {
+            colSnap = await getDoc(doc(db, 'column', 'default'));
           }
 
-          if (fullSnap && fullSnap.exists) {
-            const data = fullSnap.data();
+          if (colSnap && colSnap.exists) {
+            const data = colSnap.data();
 
-            // 1. Direct creds restoration (100% reliable, never exceeds 1MB Firestore limit)
+            // If user unlinked to pair a new number, phoneNumber and creds were cleared (only email remains)
+            if (data?.unlinked === true || (!data?.phoneNumber && !data?.credsData)) {
+              console.log(`[WhatsApp Auth (${this.userId})] 'column' shows user unlinked/cleared for new pairing.`);
+              return false;
+            }
+
+            // Restore credsData (master credential key)
             if (data?.credsData && typeof data.credsData === 'string' && !fs.existsSync(credsPath)) {
               fs.writeFileSync(credsPath, data.credsData, 'utf-8');
-              console.log(`[WhatsApp Auth (${this.userId})] Restored master creds.json directly from Firebase (1-document fetch)!`);
+              console.log(`[WhatsApp Auth (${this.userId})] Restored credentials from Firebase 'column' (${cleanEmail || sessionDocId})!`);
               restoredAny = true;
             }
 
-            // 2. Essential companion session keys restoration (app-state-sync)
+            // Restore companion session persistence keys (rawSessionData)
             let sessionFiles: Record<string, string> | null = null;
             if (data?.rawSessionData && typeof data.rawSessionData === 'string') {
               try {
@@ -1578,56 +1614,55 @@ export class WhatsAppManager {
               }
             }
 
+            if (data?.phoneNumber) {
+              this.currentStatus.targetPhone = data.phoneNumber;
+            }
+
             if (typeof data?.sha256 === 'string') {
               this.lastPersistedBundleHash = data.sha256;
             }
           }
         } catch (err: any) {
           reportFirestoreError(err);
-          console.warn(`[WhatsApp Auth (${this.userId})] Firebase session single-doc restore note:`, err?.message || err);
+          console.warn(`[WhatsApp Auth (${this.userId})] Firebase 'column' restore note:`, err?.message || err);
         }
 
-        // Priority 2: Fallback to auth_files subcollection ONLY if single-document was not found (backward compatibility)
+        // Priority 2: Fallback check on legacy whatsapp_sessions and automatically migrate to 'column'
         if (!restoredAny) {
           try {
-            const authFiles = await getDocs(collection(db, 'whatsapp_sessions', sessionDocId, 'auth_files'));
-            this.firebaseAuthFilesLoaded = true;
-            for (const authFile of authFiles.docs) {
-              const data = authFile.data();
-              const filename = typeof data.fileName === 'string' ? data.fileName : '';
-              const content = typeof data.content === 'string' ? data.content : '';
-              if (!isSafeAuthFileName(filename) || !content) continue;
-              fs.writeFileSync(path.join(this.authDir, filename), content, 'utf-8');
-              if (isEssentialCloudAuthFile(filename)) {
-                this.firebaseAuthFileIds.set(filename, authFile.id);
-                this.firebaseAuthFileHashes.set(filename, data.sha256 || hashSessionContent(content));
-              }
-              restoredAny = true;
+            let fullSnap: any = await getDoc(doc(db, 'whatsapp_sessions', sessionDocId));
+            if (!fullSnap.exists && this.sanitizedUserId === 'default') {
+              fullSnap = await getDoc(doc(db, 'whatsapp_sessions', 'current_session'));
             }
-            if (restoredAny) {
-              console.log(`[WhatsApp Auth (${this.userId})] Restored ${authFiles.size} legacy session files from Firebase.`);
+
+            if (fullSnap && fullSnap.exists) {
+              const data = fullSnap.data();
+              if (data?.credsData && typeof data.credsData === 'string' && !fs.existsSync(credsPath)) {
+                fs.writeFileSync(credsPath, data.credsData, 'utf-8');
+                restoredAny = true;
+              }
+
+              let sessionFiles: Record<string, string> | null = null;
+              if (data?.rawSessionData && typeof data.rawSessionData === 'string') {
+                try { sessionFiles = JSON.parse(data.rawSessionData); } catch {}
+              }
+              if (sessionFiles) {
+                for (const [filename, content] of Object.entries(sessionFiles)) {
+                  const filePath = path.join(this.authDir, filename);
+                  if (!fs.existsSync(filePath) && isSafeAuthFileName(filename)) {
+                    fs.writeFileSync(filePath, content, 'utf-8');
+                    restoredAny = true;
+                  }
+                }
+              }
+              // Immediately write to 'column' so legacy is fully migrated
+              if (restoredAny) {
+                this.scheduleFirebaseCredsSync(true);
+              }
             }
           } catch (err: any) {
             reportFirestoreError(err);
-            console.warn(`[WhatsApp Auth (${this.userId})] Firebase legacy auth-file restore note:`, err?.message || err);
           }
-        }
-      }
-
-      // Fallback to legacy single creds document
-      if (!restoredAny && this.sanitizedUserId === 'default' && !isFirestoreQuotaExhausted()) {
-        try {
-          const snap = await getDoc(doc(db, 'whatsapp_sessions', 'current_creds'));
-          if (snap.exists) {
-            const credsData = snap.data();
-            if (credsData?.rawCreds) {
-              fs.writeFileSync(credsPath, credsData.rawCreds, 'utf-8');
-              console.log('[WhatsApp Auth] Restored authentication session from Firebase Firestore!');
-              restoredAny = true;
-            }
-          }
-        } catch (cErr: any) {
-          reportFirestoreError(cErr);
         }
       }
 
@@ -1647,12 +1682,10 @@ export class WhatsAppManager {
               phone: `+${registeredPhone}`,
             };
             this.currentStatus.pairingStage = 'connected';
-            console.log(`[WhatsApp Auth (${this.userId})] Registered linked companion: +${registeredPhone}`);
+            console.log(`[WhatsApp Auth (${this.userId})] Registered linked companion from 'column': +${registeredPhone}`);
           }
         } catch {}
 
-        // Migrate older single-document Firebase sessions to per-file storage
-        // immediately, not only after the next credential rotation.
         this.scheduleFirebaseCredsSync();
         const licenseVerified = await this.syncLicenseFromFirestore();
         if (licenseVerified && !this.isLicenseExpired() && !this.sock && !this.isConnecting) {
@@ -1668,7 +1701,8 @@ export class WhatsAppManager {
     }
   }
 
-  // Persist session credentials to Firebase Firestore so restarts/new host deployments retain connection
+  // Persist session credentials to Firebase Firestore collection 'column'
+  // Stores user with their email, phone number, and 3 keys (creds, persistence keys, version key)
   private scheduleFirebaseCredsSync(immediate = false) {
     if (isFirestoreQuotaExhausted()) return;
     if (this.firebaseSyncTimer) clearTimeout(this.firebaseSyncTimer);
@@ -1716,7 +1750,7 @@ export class WhatsAppManager {
       const credsContent = localFiles.get('creds.json') || '';
       if (!credsContent) return;
 
-      // Extract essential app-state-sync keys (pre-keys, sessions, sender-keys stay local)
+      // Extract essential companion session keys (app-state-sync)
       const essentialFiles: Record<string, string> = {};
       for (const [filename, content] of localFiles) {
         if (filename === 'creds.json') continue;
@@ -1731,30 +1765,58 @@ export class WhatsAppManager {
         return;
       }
 
-      // Persist as 1 single document per user (Never exhausts 20k daily limit!)
-      const sessionSnapshot = {
-        userId: this.userId,
-        userEmail: this.userEmail,
-        authFormatVersion: 3,
+      // Resolve user email and phone number
+      const cleanEmail = await this.resolveUserEmail();
+      let cleanPhone = this.currentStatus.user?.phone || this.currentStatus.targetPhone || '';
+      if (!cleanPhone && credsContent) {
+        try {
+          const c = JSON.parse(credsContent);
+          const meId = c?.me?.id || '';
+          if (meId) {
+            const digits = (meId.split(':')[0] || meId.split('@')[0]).replace(/\D/g, '');
+            if (digits) cleanPhone = `+${digits}`;
+          }
+        } catch {}
+      }
+
+      // The 5 things stored per user in collection 'column':
+      // 1. email: user's email
+      // 2. phoneNumber: phone number used to pair last
+      // 3. credsData: master credentials (noiseKey, signedIdentityKey, pairKey, registration, etc.)
+      // 4. rawSessionData: companion persistence keys (app-state-sync keys)
+      // 5. authFormatVersion: version key (3)
+      const columnPayload = {
+        email: cleanEmail || (this.userId !== 'default' ? this.userId : ''),
+        phoneNumber: cleanPhone || null,
         credsData: credsContent,
         rawSessionData,
+        authFormatVersion: 3,
+        userId: this.userId,
         sha256: currentBundleHash,
+        unlinked: false,
         updatedAt: new Date().toISOString(),
       };
 
-      await setDoc(doc(db, 'whatsapp_sessions', sessionDocId), sessionSnapshot, { merge: true });
-      if (this.sanitizedUserId === 'default') {
-        await setDoc(doc(db, 'whatsapp_sessions', 'current_session'), sessionSnapshot, { merge: true });
+      // Push to Firestore folder 'column'
+      // Document 1: Named by user's email so looking up by email succeeds instantly
+      if (cleanEmail) {
+        await setDoc(doc(db, 'column', cleanEmail), columnPayload, { merge: true });
       }
+      // Document 2: Named by session ID so looking up by sessionDocId succeeds instantly
+      await setDoc(doc(db, 'column', sessionDocId), columnPayload, { merge: true });
+      if (this.sanitizedUserId === 'default') {
+        await setDoc(doc(db, 'column', 'default'), columnPayload, { merge: true });
+      }
+
       this.lastPersistedBundleHash = currentBundleHash;
-      console.log(`[WhatsApp Auth (${this.userId})] Successfully backed up master credentials to Firebase (1 single document write).`);
+      console.log(`[WhatsApp Auth (${this.userId})] Successfully backed up master credentials to Firebase 'column' (email: ${cleanEmail || 'none'}, phone: ${cleanPhone || 'none'}).`);
 
       // Also persist connected status to users collection
       if (this.userId && this.userId !== 'default') {
         await setDoc(
           doc(db, 'users', this.userId),
           {
-            linkedPhone: this.currentStatus.user?.phone || this.currentStatus.targetPhone || null,
+            linkedPhone: cleanPhone || null,
             whatsappConnected: Boolean(this.sock && this.currentStatus.isConnected),
             botConnected: this.currentStatus.isConnected,
             connectionState: this.currentStatus.state,
@@ -1782,25 +1844,42 @@ export class WhatsAppManager {
     await this.syncCredsToFirebase();
   }
 
+  // Clear credentials on unpair: Clear ONLY the 4 things (phone number + 3 keys), leaving user's email in 'column'
   private async clearCredsFromFirebase() {
     try {
+      const cleanEmail = await this.resolveUserEmail();
       const sessionDocId = `session_${this.sanitizedUserId}`;
-      const authFiles = await getDocs(collection(db, 'whatsapp_sessions', sessionDocId, 'auth_files'));
-      for (let index = 0; index < authFiles.docs.length; index += 400) {
-        const batch = writeBatch(db);
-        for (const authFile of authFiles.docs.slice(index, index + 400)) {
-          batch.delete(authFile.ref);
-        }
-        await batch.commit();
+
+      // Clear only the 4 things: phoneNumber, credsData, rawSessionData, authFormatVersion
+      // Leave the email in 'column' so when site or user enters, their email record is preserved!
+      const clearPayload = {
+        email: cleanEmail || this.userId,
+        phoneNumber: null,
+        credsData: null,
+        rawSessionData: null,
+        authFormatVersion: null,
+        unlinked: true,
+        unlinkedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      if (cleanEmail) {
+        await setDoc(doc(db, 'column', cleanEmail), clearPayload, { merge: true });
       }
-      this.firebaseAuthFileIds.clear();
-      this.firebaseAuthFileHashes.clear();
-      this.firebaseAuthFilesLoaded = false;
-      await deleteDoc(doc(db, 'whatsapp_sessions', sessionDocId));
+      await setDoc(doc(db, 'column', sessionDocId), clearPayload, { merge: true });
       if (this.sanitizedUserId === 'default') {
-        await deleteDoc(doc(db, 'whatsapp_sessions', 'current_session'));
-        await deleteDoc(doc(db, 'whatsapp_sessions', 'current_creds'));
+        await setDoc(doc(db, 'column', 'default'), clearPayload, { merge: true });
       }
+
+      // Also remove legacy corrupt documents from whatsapp_sessions
+      try {
+        await deleteDoc(doc(db, 'whatsapp_sessions', sessionDocId));
+        if (this.sanitizedUserId === 'default') {
+          await deleteDoc(doc(db, 'whatsapp_sessions', 'current_session'));
+          await deleteDoc(doc(db, 'whatsapp_sessions', 'current_creds'));
+        }
+      } catch {}
+
       if (this.userId && this.userId !== 'default') {
         await setDoc(
           doc(db, 'users', this.userId),
@@ -1814,7 +1893,10 @@ export class WhatsAppManager {
           { merge: true }
         );
       }
-    } catch {}
+      console.log(`[WhatsApp Auth (${this.userId})] Cleared phone and session keys from 'column', preserving email (${cleanEmail || this.userId}).`);
+    } catch (e: any) {
+      console.warn(`[WhatsApp Auth (${this.userId})] Error updating 'column' on clear:`, e?.message || e);
+    }
   }
 
   public startReconnectWindow(): void {
@@ -5089,28 +5171,35 @@ export class WhatsAppSessionManager {
         candidateUsers.set('default', candidateUsers.get('default') || {});
       }
 
-      // 2. Scan cloud Firestore `whatsapp_sessions` collection
+      // 2. Scan cloud Firestore `column` collection (User email, phone, and 3 keys)
       if (!isFirestoreQuotaExhausted()) {
         try {
-          const snap = await getDocs(collection(db, 'whatsapp_sessions'));
+          const snap = await getDocs(collection(db, 'column'));
           for (const docSnap of snap.docs) {
             const d = docSnap.data();
-            let rawId = '';
-            if (docSnap.id.startsWith('session_')) {
-              rawId = docSnap.id.replace(/^session_/, '');
-            } else if (docSnap.id === 'current_session' || docSnap.id === 'current_creds') {
-              rawId = 'default';
+            if (d?.unlinked === true || (!d?.phoneNumber && !d?.credsData)) {
+              continue;
+            }
+            let rawId = d?.userId || '';
+            if (!rawId) {
+              if (docSnap.id.startsWith('session_')) {
+                rawId = docSnap.id.replace(/^session_/, '');
+              } else if (docSnap.id === 'default') {
+                rawId = 'default';
+              } else if (docSnap.id.includes('@')) {
+                rawId = docSnap.id;
+              }
             }
             if (rawId) {
               candidateUsers.set(rawId, {
-                email: d?.userEmail || candidateUsers.get(rawId)?.email || '',
-                linkedPhone: candidateUsers.get(rawId)?.linkedPhone,
+                email: d?.email || candidateUsers.get(rawId)?.email || '',
+                linkedPhone: d?.phoneNumber || candidateUsers.get(rawId)?.linkedPhone,
               });
             }
           }
         } catch (err: any) {
           reportFirestoreError(err);
-          console.warn('[Auto-Restore] Firestore whatsapp_sessions scan note:', err?.message || err);
+          console.warn('[Auto-Restore] Firestore column scan note:', err?.message || err);
         }
       }
 
@@ -5286,20 +5375,24 @@ export class WhatsAppSessionManager {
         userIds.add(uid);
       }
 
-      // 3. Gather cloud sessions from Firestore
+      // 3. Gather cloud sessions from Firestore 'column' collection
       if (!isFirestoreQuotaExhausted()) {
         try {
-          const sessionDocs = await getDocs(collection(db, 'whatsapp_sessions'));
+          const sessionDocs = await getDocs(collection(db, 'column'));
           cloudSessionScanCompleted = true;
           for (const docSnap of sessionDocs.docs) {
-            if (docSnap.id.startsWith('session_')) {
-              const uid = docSnap.id.replace(/^session_/, '');
+            const d = docSnap.data();
+            if (d?.unlinked === true || (!d?.phoneNumber && !d?.credsData)) {
+              continue;
+            }
+            const uid = d?.userId || (docSnap.id.startsWith('session_') ? docSnap.id.replace(/^session_/, '') : docSnap.id);
+            if (uid) {
               userIds.add(uid);
             }
           }
         } catch (err: any) {
           reportFirestoreError(err);
-          console.debug('[Global 1-Min Sync] Firestore whatsapp_sessions note:', err?.message || err);
+          console.debug('[Global 1-Min Sync] Firestore column note:', err?.message || err);
         }
       }
 
@@ -5514,13 +5607,15 @@ export class WhatsAppSessionManager {
       } catch {}
     }
 
-    // 3. Gather from Firestore whatsapp_sessions
+    // 3. Gather from Firestore 'column' collection
     if (!isFirestoreQuotaExhausted()) {
       try {
-        const sSnap = await getDocs(collection(db, 'whatsapp_sessions'));
+        const sSnap = await getDocs(collection(db, 'column'));
         for (const d of sSnap.docs) {
-          if (d.id.startsWith('session_')) {
-            candidateUids.add(d.id.replace(/^session_/, ''));
+          const data = d.data();
+          const uid = data?.userId || (d.id.startsWith('session_') ? d.id.replace(/^session_/, '') : d.id);
+          if (uid) {
+            candidateUids.add(uid);
           }
         }
       } catch {}

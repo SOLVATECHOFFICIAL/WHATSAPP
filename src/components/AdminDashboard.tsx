@@ -269,8 +269,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     if (!currentUserId || liveStatusRefreshInFlight.current) return;
     liveStatusRefreshInFlight.current = true;
     try {
+      const adminEmail = auth.currentUser?.email || '';
+      const emailParam = adminEmail ? `&userEmail=${encodeURIComponent(adminEmail)}` : '';
       const [resStatus, resNotifs] = await Promise.all([
-        fetch(`/api/whatsapp/status?userId=${encodeURIComponent(currentUserId)}`).catch(() => null),
+        fetch(`/api/whatsapp/status?userId=${encodeURIComponent(currentUserId)}${emailParam}`, {
+          headers: { 'x-user-email': adminEmail },
+        }).catch(() => null),
         fetch(`/api/whatsapp/notifications?userId=${encodeURIComponent(currentUserId)}`).catch(() => null),
       ]);
       if (resStatus && resStatus.ok) {
