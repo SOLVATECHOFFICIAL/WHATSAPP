@@ -1786,6 +1786,36 @@ async function startServer() {
     } catch {}
   }, 4 * 60 * 1000);
 
+  // 🖼️ OpenGraph and Social Media Preview Asset Provider
+  // Explicit route for WhatsApp, Facebook, Twitter, and Telegram crawlers
+  const publicDir = path.resolve(__dirname, 'public');
+  const ogImagePath = path.resolve(publicDir, 'og-image.jpg');
+
+  app.get('/og-image.jpg', (_req, res) => {
+    if (fs.existsSync(ogImagePath)) {
+      res.setHeader('Content-Type', 'image/jpeg');
+      res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=86400');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      return res.sendFile(ogImagePath);
+    }
+    const distOg = path.resolve(__dirname, 'dist', 'og-image.jpg');
+    if (fs.existsSync(distOg)) {
+      res.setHeader('Content-Type', 'image/jpeg');
+      res.setHeader('Cache-Control', 'public, max-age=86400, s-maxage=86400');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      return res.sendFile(distOg);
+    }
+    res.status(404).send('Image Not Found');
+  });
+
+  // Serve static public folder assets directly
+  app.use(express.static(publicDir, {
+    maxAge: '1d',
+    setHeaders: (res) => {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+    }
+  }));
+
   if (!isProd) {
     const vite = await createViteServer({
       root: __dirname,
@@ -1802,8 +1832,24 @@ async function startServer() {
     const indexHtmlPath = path.resolve(distPath, 'index.html');
     if (fs.existsSync(indexHtmlPath)) {
       app.use(express.static(distPath));
-      app.get('*', (_req, res) => {
-        res.sendFile(indexHtmlPath);
+
+      let cachedHtml = '';
+      try {
+        cachedHtml = fs.readFileSync(indexHtmlPath, 'utf-8');
+      } catch {}
+
+      app.get('*', (req, res) => {
+        if (!cachedHtml) {
+          return res.sendFile(indexHtmlPath);
+        }
+        const host = req.get('x-forwarded-host') || req.get('host') || 'solvatech.up.railway.app';
+        const proto = req.get('x-forwarded-proto') || (req.secure ? 'https' : 'http');
+        const origin = `${proto}://${host}`;
+        // If accessed through a different domain/host, dynamically align the og:url and og:image origin
+        const html = cachedHtml.replace(/https:\/\/solvatech\.up\.railway\.app/g, origin);
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-cache');
+        res.send(html);
       });
     } else {
       console.warn('[SOLVATECH] dist/index.html not found, falling back to Vite middleware');
