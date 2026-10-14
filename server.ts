@@ -76,7 +76,7 @@ async function startServer() {
     process.env.RAILWAY_STATIC_URL,
   );
   const rawPort = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
-  const PORT = !isRailway && rawPort === 8080 ? 3000 : rawPort;
+  const PORT = isRailway ? rawPort : 3000;
   const isProd = process.env.NODE_ENV === 'production';
 
   app.use(express.json());
