@@ -25,6 +25,7 @@ export interface CommandContext {
   quotedParticipant?: string;
   mentionedJids?: string[];
   sock?: any;
+  getCachedGroupMetadata?: (gid: string) => Promise<any>;
   getTopChatted?: (phone: string) => Array<{ phone: string; name?: string; count: number }>;
   getGroupInviteCode?: (gid: string) => string | undefined;
   setGroupInviteCode?: (gid: string, code: string) => void;
@@ -1075,10 +1076,18 @@ _Any member can use or share this link to invite new members to the group!_
 
       if (ctx.sock) {
         try {
-          const meta = await Promise.race([
-            ctx.sock.groupMetadata(ctx.groupJid),
-            new Promise<any>((_, reject) => setTimeout(() => reject(new Error('groupMetadata timeout')), 4500)),
-          ]).catch(() => null);
+          let meta: any = null;
+          if (typeof ctx.getCachedGroupMetadata === 'function') {
+            try {
+              meta = await ctx.getCachedGroupMetadata(ctx.groupJid);
+            } catch {}
+          }
+          if (!meta) {
+            meta = await Promise.race([
+              ctx.sock.groupMetadata(ctx.groupJid),
+              new Promise<any>((_, reject) => setTimeout(() => reject(new Error('groupMetadata timeout')), 2500)),
+            ]).catch(() => null);
+          }
 
           if (meta) {
             groupName = meta.subject || groupName;

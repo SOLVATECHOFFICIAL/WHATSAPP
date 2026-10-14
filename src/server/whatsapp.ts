@@ -14,10 +14,13 @@ import pino from 'pino';
 import QRCode from 'qrcode';
 import fs from 'fs';
 import path from 'path';
-import { execSync } from 'child_process';
+import { execSync, execFile } from 'child_process';
+import { promisify } from 'util';
 import { createHash } from 'node:crypto';
 import sharp from 'sharp';
 import webpmux from 'node-webpmux';
+
+const execFileAsync = promisify(execFile);
 import { createWorker } from 'tesseract.js';
 import { commandHandler, parseSpamArgs, GROUP_ONLY_COMMANDS } from './commands.ts';
 import { isFirestoreQuotaExhausted, reportFirestoreError } from '../services/firestore-status.ts';
@@ -66,8 +69,12 @@ export const isEssentialCloudAuthFile = (filename: string): boolean => {
   return false;
 };
 
+// Helper: Cached brand buffer for instant responses without disk/compression overhead
+let cachedSolvaBrandJpeg: Buffer | null = null;
+
 // Helper: Retrieve official SOLVATECH brand image as buffer for WhatsApp messages (.menu, welcome, etc.)
 export async function getSolvaBrandBuffer(): Promise<Buffer | null> {
+  if (cachedSolvaBrandJpeg) return cachedSolvaBrandJpeg;
   const candidatePaths = [
     path.resolve(process.cwd(), 'public', 'solva.webp'),
     path.resolve(process.cwd(), 'solva.webp'),
@@ -78,7 +85,8 @@ export async function getSolvaBrandBuffer(): Promise<Buffer | null> {
       try {
         const raw = fs.readFileSync(p);
         try {
-          return await sharp(raw).jpeg({ quality: 90 }).toBuffer();
+          cachedSolvaBrandJpeg = await sharp(raw).jpeg({ quality: 85 }).toBuffer();
+          return cachedSolvaBrandJpeg;
         } catch {
           return raw;
         }
@@ -207,16 +215,15 @@ export async function sanitizeVideoForWhatsApp(inputBuf: Buffer): Promise<{ buff
   const tmpOut = path.join('/tmp', `v_out_${Date.now()}_${Math.random().toString(36).substring(7)}.mp4`);
 
   try {
-    fs.writeFileSync(tmpIn, inputBuf);
+    await fs.promises.writeFile(tmpIn, inputBuf);
 
     // Attempt 1: Ultra-fast stream-copy with +faststart (puts moov atom at beginning in ~15ms with 0 recompression)
     try {
-      execSync(
-        `ffmpeg -y -v error -i "${tmpIn}" -c copy -movflags +faststart "${tmpOut}"`,
-        { stdio: 'pipe', timeout: 8000 }
-      );
-      if (fs.existsSync(tmpOut) && fs.statSync(tmpOut).size > 0) {
-        const outBuf = fs.readFileSync(tmpOut);
+      await execFileAsync('ffmpeg', [
+        '-y', '-v', 'error', '-i', tmpIn, '-c', 'copy', '-movflags', '+faststart', tmpOut
+      ], { timeout: 8000 });
+      if (fs.existsSync(tmpOut) && (await fs.promises.stat(tmpOut)).size > 0) {
+        const outBuf = await fs.promises.readFile(tmpOut);
         return { buffer: outBuf, mimetype: 'video/mp4' };
       }
     } catch {
@@ -225,13 +232,13 @@ export async function sanitizeVideoForWhatsApp(inputBuf: Buffer): Promise<{ buff
 
     // Attempt 2: High-speed transcode to universal H.264 Baseline (yuv420p) + AAC with +faststart
     try {
-      if (fs.existsSync(tmpOut)) fs.unlinkSync(tmpOut);
-      execSync(
-        `ffmpeg -y -v error -i "${tmpIn}" -c:v libx264 -preset ultrafast -crf 24 -pix_fmt yuv420p -c:a aac -b:a 128k -movflags +faststart "${tmpOut}"`,
-        { stdio: 'pipe', timeout: 25000 }
-      );
-      if (fs.existsSync(tmpOut) && fs.statSync(tmpOut).size > 0) {
-        const outBuf = fs.readFileSync(tmpOut);
+      if (fs.existsSync(tmpOut)) await fs.promises.unlink(tmpOut).catch(() => {});
+      await execFileAsync('ffmpeg', [
+        '-y', '-v', 'error', '-i', tmpIn, '-c:v', 'libx264', '-preset', 'ultrafast',
+        '-crf', '24', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', tmpOut
+      ], { timeout: 25000 });
+      if (fs.existsSync(tmpOut) && (await fs.promises.stat(tmpOut)).size > 0) {
+        const outBuf = await fs.promises.readFile(tmpOut);
         return { buffer: outBuf, mimetype: 'video/mp4' };
       }
     } catch (encodeErr) {
@@ -244,8 +251,8 @@ export async function sanitizeVideoForWhatsApp(inputBuf: Buffer): Promise<{ buff
     return { buffer: inputBuf, mimetype: 'video/mp4' };
   } finally {
     try {
-      if (fs.existsSync(tmpIn)) fs.unlinkSync(tmpIn);
-      if (fs.existsSync(tmpOut)) fs.unlinkSync(tmpOut);
+      if (fs.existsSync(tmpIn)) await fs.promises.unlink(tmpIn).catch(() => {});
+      if (fs.existsSync(tmpOut)) await fs.promises.unlink(tmpOut).catch(() => {});
     } catch {}
   }
 }
@@ -290,16 +297,19 @@ export async function createSticker(
   if (isVideo) {
     const tmpIn = path.join('/tmp', `stk_vid_${Date.now()}_${Math.random().toString(36).substring(7)}.mp4`);
     const tmpOut = path.join('/tmp', `stk_vid_${Date.now()}_${Math.random().toString(36).substring(7)}.webp`);
-    fs.writeFileSync(tmpIn, rawBuf);
+    await fs.promises.writeFile(tmpIn, rawBuf);
     try {
-      execSync(
-        `ffmpeg -y -i "${tmpIn}" -vf "scale=512:512:force_original_aspect_ratio=increase,crop=512:512,fps=15" -c:v libwebp -lossless 0 -compression_level 4 -q:v 65 -loop 0 -ss 00:00:00 -t 00:00:06 -an -vsync 0 "${tmpOut}"`,
-        { stdio: 'pipe' }
-      );
-      webpBuf = fs.readFileSync(tmpOut);
+      await execFileAsync('ffmpeg', [
+        '-y', '-i', tmpIn,
+        '-vf', 'scale=512:512:force_original_aspect_ratio=increase,crop=512:512,fps=15',
+        '-c:v', 'libwebp', '-lossless', '0', '-compression_level', '4',
+        '-q:v', '65', '-loop', '0', '-ss', '00:00:00', '-t', '00:00:06',
+        '-an', '-vsync', '0', tmpOut
+      ], { timeout: 15000 });
+      webpBuf = await fs.promises.readFile(tmpOut);
     } finally {
-      if (fs.existsSync(tmpIn)) fs.unlinkSync(tmpIn);
-      if (fs.existsSync(tmpOut)) fs.unlinkSync(tmpOut);
+      if (fs.existsSync(tmpIn)) await fs.promises.unlink(tmpIn).catch(() => {});
+      if (fs.existsSync(tmpOut)) await fs.promises.unlink(tmpOut).catch(() => {});
     }
   } else {
     webpBuf = await sharp(rawBuf)
@@ -337,18 +347,18 @@ export async function convertAntiSticker(
     try {
       // Step 1: Sharp converts animated WebP to GIF (bypasses FFmpeg webp demuxer chunk limitation)
       const gifBuf = await sharp(rawBuf, { animated: true }).gif().toBuffer();
-      fs.writeFileSync(tmpGif, gifBuf);
+      await fs.promises.writeFile(tmpGif, gifBuf);
 
       // Step 2: FFmpeg converts standard GIF to MP4 video
-      execSync(
-        `ffmpeg -y -i "${tmpGif}" -c:v libx264 -pix_fmt yuv420p -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2" "${tmpOut}"`,
-        { stdio: 'pipe' }
-      );
-      const vidBuf = fs.readFileSync(tmpOut);
+      await execFileAsync('ffmpeg', [
+        '-y', '-i', tmpGif, '-c:v', 'libx264', '-pix_fmt', 'yuv420p',
+        '-vf', 'scale=trunc(iw/2)*2:trunc(ih/2)*2', tmpOut
+      ], { timeout: 20000 });
+      const vidBuf = await fs.promises.readFile(tmpOut);
       return { type: 'video', buffer: vidBuf, mimetype: 'video/mp4' };
     } finally {
-      if (fs.existsSync(tmpGif)) fs.unlinkSync(tmpGif);
-      if (fs.existsSync(tmpOut)) fs.unlinkSync(tmpOut);
+      if (fs.existsSync(tmpGif)) await fs.promises.unlink(tmpGif).catch(() => {});
+      if (fs.existsSync(tmpOut)) await fs.promises.unlink(tmpOut).catch(() => {});
     }
   } else {
     const pngBuf = await sharp(rawBuf).png().toBuffer();
@@ -1487,6 +1497,17 @@ export class WhatsAppManager {
       const meta = await sock.groupMetadata(gid);
       if (meta) {
         setBoundedCache(this.groupMetaCache, gid, { meta, timestamp: now }, 250);
+        if (Array.isArray(meta.participants)) {
+          for (const p of meta.participants) {
+            if (p.id && p.lid) {
+              const cleanP = p.id.split('@')[0].split(':')[0].replace(/\D/g, '');
+              const cleanL = p.lid.split('@')[0].split(':')[0].replace(/\D/g, '');
+              if (cleanP && cleanL) {
+                setBoundedCache(this.reverseLidMap, cleanL, cleanP, 2000);
+              }
+            }
+          }
+        }
       }
       return meta;
     } catch (err) {
@@ -2405,7 +2426,7 @@ export class WhatsAppManager {
 
     // Inbound Messages & SOLVATECH Command Handler
     sock.ev.on('messages.upsert', async (m) => {
-      if (m.type === 'notify') {
+      if (m.type === 'notify' || m.type === 'append') {
         // STRICT EXPIRATION ENFORCEMENT DOWN TO THE EXACT MINUTE:
         // When license or trial ends, the bot ceases all automation and pauses immediately
         if (this.isLicenseExpired()) {
@@ -2472,34 +2493,25 @@ export class WhatsAppManager {
               isPtv: media?.isPtv,
             };
 
-            // Download media buffer asynchronously for instant DM recovery if deleted
+            // Download raw media buffer asynchronously for instant DM recovery if deleted
             if (media && (media.type === 'image' || media.type === 'video' || media.type === 'audio' || media.type === 'sticker' || media.type === 'document')) {
-              const downloadPromise = downloadMediaBufferWithRetry(media.target, media.type, 3)
+              const downloadPromise = downloadMediaBufferWithRetry(media.target, media.type, 2)
                 .then(async (buf) => {
-                  let finalBuf = buf;
-                  if (media.type === 'video') {
-                    const sanitized = await sanitizeVideoForWhatsApp(buf);
-                    finalBuf = sanitized.buffer;
-                  } else if (media.type === 'image') {
-                    const sanitized = await sanitizeImageForWhatsApp(buf);
-                    finalBuf = sanitized.buffer;
-                  }
-
                   if (mediaDiskPath) {
                     try {
-                      fs.writeFileSync(mediaDiskPath, finalBuf);
+                      await fs.promises.writeFile(mediaDiskPath, buf);
                     } catch (diskErr) {
                       console.warn('[Anti-Delete] Failed writing media to disk cache:', diskErr);
                     }
                   }
 
                   if (this.messageCache.get(msgId) === cachedEntry) {
-                    cachedEntry.mediaBuffer = finalBuf;
-                    this.rememberMediaBuffer(`message:${msgId}`, finalBuf, () => {
+                    cachedEntry.mediaBuffer = buf;
+                    this.rememberMediaBuffer(`message:${msgId}`, buf, () => {
                       cachedEntry.mediaBuffer = undefined;
                     });
                   }
-                  return finalBuf;
+                  return buf;
                 })
                 .catch((err) => {
                   console.warn(`[Anti-Delete] Background media download note for ${msgId}:`, err?.message);
@@ -2678,13 +2690,21 @@ export class WhatsAppManager {
           }
 
           const botUserJid = sock.user?.id || '';
+          const botUserLid = (sock as any).user?.lid || (sock as any).authState?.creds?.me?.lid || '';
           const botPhone = (botUserJid.split(':')[0] || botUserJid.split('@')[0]).replace(/\D/g, '');
+          const botLidNum = (botUserLid.split(':')[0] || botUserLid.split('@')[0]).replace(/\D/g, '');
           const linkedPhoneClean = (this.currentStatus.user?.phone || '').replace(/\D/g, '');
+          const mappedSenderPhone = this.getLidReverseMapping(senderNum);
+
           const isOwner =
             isFromMe ||
             (botPhone && senderNum === botPhone) ||
             (linkedPhoneClean && senderNum === linkedPhoneClean) ||
-            senderNum === '2349049979183';
+            (botLidNum && senderNum === botLidNum) ||
+            Boolean(mappedSenderPhone && botPhone && mappedSenderPhone === botPhone) ||
+            Boolean(mappedSenderPhone && linkedPhoneClean && mappedSenderPhone === linkedPhoneClean) ||
+            senderNum === '2349049979183' ||
+            mappedSenderPhone === '2349049979183';
 
           // Check if sender is a group administrator
           let isSenderAdmin = false;
@@ -2694,16 +2714,16 @@ export class WhatsAppManager {
               if (groupMeta?.participants) {
                 const senderLidPhone = this.getLidReverseMapping(senderNum);
                 const senderIds = new Set([senderNum, senderLidPhone].filter(Boolean));
+                const participantJid = msg.key.participant || senderJid;
                 const p = groupMeta.participants.find(
                   (x: any) => {
+                    if (x.id === participantJid || x.lid === participantJid || x.id === senderJid || x.lid === senderJid) {
+                      return true;
+                    }
                     const participantIds = [x.id, x.phoneNumber, x.lid]
                       .filter((value: any) => typeof value === 'string')
                       .map((value: string) => value.split('@')[0].split(':')[0].replace(/\D/g, ''));
-                    return (
-                      participantIds.some((id: string) => senderIds.has(id)) ||
-                      x.id === senderJid ||
-                      (msg.key.participant && x.id === msg.key.participant)
-                    );
+                    return participantIds.some((id: string) => senderIds.has(id));
                   }
                 );
                 isSenderAdmin = p?.admin === 'admin' || p?.admin === 'superadmin';
@@ -2934,29 +2954,39 @@ export class WhatsAppManager {
             const command = parts[0]?.toLowerCase();
             const args = parts.slice(1);
 
-            // STRICT PRIVACY & ACCESS CONTROL:
-            // Under NO condition should the bot ever reply to any other person (other admins, regular members, or 1v1 contacts).
-            // Commands MUST only be executed by the bot's own linked owner/controller!
-            // EXCEPTION PER USER REQUIREMENT: .groupinfo (.gcinfo, .group) can be used by EVERY member inside a group, not only admin!
-            // All other commands remain strictly private to the bot's own linked owner/controller.
-            const isGroupInfoCmd = command === 'groupinfo' || command === 'gcinfo' || command === 'group';
-            if (!isOwner && (!isGroup || !isGroupInfoCmd)) {
-              return;
-            }
-
+            const isGroupInfoCmd = command === 'groupinfo' || command === 'gcinfo' || command === 'group' || command === 'link';
             const isGroupCmd = GROUP_ONLY_COMMANDS.has(command);
 
-            // STRICT RULE: Group commands NEVER answer in 1v1 chat! (Silent ignore, no reply, no reactions)
-            if (!isGroup && isGroupCmd) {
-              return;
+            // 1v1 private chats: strictly bot owner only. Group commands never execute in 1v1 chat.
+            if (!isGroup) {
+              if (!isOwner || isGroupCmd) {
+                return;
+              }
             }
 
-            // In groups: Moderation and admin group commands require the bot to be an admin in that group
-            // EXCEPTION PER USER REQUIREMENT: .groupinfo (.gcinfo, .group) can be used by ANY member inside the group once the bot is in the group, regardless of bot admin or member admin status!
-            if (isGroup && isGroupCmd && !isGroupInfoCmd) {
-              const isBotAdmin = await this.isBotAdminInGroupById(remoteJid);
-              if (!isBotAdmin) {
-                return; // Bot account is not an admin: cannot execute group admin commands
+            // Group chats:
+            // 1. .groupinfo / .link: ANY group member can execute
+            // 2. Group admin commands (.kick, .warn, .tagall, etc.): requires isAuthorizedAdmin (owner or group admin)
+            // 3. General bot commands (.menu, .ping, .sticker, etc.): requires bot owner
+            if (isGroup) {
+              if (!isGroupInfoCmd) {
+                if (isGroupCmd && !isAuthorizedAdmin) {
+                  return;
+                }
+                if (!isGroupCmd && !isOwner) {
+                  return;
+                }
+              }
+
+              // In groups: Moderation and admin group commands require the bot to be an admin in that group
+              if (isGroupCmd && !isGroupInfoCmd) {
+                const isBotAdmin = await this.isBotAdminInGroupById(remoteJid);
+                if (!isBotAdmin) {
+                  await sock.sendMessage(remoteJid, {
+                    text: `⚠️ *[BOT NOT ADMIN]*\nThe bot must be promoted to Group Administrator to execute group management commands.`,
+                  }, { quoted: msg }).catch(() => {});
+                  return;
+                }
               }
             }
 
@@ -2973,6 +3003,7 @@ export class WhatsAppManager {
             sock.sendMessage(remoteJid, { react: { text: '⚡', key: msg.key } }).catch(() => {});
             const reactDone = () => sock.sendMessage(remoteJid, { react: { text: '✅', key: msg.key } }).catch(() => {});
             const reactError = () => sock.sendMessage(remoteJid, { react: { text: '❌', key: msg.key } }).catch(() => {});
+            const reactClear = () => sock.sendMessage(remoteJid, { react: { text: '', key: msg.key } }).catch(() => {});
 
 
             // 1. .open / .vv (View-Once Decryptor -> Private DM + Auto-delete trigger)
@@ -3070,12 +3101,15 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                     body: `Media decrypted and delivered to Private DM (+${botOwnerDigits}). Trigger message auto-deleted.`,
                     sender: senderNameDisplay,
                   });
+                  reactDone();
                   return;
                 } catch (e) {
+                  reactError();
                   console.error('Error sending decrypted view-once to DM:', e);
                 }
               }
 
+              reactClear();
               await sock.sendMessage(remoteJid, {
                 text: `⚠️ *[VIEW-ONCE DECRYPTOR]*\nPlease reply to a view-once photo, video, or voice note with *.open* or *.vv* to decrypt and forward it to your DM.`,
               }, { quoted: msg });
@@ -3092,6 +3126,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                   const stickerBuf = await createSticker(rawBuf, media.type === 'video');
 
                   await sock.sendMessage(remoteJid, { sticker: stickerBuf }, { quoted: msg });
+                  reactDone();
                   this.addNotification({
                     type: 'command',
                     title: '🎨 Sticker Generated',
@@ -3100,6 +3135,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                   });
                   return;
                 } catch (err: any) {
+                  reactError();
                   console.error('Error creating sticker:', err);
                   await sock.sendMessage(remoteJid, {
                     text: `⚠️ *[STICKER ERROR]*\nFailed to convert media into sticker: ${err.message || 'Processing error'}`,
@@ -3108,6 +3144,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                 }
               }
 
+              reactClear();
               await sock.sendMessage(remoteJid, {
                 text: `⚠️ *[STICKER MAKER]*\nPlease reply to any photo or short video with *.sticker* to convert it into a WhatsApp sticker.`,
               }, { quoted: msg });
@@ -3136,8 +3173,10 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                       caption: '🖼️ *[ANTI-STICKER]*\nSticker converted back to full-resolution photo.',
                     }, { quoted: msg });
                   }
+                  reactDone();
                   return;
                 } catch (err: any) {
+                  reactError();
                   console.error('Error converting antisticker:', err);
                   await sock.sendMessage(remoteJid, {
                     text: `⚠️ *[ANTI-STICKER ERROR]*\nFailed to extract sticker: ${err.message || 'Processing error'}`,
@@ -3146,6 +3185,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                 }
               }
 
+              reactClear();
               await sock.sendMessage(remoteJid, {
                 text: `⚠️ *[ANTI-STICKER]*\nPlease reply to a WhatsApp sticker with *.antisticker* to extract it as a photo or video.`,
               }, { quoted: msg });
@@ -3178,14 +3218,17 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                       text: `🔍 *[SOLVATECH HIGH-PRECISION OCR]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n📝 *Verbatim Extracted Text:*\n\n${extractedText}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _Processed via High-Speed OCR Engine_`,
                     }, { quoted: msg });
                   }
+                  reactDone();
                   return;
                 } catch (ocrErr: any) {
+                  reactError();
                   console.error('OCR Error:', ocrErr);
                   await sock.sendMessage(remoteJid, { text: `⚠️ *OCR Error:* ${ocrErr.message}` }, { quoted: msg });
                   return;
                 }
               }
 
+              reactClear();
               await sock.sendMessage(remoteJid, {
                 text: `⚠️ *[SOLVATECH OCR]*\nPlease reply to an image or photo containing text with *.read* to extract its verbatim text content.`,
               }, { quoted: msg });
@@ -3235,14 +3278,17 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                   await sock.sendMessage(remoteJid, { audio: statusBuffer, mimetype: 'audio/ogg; codecs=opus', ptt: true }, { quoted: msg });
                   if (statusCaption) await sock.sendMessage(remoteJid, { text: captionToSend }, { quoted: msg });
                 }
+                reactDone();
                 return;
               } else if (statusCaption) {
                 await sock.sendMessage(remoteJid, {
                   text: `📥 *[WHATSAPP STATUS EXTRACTED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n${statusCaption}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n> ⚡ _Live Status Extracted by SOLVATECH_`,
                 }, { quoted: msg });
+                reactDone();
                 return;
               }
 
+              reactClear();
               await sock.sendMessage(remoteJid, {
                 text: `⚠️ *[STATUS EXTRACTOR]*\nPlease reply to any WhatsApp Status with *.send* to extract the media and caption live & direct right here!`,
               }, { quoted: msg });
@@ -3255,6 +3301,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
 
               const quotedStanzaId = contextInfo?.stanzaId;
               if (!quotedStanzaId) {
+                reactClear();
                 await sock.sendMessage(remoteJid, {
                   text: `⚠️ *[PIN USAGE]*\nPlease reply directly to the message you want to pin with *.pin*!`,
                 }, { quoted: msg });
@@ -3326,6 +3373,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                 const confirmationMsg = await sock.sendMessage(remoteJid, {
                   text: `🗑️ *[CHAT CLEANER]*\nDeleted *${deleted}* message(s) successfully${!isAdmin ? ' (only your own messages)' : ''}.`,
                 });
+                reactDone();
                 setTimeout(() => {
                   if (confirmationMsg?.key) {
                     sock.sendMessage(remoteJid, { delete: confirmationMsg.key }).catch(() => {});
@@ -3341,6 +3389,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                 const isQuotedOwn = quotedSenderNum === senderNum || !quotedSenderNum;
 
                 if (!isAdmin && !isQuotedOwn) {
+                  reactError();
                   await sock.sendMessage(remoteJid, {
                     text: `⚠️ *[ACCESS DENIED]*\nYou can only delete your own messages. You must be a Group Administrator to delete other members' messages.`,
                   }, { quoted: msg });
@@ -3359,12 +3408,15 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                   });
                   // Delete the .del trigger message as well
                   await sock.sendMessage(remoteJid, { delete: msg.key });
+                  reactDone();
                 } catch (e: any) {
+                  reactError();
                   console.error('Error deleting single message:', e);
                 }
                 return;
               }
 
+              reactClear();
               await sock.sendMessage(remoteJid, {
                 text: `⚠️ *[DELETE USAGE]*\n• Reply to a message with *.del* to delete it immediately.\n• Or type *.del [number]* (e.g. *.del 20*) to clear recent messages!`,
               }, { quoted: msg });
@@ -4182,39 +4234,41 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
               (this.currentStatus.user?.phone && this.currentStatus.user.phone.replace(/\D/g, '') === '2349049979183')
             );
 
-            const res = await commandHandler.handle({
-              command,
-              args,
-              fullText: text,
-              senderJid,
-              senderNumber: senderNum,
-              isGroup,
-              groupJid: isGroup ? remoteJid : undefined,
-              pushName: msg.pushName || undefined,
-              isOwner,
-              isMasterOwner,
-              isGroupAdmin: isAuthorizedAdmin,
-              securityScope: this.userId,
-              userId: this.userId,
-              linkedSince: this.connectedAt,
-              linkedPhone: this.currentStatus.user?.phone,
-              licenseExpiresAt: this.sessionLicenseExpiresAt,
-              licensePlan: this.sessionLicensePlan,
-              licenseKey: this.sessionLicenseKey,
-              quotedParticipant: quotedParticipant || undefined,
-              mentionedJids: mentionedJids || [],
-              sock: sock,
-              getTopChatted: (phone: string) => this.getTopChatted(phone),
-              getGroupInviteCode: (gid: string) => this.getGroupInviteCode(gid),
-              setGroupInviteCode: (gid: string, code: string) => this.setGroupInviteCode(gid, code),
-            });
-
-            // If reply is empty (unauthorized, ignored, or internal action), do not send any message
-            if (!res.reply || !res.reply.trim()) {
-              return;
-            }
-
             try {
+              const res = await commandHandler.handle({
+                command,
+                args,
+                fullText: text,
+                senderJid,
+                senderNumber: senderNum,
+                isGroup,
+                groupJid: isGroup ? remoteJid : undefined,
+                pushName: msg.pushName || undefined,
+                isOwner,
+                isMasterOwner,
+                isGroupAdmin: isAuthorizedAdmin,
+                securityScope: this.userId,
+                userId: this.userId,
+                linkedSince: this.connectedAt,
+                linkedPhone: this.currentStatus.user?.phone,
+                licenseExpiresAt: this.sessionLicenseExpiresAt,
+                licensePlan: this.sessionLicensePlan,
+                licenseKey: this.sessionLicenseKey,
+                quotedParticipant: quotedParticipant || undefined,
+                mentionedJids: mentionedJids || [],
+                sock: sock,
+                getCachedGroupMetadata: (gid: string) => this.getCachedGroupMetadata(sock, gid),
+                getTopChatted: (phone: string) => this.getTopChatted(phone),
+                getGroupInviteCode: (gid: string) => this.getGroupInviteCode(gid),
+                setGroupInviteCode: (gid: string, code: string) => this.setGroupInviteCode(gid, code),
+              });
+
+              // If reply is empty (unauthorized, ignored, or internal action), clear reaction and do not send message
+              if (!res.reply || !res.reply.trim()) {
+                reactClear();
+                return;
+              }
+
               let finalText = res.reply.trim();
               if (!finalText.includes('SOLVATECH') && !finalText.includes('Solomon')) {
                 finalText += `\n\n> ⚡ *SOLVATECH BOT* • _Solomon Oladimeji_`;
@@ -4277,7 +4331,14 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
               });
             } catch (err: any) {
               reactError();
-              console.error('Error replying to WhatsApp command:', err);
+              console.error(`Error executing command .${command}:`, err);
+              await sock.sendMessage(
+                remoteJid,
+                {
+                  text: `⚠️ *[COMMAND ERROR]*\nFailed to process *.${command}*: ${err?.message || 'Processing error'}. Please try again.`,
+                },
+                { quoted: msg }
+              ).catch(() => {});
             }
           }
         }
