@@ -570,6 +570,7 @@ export class WhatsAppManager {
   public sessionLicensePlan: string | null = null;
   public isSessionUnlimited: boolean = false;
   private lastAutoReconnectTime = 0;
+  private lastLicenseFirestoreCheckTime = 0;
   private cachedGroups: any[] = [];
   private lastGroupFetchTime = 0;
   private userInteractions = new Map<string, Map<string, { count: number; name?: string }>>();
@@ -760,6 +761,13 @@ export class WhatsAppManager {
     if (isFirestoreQuotaExhausted()) {
       return Boolean(this.sessionLicenseExpiresAt || this.isSessionUnlimited || this.isOwnerEmail());
     }
+    // 🛡️ Zero-Quota Shield: If license was checked within the last 3 minutes and is valid, return immediately
+    const now = Date.now();
+    if (now - this.lastLicenseFirestoreCheckTime < 180_000 && (this.sessionLicenseExpiresAt || this.isSessionUnlimited || this.isOwnerEmail())) {
+      return true;
+    }
+    this.lastLicenseFirestoreCheckTime = now;
+
     try {
       if (this.userId && this.userId !== 'default') {
         let expAt: string | null = null;
@@ -5950,44 +5958,25 @@ export class WhatsAppSessionManager {
     const candidateUids = new Set<string>();
     const userMetaMap = new Map<string, { email?: string; phone?: string; licensePlan?: string; isUnlimited?: boolean; licenseExpiresAt?: string | null; isExpired?: boolean }>();
 
-    // 1. Gather all tiny particles from Firestore 'users' collection
-    if (!isFirestoreQuotaExhausted()) {
+    // 1. Priority: Gather from local disk auth folders (Zero Firestore reads!)
+    if (fs.existsSync(this.baseAuthDir)) {
       try {
-        const uSnap = await getDocs(collection(db, 'users'));
-        const now = Date.now();
-        for (const d of uSnap.docs) {
-          const data = d.data() || {};
-          const uid = d.id;
-          candidateUids.add(uid);
-          const email = typeof data.email === 'string' ? data.email.trim().toLowerCase() : undefined;
-          const isOwner = email ? isOwnerEmail(email) : false;
-          const isUnlimited = isOwner || Boolean(data.isUnlimited) || data.licenseStatus === 'unlimited' || Boolean(data.licensePlan?.includes('Unlimited'));
-          const expMs = data.licenseExpiresAt ? new Date(data.licenseExpiresAt).getTime() : 0;
-          const isExpired = !isUnlimited && (
-            (data.licenseExpiresAt && expMs > 0 && expMs <= now) ||
-            (!data.licenseExpiresAt && !data.licenseKey) ||
-            data.licenseStatus === 'expired'
-          );
-
-          userMetaMap.set(uid, {
-            email: data.email || undefined,
-            phone: data.linkedPhone || data.phone || undefined,
-            licensePlan: data.licensePlan,
-            isUnlimited,
-            licenseExpiresAt: data.licenseExpiresAt,
-            isExpired,
-          });
-          if (email) {
-            userMetaMap.set(email, userMetaMap.get(uid)!);
+        const items = fs.readdirSync(this.baseAuthDir, { withFileTypes: true });
+        for (const item of items) {
+          if (item.isDirectory() && item.name.startsWith('session_')) {
+            candidateUids.add(item.name.replace(/^session_/, ''));
           }
         }
-      } catch (uErr) {
-        console.warn('[ReconnectAll] Firestore users scan note:', uErr);
-      }
+      } catch {}
     }
 
-    // 2. Gather from Firestore 'column' collection
-    if (!isFirestoreQuotaExhausted()) {
+    // 2. Gather from active memory sessions
+    for (const uid of this.sessions.keys()) {
+      candidateUids.add(uid);
+    }
+
+    // 3. Fallback: Only scan remote Firestore if disk has zero candidates and quota is healthy
+    if (candidateUids.size === 0 && !isFirestoreQuotaExhausted()) {
       try {
         const colSnap = await getDocs(collection(db, 'column'));
         for (const d of colSnap.docs) {
@@ -6006,23 +5995,6 @@ export class WhatsAppSessionManager {
       } catch (colErr) {
         console.warn('[ReconnectAll] Firestore column scan note:', colErr);
       }
-    }
-
-    // 3. Gather from disk auth folders
-    if (fs.existsSync(this.baseAuthDir)) {
-      try {
-        const items = fs.readdirSync(this.baseAuthDir, { withFileTypes: true });
-        for (const item of items) {
-          if (item.isDirectory() && item.name.startsWith('session_')) {
-            candidateUids.add(item.name.replace(/^session_/, ''));
-          }
-        }
-      } catch {}
-    }
-
-    // 4. Gather from active memory sessions
-    for (const uid of this.sessions.keys()) {
-      candidateUids.add(uid);
     }
 
     let connectedBack = 0;
