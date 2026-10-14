@@ -949,13 +949,14 @@ export class WhatsAppManager {
   private async syncConnectionStatusToFirestore(): Promise<void> {
     if (!this.userId || this.userId === 'default') return;
     try {
+      const linkedPhone = this.currentStatus.user?.phone || this.currentStatus.targetPhone || null;
       await setDoc(
         doc(db, 'users', this.userId),
         {
           whatsappConnected: Boolean(this.sock && this.currentStatus.isConnected),
           botConnected: Boolean(this.sock && this.currentStatus.isConnected),
           connectionState: this.currentStatus.state,
-          linkedPhone: this.currentStatus.user?.phone || this.currentStatus.targetPhone || null,
+          ...(linkedPhone ? { linkedPhone } : {}),
           updatedAt: new Date().toISOString(),
         },
         { merge: true }
@@ -5266,6 +5267,7 @@ export class WhatsAppSessionManager {
 
   private globalSyncInterval: NodeJS.Timeout | null = null;
   private globalSyncRunning = false;
+  private unlinkedSessionSince = new Map<string, number>();
   private lastSyncStats = {
     totalChecked: 0,
     activeOnline: 0,
@@ -5320,7 +5322,8 @@ export class WhatsAppSessionManager {
 
     try {
       const userIds = new Set<string>();
-      const phoneLockedUserIds = new Set<string>();
+      const phoneLocks = new Map<string, string>();
+      let cloudSessionScanCompleted = false;
 
       // 1. Gather all local session folders
       if (fs.existsSync(this.baseAuthDir)) {
@@ -5341,9 +5344,11 @@ export class WhatsAppSessionManager {
       if (!isFirestoreQuotaExhausted()) {
         try {
           const sessionDocs = await getDocs(collection(db, 'whatsapp_sessions'));
+          cloudSessionScanCompleted = true;
           for (const docSnap of sessionDocs.docs) {
             if (docSnap.id.startsWith('session_')) {
-              userIds.add(docSnap.id.replace(/^session_/, ''));
+              const uid = docSnap.id.replace(/^session_/, '');
+              userIds.add(uid);
             }
           }
         } catch (err: any) {
@@ -5360,7 +5365,7 @@ export class WhatsAppSessionManager {
           for (const userDoc of usersSnap.docs) {
             const linkedPhone = userDoc.data()?.linkedPhone;
             if (typeof linkedPhone === 'string' && linkedPhone.trim()) {
-              phoneLockedUserIds.add(userDoc.id);
+              phoneLocks.set(userDoc.id, linkedPhone.trim());
               userIds.add(userDoc.id);
             }
           }
@@ -5375,6 +5380,7 @@ export class WhatsAppSessionManager {
       for (const uid of userIds) {
         totalChecked++;
         try {
+          let unlockedThisPass = false;
           const session = this.getSession(uid);
           await session.syncLicenseFromFirestore().catch(() => {});
           const license = session.getLicenseDetails();
@@ -5384,6 +5390,7 @@ export class WhatsAppSessionManager {
           // phone lock and credentials until the account has valid access again.
           const isExpired = session.isLicenseExpired();
           if (isExpired) {
+            this.unlinkedSessionSince.delete(uid);
             expiredDisconnected++;
             console.log(`[Global 1-Min Sync] User ${uid} has no active license; leaving phone lock and saved session unchanged.`);
             continue;
@@ -5393,10 +5400,14 @@ export class WhatsAppSessionManager {
           let status = session.getStatus();
 
           if (status.isConnected) {
+            this.unlinkedSessionSince.delete(uid);
             activeOnline++;
           } else {
             const hasCreds = await session.ensureRestored();
             status = session.getStatus();
+            if (hasCreds) {
+              this.unlinkedSessionSince.delete(uid);
+            }
             if (hasCreds && !session.reconnectTimedOut && !session.isSocketActive()) {
               const pairingInProgress =
                 status.state === 'awaiting_pairing' ||
@@ -5412,7 +5423,7 @@ export class WhatsAppSessionManager {
                   console.warn(`[Global 1-Min Sync] Reconnect error for ${uid}:`, err?.message);
                 });
               }
-            } else if (!hasCreds && phoneLockedUserIds.has(uid)) {
+            } else if (!hasCreds && phoneLocks.has(uid)) {
               const pairingInProgress =
                 status.state === 'awaiting_pairing' ||
                 status.state === 'pairing_handshake' ||
@@ -5420,19 +5431,37 @@ export class WhatsAppSessionManager {
                 status.pairingStage === 'code_generated' ||
                 status.pairingStage === 'pairing_handshake' ||
                 Boolean(status.pairingCode);
-              if (!pairingInProgress) {
-                console.log(`[Global 1-Min Sync] User ${uid} has an active license but no restorable WhatsApp session. Clearing stale phone lock for fresh pairing.`);
-                session.setUnlinkedIdle();
-                unlockedForPairing++;
+              if (pairingInProgress) {
+                this.unlinkedSessionSince.delete(uid);
+              } else if (cloudSessionScanCompleted) {
+                const firstUnlinkedAt = this.unlinkedSessionSince.get(uid);
+                if (session.reconnectTimedOut || (firstUnlinkedAt && Date.now() - firstUnlinkedAt >= 60 * 1000)) {
+                  console.log(`[Global 1-Min Sync] User ${uid} has an active license but no restorable WhatsApp session. Clearing stale phone lock for fresh pairing.`);
+                  session.setUnlinkedIdle();
+                  this.unlinkedSessionSince.delete(uid);
+                  unlockedThisPass = true;
+                  unlockedForPairing++;
+                } else if (!firstUnlinkedAt) {
+                  this.unlinkedSessionSince.set(uid, Date.now());
+                  console.log(`[Global 1-Min Sync] User ${uid} has no restorable WhatsApp session; starting a 60-second recovery check before unlocking.`);
+                }
               }
             }
           }
           const connectingStatus = session.getStatus();
+          const currentLinkedPhone =
+            connectingStatus.user?.phone ||
+            connectingStatus.targetPhone ||
+            phoneLocks.get(uid);
           try {
             await setDoc(doc(db, 'users', uid), {
               whatsappConnected: connectingStatus.isConnected,
               botConnected: connectingStatus.isConnected,
-              linkedPhone: connectingStatus.user?.phone || connectingStatus.targetPhone || null,
+              ...(unlockedThisPass
+                ? { linkedPhone: null }
+                : currentLinkedPhone
+                  ? { linkedPhone: currentLinkedPhone }
+                  : {}),
               connectionState: connectingStatus.state,
               licenseStatus: isUnlimited ? 'unlimited' : 'active',
               updatedAt: new Date().toISOString(),
