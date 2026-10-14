@@ -57,12 +57,13 @@ const isSafeAuthFileName = (filename: string) =>
 // Tier 1: creds.json (master paired phone credentials)
 // Tier 2: app-state-sync-key-* (chat app state sync)
 // Tier 3: app-state-sync-version-* (sync versions)
-// Volatile keys (sender-key-*, pre-key-*, session-*, sender-key-memory-*) STAY STRICTLY LOCAL
-// and are never uploaded to Firebase, saving 20,000+ daily writes.
+// Tier 4: session-* and pre-key-* (Signal protocol session keys to reconnect without fresh pairing)
 export const isEssentialCloudAuthFile = (filename: string): boolean => {
   if (filename === 'creds.json') return true;
   if (filename.startsWith('app-state-sync-key-')) return true;
   if (filename.startsWith('app-state-sync-version-')) return true;
+  if (filename.startsWith('session-')) return true;
+  if (filename.startsWith('pre-key-')) return true;
   return false;
 };
 
@@ -1244,6 +1245,24 @@ export class WhatsAppManager {
     }
   }
 
+  public setRestoredPhone(phone: string) {
+    if (!phone) return;
+    const cleanP = phone.replace(/\D/g, '');
+    this.currentStatus.targetPhone = cleanP;
+    this.currentStatus.isPaired = true;
+    this.currentStatus.user = {
+      id: `${cleanP}@s.whatsapp.net`,
+      name: 'SOLVATECH Linked Phone',
+      phone: phone.startsWith('+') ? phone : `+${cleanP}`,
+    };
+    this.currentStatus.pairingStage = 'connected';
+    this.currentStatus.state = 'connecting';
+  }
+
+  public isSocketActive(): boolean {
+    return Boolean(this.sock || this.isConnecting);
+  }
+
   public getStatus(): WhatsAppStatus {
     const credsFile = path.join(this.authDir, 'creds.json');
     let hasLocalCreds = false;
@@ -1266,14 +1285,21 @@ export class WhatsAppManager {
       } catch {}
     }
 
-    // A phone is paired if registered companion credentials exist on disk or user object is set
-    const isPaired = hasLocalCreds || Boolean(this.currentStatus.user?.phone);
+    // A phone is paired if registered companion credentials exist on disk or user object/targetPhone is set
+    const isPaired = hasLocalCreds || Boolean(this.currentStatus.user?.phone) || Boolean(this.currentStatus.targetPhone);
     this.currentStatus.isPaired = isPaired;
     if (registeredPhone && (!this.currentStatus.user || !this.currentStatus.user.phone)) {
       this.currentStatus.user = {
         id: registeredUserJid || `${registeredPhone}@s.whatsapp.net`,
         name: registeredName,
         phone: `+${registeredPhone}`,
+      };
+    } else if (!this.currentStatus.user?.phone && this.currentStatus.targetPhone) {
+      const cleanP = this.currentStatus.targetPhone.replace(/\D/g, '');
+      this.currentStatus.user = {
+        id: `${cleanP}@s.whatsapp.net`,
+        name: 'SOLVATECH Linked Phone',
+        phone: this.currentStatus.targetPhone.startsWith('+') ? this.currentStatus.targetPhone : `+${this.currentStatus.targetPhone}`,
       };
     }
 
@@ -1529,6 +1555,28 @@ export class WhatsAppManager {
       this.ensureAuthDir();
       const credsPath = path.join(this.authDir, 'creds.json');
       if (fs.existsSync(credsPath)) {
+        try {
+          const raw = fs.readFileSync(credsPath, 'utf-8');
+          const creds = JSON.parse(raw);
+          if (creds.registered && (creds.me?.id || (creds as any).account?.details)) {
+            const registeredUserJid = creds.me?.id || '';
+            const registeredPhone = registeredUserJid
+              ? (registeredUserJid.split(':')[0] || registeredUserJid.split('@')[0])
+              : this.currentStatus.targetPhone?.replace(/\D/g, '') || '';
+            this.currentStatus.isPaired = true;
+            this.currentStatus.user = {
+              id: registeredUserJid || `${registeredPhone}@s.whatsapp.net`,
+              name: creds.me?.name || 'SOLVATECH Linked Phone',
+              phone: `+${registeredPhone}`,
+            };
+            this.currentStatus.pairingStage = 'connected';
+            const licenseVerified = await this.syncLicenseFromFirestore();
+            if (licenseVerified && !this.isLicenseExpired() && !this.sock && !this.isConnecting) {
+              console.log(`[WhatsApp Auth (${this.userId})] Active credentials found. Auto-reconnecting socket...`);
+              this.initSocket().catch((err) => console.warn('Auto-reconnect note for existing creds:', err));
+            }
+          }
+        } catch {}
         return true;
       }
 
@@ -2031,6 +2079,20 @@ export class WhatsAppManager {
               title: 'WhatsApp Pairing Confirmed',
               body: `WhatsApp accepted the companion link for +${phone || 'phone'}. The bot is connecting.`,
             });
+            // Immediate sync to Firebase Firestore so credentials survive instantaneous redeployment
+            this.flushFirebaseCredsSync().catch(() => {});
+            if (this.userId && this.userId !== 'default' && phone) {
+              setDoc(
+                doc(db, 'users', this.userId),
+                {
+                  linkedPhone: `+${phone}`,
+                  isPaired: true,
+                  connectionState: 'connected',
+                  updatedAt: new Date().toISOString(),
+                },
+                { merge: true }
+              ).catch(() => {});
+            }
           }
         });
 
@@ -5070,6 +5132,50 @@ export class WhatsAppSessionManager {
         }
       } catch (err) {
         console.warn('Firestore session auto-discovery note:', err);
+      }
+
+      // 3. 🚀 CRITICAL REDEPLOY RECONNECT ENGINE: Scan Firestore `users` collection!
+      // Finds all previously paired users or users with active licenses and restores them automatically.
+      try {
+        const usersSnap = await getDocs(collection(db, 'users'));
+        for (const userDoc of usersSnap.docs) {
+          const uData = userDoc.data();
+          const uid = userDoc.id;
+          const userEmail = typeof uData?.email === 'string' ? uData.email : '';
+          const linkedPhone = typeof uData?.linkedPhone === 'string' ? uData.linkedPhone : '';
+          const isOwner = isOwnerEmail(userEmail);
+          const isUnlimited = Boolean(isOwner || uData?.isUnlimited || uData?.licenseStatus === 'unlimited');
+          const hasActiveLicense = isUnlimited || Boolean(
+            uData?.licenseExpiresAt && new Date(uData.licenseExpiresAt).getTime() > Date.now()
+          );
+
+          if (linkedPhone || hasActiveLicense) {
+            console.log(`[Startup Auto-Scanner] Found user ${uid} (${userEmail || linkedPhone || 'user'}) - restoring session state...`);
+            const session = this.getSession(uid, userEmail);
+            if (linkedPhone && !session.getStatus().user?.phone) {
+              session.setRestoredPhone(linkedPhone);
+            }
+
+            // Restore cloud authentication keys and auto-reconnect with 1-minute retry window
+            session.ensureRestored().then(async () => {
+              await session.syncLicenseFromFirestore();
+              if (!session.isLicenseExpired()) {
+                console.log(`[Startup Auto-Scanner] User ${uid} has valid license! Initiating socket auto-reconnection...`);
+                if (!session.isSocketActive()) {
+                  session.initSocket().catch((err) => {
+                    console.warn(`[Startup Auto-Scanner] Initial reconnect attempt for ${uid}:`, err?.message || err);
+                  });
+                }
+              } else {
+                console.log(`[Startup Auto-Scanner] User ${uid} license is expired, keeping pairing preserved in paused state.`);
+              }
+            }).catch((err) => {
+              console.warn(`[Startup Auto-Scanner] Error restoring user ${uid}:`, err);
+            });
+          }
+        }
+      } catch (userScanErr) {
+        console.warn('[Startup Auto-Scanner] Users collection scan note:', userScanErr);
       }
     } catch (e) {
       console.warn('Error in autoRestoreAllSessions:', e);
