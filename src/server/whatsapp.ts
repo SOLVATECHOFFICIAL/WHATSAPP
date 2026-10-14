@@ -3472,9 +3472,9 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
               return;
             }
 
-            // 9. .tagall (Mention all group members: connected bot user, bold & styled, no links)
+            // 9. .tagall (Mention all group members: allowed for bot owner whether admin or regular member)
             if (command === 'tagall' || command === 'everyone') {
-              if (!isGroup || !isAuthorizedAdmin) return;
+              if (!isGroup || !isOwner) return;
 
               try {
                 const groupMeta = await this.getCachedGroupMetadata(sock, remoteJid);
@@ -3517,9 +3517,9 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
               return;
             }
 
-            // 10. .admin / .admins (Summon and tag all group administrators)
+            // 10. .admin / .admins (Summon and tag all group administrators: allowed for bot owner)
             if (command === 'admin' || command === 'admins') {
-              if (!isGroup || !isAuthorizedAdmin) return;
+              if (!isGroup || !isOwner) return;
 
               try {
                 const groupMeta = await this.getCachedGroupMetadata(sock, remoteJid);
@@ -3649,9 +3649,9 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
               return;
             }
 
-            // 12. .add (Add participant to group with privacy invite fallback)
+            // 12. .add (Add participant to group with privacy invite fallback: allowed for bot owner)
             if (command === 'add' || command === 'invite') {
-              if (!isGroup || !isAuthorizedAdmin) return;
+              if (!isGroup || !isOwner) return;
 
               try {
                 const groupMeta = await this.getCachedGroupMetadata(sock, remoteJid);
