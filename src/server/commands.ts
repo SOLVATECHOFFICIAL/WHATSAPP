@@ -65,6 +65,38 @@ export const GROUP_ONLY_COMMANDS = new Set([
   'group',
 ]);
 
+// Commands inside a group that strictly require Group Admin or Owner authority:
+// (Commands like .groupinfo, .gcinfo, .group, .link can be used by ANY group member!)
+export const ADMIN_ONLY_GROUP_COMMANDS = new Set([
+  'warn',
+  'warnlimit',
+  'warns',
+  'unwarn',
+  'clearwarns',
+  'resetwarns',
+  'antilink',
+  'antibot',
+  'antistatus',
+  'antispam',
+  'autowelcome',
+  'welcome',
+  'autogoodbye',
+  'goodbye',
+  'kick',
+  'remove',
+  'add',
+  'invite',
+  'promote',
+  'demote',
+  'lock',
+  'unlock',
+  'pin',
+  'tagall',
+  'everyone',
+  'admin',
+  'admins',
+]);
+
 export interface CommandResult {
   reply: string;
   action?: 'none' | 'kick' | 'pin' | 'warn' | 'spam' | 'stop_spam' | 'image_gen' | 'sticker_convert' | 'antisticker_convert' | 'ocr_read' | 'view_once_decrypt';
@@ -661,11 +693,12 @@ class CommandHandler {
       return { reply: '' };
     }
 
-    // STRICT RULE: Only admin connected to bot can use group commands (.warn, .anti, etc.) in a group!
-    if (ctx.isGroup && GROUP_ONLY_COMMANDS.has(cmd)) {
+    // STRICT RULE: Only admin connected to bot can use moderation/admin group commands (.warn, .kick, .anti, etc.) in a group!
+    // Public group commands (.groupinfo, .gcinfo, .group, .link) can be used by ANY member in the group!
+    if (ctx.isGroup && ADMIN_ONLY_GROUP_COMMANDS.has(cmd)) {
       const isAuthorized = ctx.isOwner || Boolean(ctx.isGroupAdmin);
       if (!isAuthorized) {
-        return { reply: '' }; // Regular members in group get no answer!
+        return { reply: '' }; // Regular members get no answer for admin commands!
       }
     }
 

@@ -1003,11 +1003,10 @@ export class WhatsAppManager {
       const hasCreds = fs.existsSync(credsFile);
 
       // Passive socket check: if socket is live, verify connection is healthy
-      if (this.sock && this.currentStatus.isConnected) {
-        // Socket is open and functioning normally
-      } else if (hasCreds && !this.isConnecting && this.currentStatus.state !== 'awaiting_pairing') {
-        // Disconnected but has valid paired credentials and unexpired license: auto-reconnect 24/7!
-        console.log(`[24/7 Watchdog] Reconnecting WhatsApp session for ${this.userId} to keep bot online 24/7...`);
+      if (this.sock && (this.currentStatus.isConnected || (this.sock as any)?.ws?.readyState === 1 || (this.sock as any)?.user?.id)) {
+        // Socket is open and functioning normally - NEVER reconnect connected users!
+      } else if (hasCreds && !this.isConnecting && !this.sock && this.currentStatus.state !== 'awaiting_pairing') {
+        // Disconnected but has valid paired credentials and unexpired license: auto-reconnect safely
         this.reconnectSocketSafely();
       }
     }, 5000);
@@ -1345,12 +1344,18 @@ export class WhatsAppManager {
     }
 
     // User is NOT expired: Check genuine live Baileys socket state
-    const isLiveConnected = Boolean(this.sock && this.currentStatus.isConnected);
+    const isLiveConnected = Boolean(
+      this.sock &&
+      (this.currentStatus.isConnected ||
+       (this.sock as any)?.user?.id ||
+       (this.sock as any)?.ws?.readyState === 1)
+    );
     if (isLiveConnected) {
       this.reconnectingStartedAt = null;
       this.currentStatus.isConnected = true;
       this.currentStatus.state = 'connected';
       this.currentStatus.pairingStage = 'connected';
+      this.currentStatus.isPaired = true;
       this.currentStatus.pairingCode = undefined;
       this.currentStatus.qrCodeUrl = undefined;
       this.currentStatus.lastError = undefined;
@@ -1369,15 +1374,13 @@ export class WhatsAppManager {
       if (this.isIntentionalClosure) {
         this.currentStatus.isConnected = false;
         this.currentStatus.state = 'disconnected';
-      } else {
-        // Automatically reconnect 24/7 in background (e.g., after Railway restart, new container, or network drop)
-        if (!this.sock && !this.isConnecting && !this.isLicenseExpired()) {
-          this.initSocket().catch((err) => {
-            console.warn(`[Auto-Reconnect ${this.userId}] Note:`, err?.message || err);
-          });
-        }
+      } else if (this.isConnecting) {
         this.currentStatus.isConnected = false;
         this.currentStatus.state = 'connecting';
+      } else {
+        // Paired credentials exist: report stable paired state without mutating or killing sockets
+        this.currentStatus.isConnected = false;
+        this.currentStatus.state = 'disconnected';
       }
     } else if (!this.isConnecting && this.currentStatus.state !== 'awaiting_pairing') {
       this.reconnectingStartedAt = null;
@@ -1513,9 +1516,6 @@ export class WhatsAppManager {
 
   public async ensureRestored(): Promise<boolean> {
     if (this.hasRegisteredCredentials()) {
-      if (!this.sock && !this.isConnecting && !this.isLicenseExpired() && !this.isIntentionalClosure) {
-        this.initSocket().catch((err) => console.warn(`[Auto-Reconnect ${this.userId}] Note:`, err?.message || err));
-      }
       return true;
     }
     if (!this.restorePromise) {
@@ -1547,11 +1547,7 @@ export class WhatsAppManager {
               phone: `+${registeredPhone}`,
             };
             this.currentStatus.pairingStage = 'connected';
-            const licenseVerified = await this.syncLicenseFromFirestore();
-            if (licenseVerified && !this.isLicenseExpired() && !this.sock && !this.isConnecting) {
-              console.log(`[WhatsApp Auth (${this.userId})] Active credentials found. Resuming WhatsApp connection in background...`);
-              this.initSocket().catch((err) => console.warn('Auto-reconnect note for existing creds:', err));
-            }
+            await this.syncLicenseFromFirestore();
           }
         } catch {}
         return true;
@@ -1920,33 +1916,27 @@ export class WhatsAppManager {
   }
 
   public handleReconnectTimeoutExpired(): void {
-    if (this.currentStatus.isConnected) {
-      return;
-    }
     this.reconnectTimeoutTimer = null;
     this.reconnectingStartedAt = null;
+    if (this.currentStatus.isConnected || (this.sock as any)?.ws?.readyState === 1 || (this.sock as any)?.user?.id) {
+      this.currentStatus.isConnected = true;
+      this.currentStatus.state = 'connected';
+      this.currentStatus.pairingStage = 'connected';
+      this.currentStatus.reconnectRemainingSeconds = undefined;
+      return;
+    }
     this.isConnecting = false;
     this.reconnectTimedOut = false;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
-    if (this.sock) {
-      try {
-        (this.sock as any)._isIntentionalClose = true;
-        this.sock.end(undefined);
-      } catch {}
-      this.sock = null;
-    }
-
-    // 🔒 PERMANENT CLOUD LOCK: Do NOT wipe credentials or unlink!
-    // The Railway 1-minute background watchdog will auto-retry connecting in the background.
     this.currentStatus.isConnected = false;
-    this.currentStatus.state = 'connecting';
+    this.currentStatus.state = 'disconnected';
     this.currentStatus.pairingStage = 'connected';
     this.currentStatus.isPaired = true;
     this.currentStatus.reconnectRemainingSeconds = undefined;
-    console.log(`[Baileys Reconnect ${this.userId}] Reconnect pass completed. Retaining permanent credentials & phone lock for background 1-minute Railway retry.`);
+    console.log(`[Baileys Reconnect ${this.userId}] Reconnect window finished. Retaining permanent credentials.`);
   }
 
   public setUnlinkedIdle(): void {
@@ -1990,6 +1980,14 @@ export class WhatsAppManager {
     if (this.sock && this.currentStatus.isConnected) {
       return this.sock;
     }
+    const isLive = Boolean(this.sock && ((this.sock as any).ws?.readyState === 1 || (this.sock as any).user?.id));
+    if (isLive) {
+      this.currentStatus.isConnected = true;
+      this.currentStatus.state = 'connected';
+      this.currentStatus.pairingStage = 'connected';
+      this.currentStatus.isPaired = true;
+      return this.sock;
+    }
     if (this.initPromise) {
       return this.initPromise;
     }
@@ -1999,12 +1997,23 @@ export class WhatsAppManager {
     this.reconnectTimedOut = false;
     this.initPromise = (async () => {
       try {
-        if (this.sock) {
+        if (this.sock && isFreshPairing) {
           try {
             (this.sock as any)._isIntentionalClose = true;
             this.sock.end(undefined);
           } catch {}
           this.sock = null;
+        } else if (this.sock) {
+          const wsState = (this.sock as any).ws?.readyState;
+          if (wsState === 1) {
+            this.currentStatus.isConnected = true;
+            this.currentStatus.state = 'connected';
+            this.currentStatus.isPaired = true;
+            return this.sock;
+          }
+          if (wsState >= 2) {
+            this.sock = null;
+          }
         }
 
         this.ensureAuthDir();
@@ -2927,8 +2936,9 @@ export class WhatsAppManager {
               return;
             }
 
-            // In groups: Group commands require the bot to be an admin in that group
-            if (isGroup && isGroupCmd) {
+            // In groups: Moderation and admin group commands require the bot to be an admin in that group
+            // EXCEPTION PER USER REQUIREMENT: .groupinfo (.gcinfo, .group) can be used by ANY member inside the group once the bot is in the group, regardless of bot admin or member admin status!
+            if (isGroup && isGroupCmd && !isGroupInfoCmd) {
               const isBotAdmin = await this.isBotAdminInGroupById(remoteJid);
               if (!isBotAdmin) {
                 return; // Bot account is not an admin: cannot execute group admin commands
@@ -5130,6 +5140,8 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
 
 export class WhatsAppSessionManager {
   private sessions = new Map<string, WhatsAppManager>();
+  private emailToCanonicalId = new Map<string, string>();
+  private aliasToCanonicalId = new Map<string, string>();
   private baseAuthDir = path.resolve(process.cwd(), '.baileys_auth');
 
   constructor() {
@@ -5137,30 +5149,117 @@ export class WhatsAppSessionManager {
     this.startGlobalOneMinuteSyncWatchdog();
   }
 
+  public resolveCanonicalId(rawId: string = 'default', userEmail: string = ''): string {
+    let clean = (rawId && typeof rawId === 'string') ? rawId.trim() : '';
+    if (clean.startsWith('session_')) {
+      clean = clean.replace(/^session_/, '');
+    }
+    const cleanEmail = (userEmail && typeof userEmail === 'string') ? userEmail.trim().toLowerCase() : '';
+
+    if (this.aliasToCanonicalId.has(clean)) {
+      return this.aliasToCanonicalId.get(clean)!;
+    }
+
+    if (clean.includes('@')) {
+      const fromEmail = this.emailToCanonicalId.get(clean.toLowerCase());
+      if (fromEmail) return fromEmail;
+    }
+
+    if (cleanEmail) {
+      const fromEmail = this.emailToCanonicalId.get(cleanEmail);
+      if (fromEmail) return fromEmail;
+
+      for (const [id, s] of this.sessions.entries()) {
+        if (s.userEmail && s.userEmail.trim().toLowerCase() === cleanEmail) {
+          this.emailToCanonicalId.set(cleanEmail, id);
+          this.aliasToCanonicalId.set(clean, id);
+          return id;
+        }
+      }
+    }
+
+    return clean || (cleanEmail ? cleanEmail : 'default');
+  }
+
   public getSession(userId: string = 'default', userEmail: string = ''): WhatsAppManager {
-    const cleanId = (userId && typeof userId === 'string' && userId.trim()) ? userId.trim() : 'default';
-    let session = this.sessions.get(cleanId);
+    const cleanEmail = (userEmail && typeof userEmail === 'string') ? userEmail.trim().toLowerCase() : '';
+    const canonicalId = this.resolveCanonicalId(userId, cleanEmail);
+
+    let session = this.sessions.get(canonicalId);
     if (!session) {
-      session = new WhatsAppManager(cleanId, userEmail);
-      this.sessions.set(cleanId, session);
-      // Asynchronously restore Firebase auth credentials and sync license from Firestore
+      const rawClean = (userId && typeof userId === 'string') ? userId.trim().replace(/^session_/, '') : '';
+      if (rawClean && this.sessions.has(rawClean)) {
+        session = this.sessions.get(rawClean)!;
+        this.sessions.delete(rawClean);
+        this.sessions.set(canonicalId, session);
+      }
+    }
+
+    if (!session) {
+      session = new WhatsAppManager(canonicalId, cleanEmail);
+      this.sessions.set(canonicalId, session);
       (session as any).restoreAuthFromFirebaseIfMissing().catch(() => {});
       session.syncLicenseFromFirestore().catch(() => {});
-    } else if (userEmail && (!session.userEmail || session.userEmail !== userEmail)) {
-      session.userEmail = userEmail;
+    } else if (cleanEmail && (!session.userEmail || session.userEmail.toLowerCase() !== cleanEmail)) {
+      session.userEmail = cleanEmail;
       session.syncLicenseFromFirestore().catch(() => {});
     }
+
+    const rawClean = (userId && typeof userId === 'string') ? userId.trim().replace(/^session_/, '') : '';
+    if (rawClean) {
+      this.aliasToCanonicalId.set(rawClean, canonicalId);
+      this.aliasToCanonicalId.set(`session_${rawClean}`, canonicalId);
+    }
+    if (cleanEmail) {
+      this.emailToCanonicalId.set(cleanEmail, canonicalId);
+      this.aliasToCanonicalId.set(cleanEmail, canonicalId);
+    }
+    this.aliasToCanonicalId.set(canonicalId, canonicalId);
+    this.aliasToCanonicalId.set(`session_${canonicalId}`, canonicalId);
+
     return session;
   }
 
+  public pruneDuplicateSessions() {
+    const seenEmails = new Map<string, string>();
+    const toDelete: string[] = [];
+
+    for (const [id, session] of this.sessions.entries()) {
+      const email = session.userEmail?.trim().toLowerCase();
+      if (!email) continue;
+
+      if (seenEmails.has(email)) {
+        const existingId = seenEmails.get(email)!;
+        if (id.includes('@') && !existingId.includes('@')) {
+          toDelete.push(id);
+        } else if (!id.includes('@') && existingId.includes('@')) {
+          toDelete.push(existingId);
+          seenEmails.set(email, id);
+        }
+      } else {
+        seenEmails.set(email, id);
+      }
+    }
+
+    for (const dupId of toDelete) {
+      const dupSession = this.sessions.get(dupId);
+      if (dupSession) {
+        console.log(`[Session Manager] Pruning duplicate session instance for ${dupId}`);
+        dupSession.pauseSocket('Pruning duplicate session').catch(() => {});
+        dupSession.dispose();
+        this.sessions.delete(dupId);
+      }
+    }
+  }
+
   public async logoutSession(userId: string = 'default', unlinkPermanent = true): Promise<void> {
-    const cleanId = (userId && typeof userId === 'string' && userId.trim()) ? userId.trim() : 'default';
-    const session = this.sessions.get(cleanId);
+    const canonicalId = this.resolveCanonicalId(userId);
+    const session = this.sessions.get(canonicalId);
     if (session) {
       if (unlinkPermanent) {
         await session.logout(true);
         session.dispose();
-        this.sessions.delete(cleanId);
+        this.sessions.delete(canonicalId);
       } else {
         await session.pauseSocket('User paused bot');
       }
@@ -5168,8 +5267,8 @@ export class WhatsAppSessionManager {
   }
 
   public async pauseSession(userId: string = 'default'): Promise<void> {
-    const cleanId = (userId && typeof userId === 'string' && userId.trim()) ? userId.trim() : 'default';
-    const session = this.sessions.get(cleanId);
+    const canonicalId = this.resolveCanonicalId(userId);
+    const session = this.sessions.get(canonicalId);
     if (session) {
       await session.pauseSocket('User paused bot');
     }
@@ -5184,13 +5283,16 @@ export class WhatsAppSessionManager {
       console.log('[Auto-Restore] Scanning all accounts to restore sessions for users with valid licenses...');
       const candidateUsers = new Map<string, { email?: string; linkedPhone?: string }>();
 
-      // 1. Scan local session folders on disk
+      // 1. Scan local session folders on disk - only folders that have creds.json
       if (fs.existsSync(this.baseAuthDir)) {
         const items = fs.readdirSync(this.baseAuthDir, { withFileTypes: true });
         for (const item of items) {
           if (item.isDirectory() && item.name.startsWith('session_')) {
             const rawId = item.name.replace(/^session_/, '');
-            candidateUsers.set(rawId, candidateUsers.get(rawId) || {});
+            const credsPath = path.join(this.baseAuthDir, item.name, 'creds.json');
+            if (fs.existsSync(credsPath)) {
+              candidateUsers.set(rawId, candidateUsers.get(rawId) || {});
+            }
           }
         }
       }
@@ -5210,24 +5312,36 @@ export class WhatsAppSessionManager {
             if (d?.unlinked === true || (!d?.phoneNumber && !d?.credsData)) {
               continue;
             }
-            let rawId = d?.userId || '';
-            if (!rawId) {
+            const cleanEmail = typeof d?.email === 'string' ? d.email.trim().toLowerCase() : '';
+            let canonicalId = d?.userId || '';
+            if (!canonicalId) {
               if (docSnap.id.startsWith('session_')) {
-                rawId = docSnap.id.replace(/^session_/, '');
+                canonicalId = docSnap.id.replace(/^session_/, '');
               } else if (docSnap.id === 'default') {
-                rawId = 'default';
-              } else if (docSnap.id.includes('@')) {
-                rawId = docSnap.id;
+                canonicalId = 'default';
+              } else if (!docSnap.id.includes('@')) {
+                canonicalId = docSnap.id;
               }
             }
-            if (rawId) {
-              candidateUsers.set(rawId, {
-                email: d?.email || candidateUsers.get(rawId)?.email || '',
-                linkedPhone: d?.phoneNumber || candidateUsers.get(rawId)?.linkedPhone,
+            if (cleanEmail && canonicalId) {
+              this.emailToCanonicalId.set(cleanEmail, canonicalId);
+              this.aliasToCanonicalId.set(cleanEmail, canonicalId);
+            }
+            if (!canonicalId && cleanEmail) {
+              canonicalId = this.emailToCanonicalId.get(cleanEmail) || cleanEmail;
+            }
+            if (canonicalId) {
+              candidateUsers.set(canonicalId, {
+                email: cleanEmail || candidateUsers.get(canonicalId)?.email || '',
+                linkedPhone: d?.phoneNumber || candidateUsers.get(canonicalId)?.linkedPhone,
               });
             }
           }
         } catch (err: any) {
+          reportFirestoreError(err);
+          console.warn('[Auto-Restore] Firestore column scan note:', err?.message || err);
+        }
+      }
           reportFirestoreError(err);
           console.warn('[Auto-Restore] Firestore column scan note:', err?.message || err);
         }
