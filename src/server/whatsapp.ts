@@ -1981,7 +1981,7 @@ export class WhatsAppManager {
       return this.sock;
     }
     const isLive = Boolean(this.sock && ((this.sock as any).ws?.readyState === 1 || (this.sock as any).user?.id));
-    if (isLive) {
+    if (isLive && this.sock) {
       this.currentStatus.isConnected = true;
       this.currentStatus.state = 'connected';
       this.currentStatus.pairingStage = 'connected';
@@ -5338,10 +5338,6 @@ export class WhatsAppSessionManager {
             }
           }
         } catch (err: any) {
-          reportFirestoreError(err);
-          console.warn('[Auto-Restore] Firestore column scan note:', err?.message || err);
-        }
-      }
           reportFirestoreError(err);
           console.warn('[Auto-Restore] Firestore column scan note:', err?.message || err);
         }
