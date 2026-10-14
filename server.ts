@@ -1032,7 +1032,8 @@ async function startServer() {
     try {
       const session = getSessionForReq(req);
       const status = session.getStatus();
-      if (!status.isConnected) {
+      const isLive = status.isConnected || session.isSocketActive();
+      if (!isLive && !session.hasRegisteredCredentials()) {
         return res.json({
           success: true,
           connected: false,
@@ -1053,7 +1054,8 @@ async function startServer() {
     try {
       const session = getSessionForReq(req);
       const status = session.getStatus();
-      if (!status.isConnected) {
+      const isLive = status.isConnected || session.isSocketActive();
+      if (!isLive && !session.hasRegisteredCredentials()) {
         return res.json({
           success: true,
           connected: false,

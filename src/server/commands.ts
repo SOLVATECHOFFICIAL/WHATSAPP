@@ -1075,7 +1075,11 @@ _Any member can use or share this link to invite new members to the group!_
 
       if (ctx.sock) {
         try {
-          const meta = await ctx.sock.groupMetadata(ctx.groupJid);
+          const meta = await Promise.race([
+            ctx.sock.groupMetadata(ctx.groupJid),
+            new Promise<any>((_, reject) => setTimeout(() => reject(new Error('groupMetadata timeout')), 4500)),
+          ]).catch(() => null);
+
           if (meta) {
             groupName = meta.subject || groupName;
             groupDesc = meta.desc || groupDesc;
@@ -1112,7 +1116,10 @@ _Any member can use or share this link to invite new members to the group!_
         }
 
         try {
-          const pic = await ctx.sock.profilePictureUrl(ctx.groupJid, 'image');
+          const pic = await Promise.race([
+            ctx.sock.profilePictureUrl(ctx.groupJid, 'image'),
+            new Promise<any>((_, reject) => setTimeout(() => reject(new Error('profilePictureUrl timeout')), 3000)),
+          ]).catch(() => undefined);
           if (pic) {
             groupPicUrl = pic;
           }

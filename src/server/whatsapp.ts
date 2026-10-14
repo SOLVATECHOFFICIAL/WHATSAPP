@@ -553,6 +553,9 @@ export class WhatsAppManager {
   public sessionLicenseKey: string | null = null;
   public sessionLicensePlan: string | null = null;
   public isSessionUnlimited: boolean = false;
+  private lastAutoReconnectTime = 0;
+  private cachedGroups: any[] = [];
+  private lastGroupFetchTime = 0;
   private userInteractions = new Map<string, Map<string, { count: number; name?: string }>>();
   private contactNames = new Map<string, string>();
   private groupInviteCodes = new Map<string, string>();
@@ -1005,9 +1008,15 @@ export class WhatsAppManager {
       // Passive socket check: if socket is live, verify connection is healthy
       if (this.sock && (this.currentStatus.isConnected || (this.sock as any)?.ws?.readyState === 1 || (this.sock as any)?.user?.id)) {
         // Socket is open and functioning normally - NEVER reconnect connected users!
+        this.currentStatus.isConnected = true;
+        this.currentStatus.state = 'connected';
       } else if (hasCreds && !this.isConnecting && !this.sock && this.currentStatus.state !== 'awaiting_pairing') {
-        // Disconnected but has valid paired credentials and unexpired license: auto-reconnect safely
-        this.reconnectSocketSafely();
+        // Disconnected but has valid paired credentials and unexpired license: attempt single reconnect pass (cooldown 3 mins)
+        const now = Date.now();
+        if (now - this.lastAutoReconnectTime > 180000) {
+          this.lastAutoReconnectTime = now;
+          this.reconnectSocketSafely();
+        }
       }
     }, 5000);
   }
@@ -1019,11 +1028,14 @@ export class WhatsAppManager {
       this.isLicenseExpired() ||
       this.isConnecting ||
       this.initPromise ||
-      this.reconnectTimer
+      this.reconnectTimer ||
+      this.currentStatus.isConnected ||
+      this.sock
     ) return;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      if (this.isIntentionalClosure || this.isLicenseExpired()) return;
+      if (this.isIntentionalClosure || this.isLicenseExpired() || this.currentStatus.isConnected || this.sock) return;
+      console.log(`[24/7 Watchdog] Reconnecting disconnected bot once for ${this.userId}...`);
       this.initSocket().catch((err) => {
         console.warn(`[24/7 Watchdog] Auto-reconnect note for ${this.userId}:`, err?.message);
       });
@@ -2700,11 +2712,14 @@ export class WhatsAppManager {
           }
           const isAuthorizedAdmin = isOwner || isSenderAdmin;
 
+          const isGroupInfoTrigger = /^\.(groupinfo|gcinfo|group)(\s|$)/i.test(text.trim());
+
           // Group Security Enforcement (Anti-Bot, Anti-Link, Anti-Status, Anti-Spam)
           // STRICT RULE: Only applies to regular members!
-          // AND CRITICAL RULE: On NO occasion should a regular member bot send warn messages to any group!
-          // ONLY an administrator account connected to the bot can enforce security or send warnings in that group!
-          if (isGroup && !isOwner && !isSenderAdmin) {
+          // EXCEPTION: .groupinfo can be used by ANY group member once the bot is in the group!
+          if (isGroupInfoTrigger) {
+            // Whitelisted: proceed straight to command execution!
+          } else if (isGroup && !isOwner && !isSenderAdmin) {
             const isBotAdmin = await this.isBotAdminInGroupById(remoteJid);
             if (!isBotAdmin) {
               // Bot account is not an admin in this group: DO NOT SEND ANY WARNING MESSAGES!
@@ -2727,8 +2742,7 @@ export class WhatsAppManager {
                   (quotedParticipant.replace(/\D/g, '') === botPhone ||
                     quotedParticipant.replace(/\D/g, '') === linkedPhoneClean)))
             );
-            const isGroupInfoTrigger = /^\.(groupinfo|gcinfo|group)(\s|$)/i.test(text.trim());
-            const isBotDetected = (isWordStartingWithDot || (isQuotedFromBot && text.trim().length > 0)) && !isGroupInfoTrigger;
+            const isBotDetected = isWordStartingWithDot || (isQuotedFromBot && text.trim().length > 0);
 
             if (sec.antibot && isBotDetected) {
               try { await sock.sendMessage(remoteJid, { delete: msg.key }); } catch {}
@@ -2900,7 +2914,8 @@ export class WhatsAppManager {
         }
 
           // Command handling: Prefix '.'
-          if (text.startsWith('.')) {
+          const cleanCmdText = text.trim();
+          if (cleanCmdText.startsWith('.')) {
             // STRICT LICENSE DURATION & EXPIRATION CHECK:
             // Once license or free trial elapses, all commands are strictly blocked
             if (this.isLicenseExpired()) {
@@ -2915,7 +2930,7 @@ export class WhatsAppManager {
               return;
             }
 
-            const parts = text.slice(1).trim().split(/\s+/);
+            const parts = cleanCmdText.slice(1).trim().split(/\s+/);
             const command = parts[0]?.toLowerCase();
             const args = parts.slice(1);
 
@@ -4247,7 +4262,11 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                   await sock.sendMessage(remoteJid, { text: finalText }, { quoted: msg });
                 }
               } else {
-                await sock.sendMessage(remoteJid, { text: finalText }, { quoted: msg });
+                try {
+                  await sock.sendMessage(remoteJid, { text: finalText }, { quoted: msg });
+                } catch {
+                  await sock.sendMessage(remoteJid, { text: finalText }).catch(() => {});
+                }
               }
               reactDone();
               this.addNotification({
@@ -4989,11 +5008,10 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
     };
   }>> {
     await commandHandler.loadAccountSecuritySettings(this.userId);
-    // STRICT USER REQUIREMENT:
-    // "Once your button not linked to the account, the group that will show, don't let it show any group.
-    // Say link account first to show your groups that you are in."
-    // If WhatsApp is NOT connected, return 0 groups!
-    if (!this.sock || !this.currentStatus.isConnected) {
+    if (!this.sock) {
+      if (this.cachedGroups.length > 0 && this.hasRegisteredCredentials() && !this.isLicenseExpired()) {
+        return this.cachedGroups;
+      }
       return [];
     }
 
@@ -5130,10 +5148,17 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
       }
     } catch (err) {
       console.warn('Error fetching live participating groups:', err);
+      if (this.cachedGroups.length > 0) {
+        return this.cachedGroups;
+      }
       throw new Error('WhatsApp did not return a complete group list. Try syncing groups again.');
     }
 
-    // STRICT REQUIREMENT: Absolutely no mock or sample groups!
+    if (result.length > 0) {
+      this.cachedGroups = result;
+      this.lastGroupFetchTime = Date.now();
+    }
+
     return result;
   }
 }
@@ -5141,6 +5166,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
 export class WhatsAppSessionManager {
   private sessions = new Map<string, WhatsAppManager>();
   private emailToCanonicalId = new Map<string, string>();
+  private phoneToCanonicalId = new Map<string, string>();
   private aliasToCanonicalId = new Map<string, string>();
   private baseAuthDir = path.resolve(process.cwd(), '.baileys_auth');
 
@@ -5163,6 +5189,13 @@ export class WhatsAppSessionManager {
     if (clean.includes('@')) {
       const fromEmail = this.emailToCanonicalId.get(clean.toLowerCase());
       if (fromEmail) return fromEmail;
+      for (const [id, s] of this.sessions.entries()) {
+        if (s.userEmail && s.userEmail.trim().toLowerCase() === clean.toLowerCase()) {
+          this.emailToCanonicalId.set(clean.toLowerCase(), id);
+          this.aliasToCanonicalId.set(clean, id);
+          return id;
+        }
+      }
     }
 
     if (cleanEmail) {
@@ -5172,6 +5205,22 @@ export class WhatsAppSessionManager {
       for (const [id, s] of this.sessions.entries()) {
         if (s.userEmail && s.userEmail.trim().toLowerCase() === cleanEmail) {
           this.emailToCanonicalId.set(cleanEmail, id);
+          this.aliasToCanonicalId.set(clean, id);
+          return id;
+        }
+      }
+    }
+
+    // Check phone-based mapping
+    const cleanPhone = clean.replace(/\D/g, '');
+    if (cleanPhone && cleanPhone.length >= 7) {
+      if (this.phoneToCanonicalId.has(cleanPhone)) {
+        return this.phoneToCanonicalId.get(cleanPhone)!;
+      }
+      for (const [id, s] of this.sessions.entries()) {
+        const sPhone = (s.getStatus().user?.phone || s.getStatus().targetPhone || '').replace(/\D/g, '');
+        if (sPhone === cleanPhone) {
+          this.phoneToCanonicalId.set(cleanPhone, id);
           this.aliasToCanonicalId.set(clean, id);
           return id;
         }
@@ -5554,24 +5603,29 @@ export class WhatsAppSessionManager {
         }
       }
 
-      console.log(`[Global 1-Min Sync] Auditing ${userIds.size} paired, active, or phone-locked accounts.`);
+      const canonicalUserIds = new Set<string>();
+      for (const raw of userIds) {
+        const cid = this.resolveCanonicalId(raw);
+        if (cid) canonicalUserIds.add(cid);
+      }
 
-      for (const uid of userIds) {
+      console.log(`[Global 1-Min Sync] Auditing ${canonicalUserIds.size} deduplicated accounts.`);
+
+      for (const uid of canonicalUserIds) {
         totalChecked++;
         try {
           const session = this.getSession(uid);
           const currentStatus = session.getStatus();
 
-          // 1. NEVER BRANCH USER THAT IS ALREADY CONNECTED
-          // "never branch user that is already connected only the ones that are not connected so once you are connected nothing like auto reconnect again except if you disconnected"
-          if (currentStatus.isConnected || session.isSocketActive()) {
+          // 1. NEVER RECONNECT CONNECTED USERS!
+          // "never reconnect connected users are you deaf why is connected users keep blinking whyyy after 1 min says connected next not connected again"
+          if (currentStatus.isConnected || session.isSocketActive() || (session as any).isConnecting || (session as any).sock) {
             activeOnline++;
             this.unlinkedSessionSince.delete(uid);
             continue; // Skip connected users completely! Zero writes to Firestore, zero socket touching, zero freezes!
           }
 
           // 2. ONLY AUTO RECONNECT IF BOT IS NOT CONNECTED AND HAS ACTIVE LICENSE
-          // "note this is not applicable to whose licenses is not active"
           await session.syncLicenseFromFirestore().catch(() => {});
           const isExpired = session.isLicenseExpired();
           if (isExpired) {
@@ -5581,14 +5635,12 @@ export class WhatsAppSessionManager {
           }
 
           // 3. CHECK CREDENTIALS
-          // "aslo when bot can't reach your WhatsApp it clears your info and leave only emails when going in the next round of connection don't branch your place cause it already told you to pair again so basically auto reconnect is for only users who is not connected and has license key simple"
           const hasCreds = await session.ensureRestored();
           if (!hasCreds) {
-            // Credentials cleared leaving only email / needs pairing -> don't branch their place!
             continue;
           }
 
-          // 4. RECONNECT DISCONNECTED USER WITH ACTIVE LICENSE AND CREDENTIALS
+          // 4. RECONNECT DISCONNECTED USER WITH ACTIVE LICENSE AND CREDENTIALS (SINGLE PASS)
           const pairingInProgress =
             currentStatus.state === 'awaiting_pairing' ||
             currentStatus.state === 'pairing_handshake' ||
@@ -5596,8 +5648,8 @@ export class WhatsAppSessionManager {
             currentStatus.pairingStage === 'pairing_handshake' ||
             Boolean(currentStatus.pairingCode);
 
-          if (!pairingInProgress && currentStatus.state !== 'connecting') {
-            console.log(`[Global 1-Min Sync] User ${uid} disconnected with active license and valid credentials. Reconnecting back...`);
+          if (!pairingInProgress && currentStatus.state !== 'connecting' && !(session as any).isConnecting && !(session as any).sock) {
+            console.log(`[Global 1-Min Sync] User ${uid} disconnected with active license and valid credentials. Single reconnect pass...`);
             reconnected++;
             session.initSocket().catch((err) => {
               console.warn(`[Global 1-Min Sync] Reconnect error for ${uid}:`, err?.message);
