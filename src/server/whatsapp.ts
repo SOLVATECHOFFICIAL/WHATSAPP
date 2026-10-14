@@ -1285,22 +1285,17 @@ export class WhatsAppManager {
       } catch {}
     }
 
-    // A phone is paired if registered companion credentials exist on disk or user object/targetPhone is set
-    const isPaired = hasLocalCreds || Boolean(this.currentStatus.user?.phone) || Boolean(this.currentStatus.targetPhone);
+    // A phone is genuinely paired ONLY if registered companion credentials exist on disk or live connection confirms it
+    const isPaired = hasLocalCreds || Boolean(this.currentStatus.isConnected && this.currentStatus.user?.phone);
     this.currentStatus.isPaired = isPaired;
-    if (registeredPhone && (!this.currentStatus.user || !this.currentStatus.user.phone)) {
+    if (registeredPhone) {
       this.currentStatus.user = {
         id: registeredUserJid || `${registeredPhone}@s.whatsapp.net`,
         name: registeredName,
         phone: `+${registeredPhone}`,
       };
-    } else if (!this.currentStatus.user?.phone && this.currentStatus.targetPhone) {
-      const cleanP = this.currentStatus.targetPhone.replace(/\D/g, '');
-      this.currentStatus.user = {
-        id: `${cleanP}@s.whatsapp.net`,
-        name: 'SOLVATECH Linked Phone',
-        phone: this.currentStatus.targetPhone.startsWith('+') ? this.currentStatus.targetPhone : `+${this.currentStatus.targetPhone}`,
-      };
+    } else if (!isPaired && !this.currentStatus.isConnected) {
+      this.currentStatus.user = undefined;
     }
 
     // Re-check trial store if session license is currently expired or uninitialized
@@ -1936,16 +1931,16 @@ export class WhatsAppManager {
           },
           logger: pinoLogger,
           printQRInTerminal: false,
-          browser: Browsers.ubuntu('Chrome'),
+          browser: Browsers.macOS('Desktop'),
           connectTimeoutMs: 60000,
           defaultQueryTimeoutMs: 60000,
-          keepAliveIntervalMs: 15000,
-          retryRequestDelayMs: 250,
+          keepAliveIntervalMs: 25000,
+          retryRequestDelayMs: 500,
           maxMsgRetryCount: 5,
           generateHighQualityLinkPreview: true,
           getUrlInfo: (text: string) => getUrlInfo(text),
           syncFullHistory: false,
-          markOnlineOnConnect: false,
+          markOnlineOnConnect: true,
           getMessage: async (key: any) => {
             if (key.id && this.messageCache.has(key.id)) {
               const cached = this.messageCache.get(key.id);
@@ -2118,15 +2113,18 @@ export class WhatsAppManager {
                   });
                   if (!this.isLicenseExpired()) {
                     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-                    this.reconnectTimer = setTimeout(() => {
+                    this.reconnectTimer = setTimeout(async () => {
+                      await this.credentialsSavePromise.catch(() => {});
+                      await new Promise((r) => setTimeout(r, 400));
                       this.initSocket().catch((err) => {
                         console.warn('Auto-restart note:', err);
                       });
-                    }, 800);
+                    }, 500);
                   }
                 } else {
                   console.log(`[Baileys Connection] Connection closed (code: ${statusCode || 'unknown'}). Keeping session and credentials intact, auto-reconnecting 24/7 in background...`);
-                  if (!this.isLicenseExpired() && (hasLocalCreds || isAwaitingPairing)) {
+                  // Only auto-reconnect if already paired. DO NOT reconnect if still awaiting pairing code entry, as reconnecting creates a new socket with a different key!
+                  if (!this.isLicenseExpired() && hasLocalCreds) {
                     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
                     this.reconnectTimer = setTimeout(() => {
                       this.initSocket().catch((err) => {

@@ -1593,7 +1593,7 @@ export default function App() {
               )}
 
               {/* WhatsApp Reconnecting Card (e.g. after Railway restart) */}
-              {!status.isConnected && (status.isPaired || status.user?.phone) && status.state === 'connecting' && (
+              {!status.isConnected && status.isPaired && !status.pairingCode && status.pairingStage !== 'code_generated' && status.state === 'connecting' && (
                 <div className="p-4 rounded-2xl bg-gradient-to-r from-emerald-950/40 via-slate-900 to-teal-950/30 border border-emerald-500/50 space-y-3 shadow-xl">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2.5">
@@ -1651,7 +1651,7 @@ export default function App() {
               )}
 
               {/* WhatsApp Paired Device Banner when Paused (License Expired or Paused) */}
-              {!status.isConnected && (status.isPaired || status.user?.phone) && status.state !== 'connecting' && (
+              {!status.isConnected && status.isPaired && !status.pairingCode && status.pairingStage !== 'code_generated' && status.state !== 'connecting' && (
                 <div className="p-4 rounded-2xl bg-amber-950/30 border border-amber-500/40 space-y-3">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
