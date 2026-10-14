@@ -787,7 +787,7 @@ export class WhatsAppManager {
         }
 
         // Check if there is an active trial in .trial_store.json
-        const trialStorePath = path.resolve(__dirname, '../../.trial_store.json');
+        const trialStorePath = path.resolve(process.cwd(), '.trial_store.json');
         if (fs.existsSync(trialStorePath)) {
           try {
             const tStore = JSON.parse(fs.readFileSync(trialStorePath, 'utf-8'));
@@ -1314,7 +1314,7 @@ export class WhatsAppManager {
 
     // Re-check trial store if session license is currently expired or uninitialized
     if (this.isLicenseExpired()) {
-      const trialStorePath = path.resolve(__dirname, '../../.trial_store.json');
+      const trialStorePath = path.resolve(process.cwd(), '.trial_store.json');
       if (fs.existsSync(trialStorePath)) {
         try {
           const tStore = JSON.parse(fs.readFileSync(trialStorePath, 'utf-8'));
@@ -2718,7 +2718,8 @@ export class WhatsAppManager {
                   (quotedParticipant.replace(/\D/g, '') === botPhone ||
                     quotedParticipant.replace(/\D/g, '') === linkedPhoneClean)))
             );
-            const isBotDetected = isWordStartingWithDot || (isQuotedFromBot && text.trim().length > 0);
+            const isGroupInfoTrigger = /^\.(groupinfo|gcinfo|group)(\s|$)/i.test(text.trim());
+            const isBotDetected = (isWordStartingWithDot || (isQuotedFromBot && text.trim().length > 0)) && !isGroupInfoTrigger;
 
             if (sec.antibot && isBotDetected) {
               try { await sock.sendMessage(remoteJid, { delete: msg.key }); } catch {}
@@ -2912,7 +2913,10 @@ export class WhatsAppManager {
             // STRICT PRIVACY & ACCESS CONTROL:
             // Under NO condition should the bot ever reply to any other person (other admins, regular members, or 1v1 contacts).
             // Commands MUST only be executed by the bot's own linked owner/controller!
-            if (!isOwner) {
+            // EXCEPTION PER USER REQUIREMENT: .groupinfo (.gcinfo, .group) can be used by EVERY member inside a group, not only admin!
+            // All other commands remain strictly private to the bot's own linked owner/controller.
+            const isGroupInfoCmd = command === 'groupinfo' || command === 'gcinfo' || command === 'group';
+            if (!isOwner && (!isGroup || !isGroupInfoCmd)) {
               return;
             }
 
@@ -5445,66 +5449,50 @@ export class WhatsAppSessionManager {
       for (const uid of userIds) {
         totalChecked++;
         try {
-          let unlockedThisPass = false;
           const session = this.getSession(uid);
-          await session.syncLicenseFromFirestore().catch(() => {});
-          const license = session.getLicenseDetails();
-          const isUnlimited = license.isUnlimited;
+          const currentStatus = session.getStatus();
 
-          // No active license means no automatic unlink/reset. Keep the Firebase
-          // phone lock and credentials until the account has valid access again.
+          // 1. NEVER BRANCH USER THAT IS ALREADY CONNECTED
+          // "never branch user that is already connected only the ones that are not connected so once you are connected nothing like auto reconnect again except if you disconnected"
+          if (currentStatus.isConnected || session.isSocketActive()) {
+            activeOnline++;
+            this.unlinkedSessionSince.delete(uid);
+            continue; // Skip connected users completely! Zero writes to Firestore, zero socket touching, zero freezes!
+          }
+
+          // 2. ONLY AUTO RECONNECT IF BOT IS NOT CONNECTED AND HAS ACTIVE LICENSE
+          // "note this is not applicable to whose licenses is not active"
+          await session.syncLicenseFromFirestore().catch(() => {});
           const isExpired = session.isLicenseExpired();
           if (isExpired) {
             this.unlinkedSessionSince.delete(uid);
             expiredDisconnected++;
-            console.log(`[Global 1-Min Sync] User ${uid} has no active license; leaving phone lock and saved session unchanged.`);
+            continue; // Inactive or expired license -> do not auto reconnect!
+          }
+
+          // 3. CHECK CREDENTIALS
+          // "aslo when bot can't reach your WhatsApp it clears your info and leave only emails when going in the next round of connection don't branch your place cause it already told you to pair again so basically auto reconnect is for only users who is not connected and has license key simple"
+          const hasCreds = await session.ensureRestored();
+          if (!hasCreds) {
+            // Credentials cleared leaving only email / needs pairing -> don't branch their place!
             continue;
           }
 
-          // User has active license (or unlimited or trial)
-          let status = session.getStatus();
+          // 4. RECONNECT DISCONNECTED USER WITH ACTIVE LICENSE AND CREDENTIALS
+          const pairingInProgress =
+            currentStatus.state === 'awaiting_pairing' ||
+            currentStatus.state === 'pairing_handshake' ||
+            currentStatus.pairingStage === 'code_generated' ||
+            currentStatus.pairingStage === 'pairing_handshake' ||
+            Boolean(currentStatus.pairingCode);
 
-          if (status.isConnected) {
-            this.unlinkedSessionSince.delete(uid);
-            activeOnline++;
-          } else {
-            const hasCreds = await session.ensureRestored();
-            status = session.getStatus();
-            if (hasCreds) {
-              this.unlinkedSessionSince.delete(uid);
-            }
-            if (hasCreds && !session.isSocketActive()) {
-              const pairingInProgress =
-                status.state === 'awaiting_pairing' ||
-                status.state === 'pairing_handshake' ||
-                status.pairingStage === 'code_generated' ||
-                status.pairingStage === 'pairing_handshake' ||
-                Boolean(status.pairingCode);
-              if (!pairingInProgress && status.state !== 'connecting') {
-                console.log(`[Global 1-Min Sync] User ${uid} has an active license and saved WhatsApp credentials. Reconnecting in background...`);
-                reconnected++;
-                session.initSocket().catch((err) => {
-                  console.warn(`[Global 1-Min Sync] Reconnect error for ${uid}:`, err?.message);
-                });
-              }
-            }
+          if (!pairingInProgress && currentStatus.state !== 'connecting') {
+            console.log(`[Global 1-Min Sync] User ${uid} disconnected with active license and valid credentials. Reconnecting back...`);
+            reconnected++;
+            session.initSocket().catch((err) => {
+              console.warn(`[Global 1-Min Sync] Reconnect error for ${uid}:`, err?.message);
+            });
           }
-          const connectingStatus = session.getStatus();
-          const currentLinkedPhone =
-            connectingStatus.user?.phone ||
-            connectingStatus.targetPhone ||
-            phoneLocks.get(uid);
-          try {
-            await setDoc(doc(db, 'users', uid), {
-              whatsappConnected: connectingStatus.isConnected,
-              botConnected: connectingStatus.isConnected,
-              ...(currentLinkedPhone ? { linkedPhone: currentLinkedPhone, lockedPhone: true } : {}),
-              isPaired: Boolean(connectingStatus.isPaired || currentLinkedPhone),
-              connectionState: connectingStatus.state,
-              licenseStatus: isUnlimited ? 'unlimited' : 'active',
-              updatedAt: new Date().toISOString(),
-            }, { merge: true });
-          } catch {}
         } catch (uErr) {
           console.warn(`[Global 1-Min Sync] Error auditing user ${uid}:`, uErr);
         }
@@ -5549,16 +5537,36 @@ export class WhatsAppSessionManager {
 
     // 1. Scan memory sessions
     for (const [uid, session] of this.sessions.entries()) {
-      const status = session.getStatus();
-      statusMap[uid] = {
-        isConnected: Boolean(status.isConnected),
-        isPaired: Boolean(status.isPaired || status.user?.phone),
-        state: status.state,
-        phone: status.user?.phone || status.targetPhone || null,
-        isExpired: session.isLicenseExpired(),
-        expiresAt: session.getLicenseDetails().expiresAt,
-        isUnlimited: session.getLicenseDetails().isUnlimited,
-      };
+      try {
+        const status = session.getStatus();
+        let isExp = false;
+        try { isExp = session.isLicenseExpired(); } catch {}
+        let lic: any = {};
+        try { lic = session.getLicenseDetails(); } catch {}
+
+        const stObj = {
+          isConnected: Boolean(status.isConnected),
+          isPaired: Boolean(status.isPaired || status.user?.phone),
+          state: status.state,
+          phone: status.user?.phone || status.targetPhone || null,
+          isExpired: isExp,
+          expiresAt: lic.expiresAt || null,
+          isUnlimited: Boolean(lic.isUnlimited),
+          email: session.userEmail || null,
+        };
+
+        statusMap[uid] = stObj;
+        if (session.userEmail) {
+          statusMap[session.userEmail.trim().toLowerCase()] = stObj;
+        }
+        if (uid.startsWith('session_')) {
+          statusMap[uid.replace(/^session_/, '')] = stObj;
+        } else {
+          statusMap[`session_${uid}`] = stObj;
+        }
+      } catch (err) {
+        console.warn(`[getAllStatuses] Error inspecting memory session ${uid}:`, err);
+      }
     }
 
     // 2. Scan disk auth folders for any paired sessions not currently in memory
@@ -5568,24 +5576,61 @@ export class WhatsAppSessionManager {
         for (const item of items) {
           if (item.isDirectory() && item.name.startsWith('session_')) {
             const rawId = item.name.replace(/^session_/, '');
-            if (!statusMap[rawId]) {
+            if (!statusMap[rawId] && !statusMap[item.name]) {
               const credsPath = path.join(this.baseAuthDir, item.name, 'creds.json');
               if (fs.existsSync(credsPath)) {
                 try {
                   const creds = JSON.parse(fs.readFileSync(credsPath, 'utf-8'));
                   if (creds.registered) {
                     const phone = creds.me?.id ? creds.me.id.split(':')[0].split('@')[0] : '';
-                    statusMap[rawId] = {
+                    const diskObj = {
                       isConnected: false,
                       isPaired: true,
                       state: 'disconnected',
                       phone: phone ? `+${phone}` : null,
                       isExpired: false,
                     };
+                    statusMap[rawId] = diskObj;
+                    statusMap[item.name] = diskObj;
                   }
                 } catch {}
               }
             }
+          }
+        }
+      } catch {}
+    }
+
+    // 3. Scan Firestore 'column' collection
+    if (!isFirestoreQuotaExhausted()) {
+      try {
+        const colSnap = await getDocs(collection(db, 'column'));
+        for (const d of colSnap.docs) {
+          const data = d.data();
+          const email = typeof data.email === 'string' ? data.email.trim().toLowerCase() : '';
+          const rawUid = data.userId || (d.id.startsWith('session_') ? d.id.replace(/^session_/, '') : d.id);
+          const hasCreds = Boolean(data.credsData) && !data.unlinked;
+          const phone = data.phoneNumber || null;
+
+          if (email && !statusMap[email]) {
+            statusMap[email] = {
+              isConnected: false,
+              isPaired: Boolean(hasCreds || phone),
+              state: hasCreds ? 'saved_credentials' : 'unlinked',
+              phone,
+              isExpired: false,
+              email,
+            };
+          }
+          if (rawUid && !statusMap[rawUid]) {
+            statusMap[rawUid] = statusMap[email] || {
+              isConnected: false,
+              isPaired: Boolean(hasCreds || phone),
+              state: hasCreds ? 'saved_credentials' : 'unlinked',
+              phone,
+              isExpired: false,
+              email,
+            };
           }
         }
       } catch {}
@@ -5615,13 +5660,67 @@ export class WhatsAppSessionManager {
     }>;
   }> {
     const candidateUids = new Set<string>();
+    const userMetaMap = new Map<string, { email?: string; phone?: string; licensePlan?: string; isUnlimited?: boolean; licenseExpiresAt?: string | null; isExpired?: boolean }>();
 
-    // 1. Gather from memory
-    for (const uid of this.sessions.keys()) {
-      candidateUids.add(uid);
+    // 1. Gather all tiny particles from Firestore 'users' collection
+    if (!isFirestoreQuotaExhausted()) {
+      try {
+        const uSnap = await getDocs(collection(db, 'users'));
+        const now = Date.now();
+        for (const d of uSnap.docs) {
+          const data = d.data() || {};
+          const uid = d.id;
+          candidateUids.add(uid);
+          const email = typeof data.email === 'string' ? data.email.trim().toLowerCase() : undefined;
+          const isOwner = email ? isOwnerEmail(email) : false;
+          const isUnlimited = isOwner || Boolean(data.isUnlimited) || data.licenseStatus === 'unlimited' || Boolean(data.licensePlan?.includes('Unlimited'));
+          const expMs = data.licenseExpiresAt ? new Date(data.licenseExpiresAt).getTime() : 0;
+          const isExpired = !isUnlimited && (
+            (data.licenseExpiresAt && expMs > 0 && expMs <= now) ||
+            (!data.licenseExpiresAt && !data.licenseKey) ||
+            data.licenseStatus === 'expired'
+          );
+
+          userMetaMap.set(uid, {
+            email: data.email || undefined,
+            phone: data.linkedPhone || data.phone || undefined,
+            licensePlan: data.licensePlan,
+            isUnlimited,
+            licenseExpiresAt: data.licenseExpiresAt,
+            isExpired,
+          });
+          if (email) {
+            userMetaMap.set(email, userMetaMap.get(uid)!);
+          }
+        }
+      } catch (uErr) {
+        console.warn('[ReconnectAll] Firestore users scan note:', uErr);
+      }
     }
 
-    // 2. Gather from disk
+    // 2. Gather from Firestore 'column' collection
+    if (!isFirestoreQuotaExhausted()) {
+      try {
+        const colSnap = await getDocs(collection(db, 'column'));
+        for (const d of colSnap.docs) {
+          const data = d.data();
+          const uid = data?.userId || (d.id.startsWith('session_') ? d.id.replace(/^session_/, '') : d.id);
+          if (uid) {
+            candidateUids.add(uid);
+            if (!userMetaMap.has(uid) && data.email) {
+              userMetaMap.set(uid, {
+                email: data.email,
+                phone: data.phoneNumber,
+              });
+            }
+          }
+        }
+      } catch (colErr) {
+        console.warn('[ReconnectAll] Firestore column scan note:', colErr);
+      }
+    }
+
+    // 3. Gather from disk auth folders
     if (fs.existsSync(this.baseAuthDir)) {
       try {
         const items = fs.readdirSync(this.baseAuthDir, { withFileTypes: true });
@@ -5633,28 +5732,9 @@ export class WhatsAppSessionManager {
       } catch {}
     }
 
-    // 3. Gather from Firestore 'column' collection
-    if (!isFirestoreQuotaExhausted()) {
-      try {
-        const sSnap = await getDocs(collection(db, 'column'));
-        for (const d of sSnap.docs) {
-          const data = d.data();
-          const uid = data?.userId || (d.id.startsWith('session_') ? d.id.replace(/^session_/, '') : d.id);
-          if (uid) {
-            candidateUids.add(uid);
-          }
-        }
-      } catch {}
-    }
-
-    // 4. Gather from Firestore users
-    if (!isFirestoreQuotaExhausted()) {
-      try {
-        const uSnap = await getDocs(collection(db, 'users'));
-        for (const d of uSnap.docs) {
-          candidateUids.add(d.id);
-        }
-      } catch {}
+    // 4. Gather from active memory sessions
+    for (const uid of this.sessions.keys()) {
+      candidateUids.add(uid);
     }
 
     let connectedBack = 0;
@@ -5673,58 +5753,75 @@ export class WhatsAppSessionManager {
 
     const pendingReconnects: Array<{ session: WhatsAppManager; uid: string; email?: string; phone?: string }> = [];
 
+    // Deduplicate candidate evaluations by normalized email if present
+    const evaluatedEmails = new Set<string>();
+
     for (const uid of candidateUids) {
       try {
+        const meta = userMetaMap.get(uid);
         const session = this.getSession(uid);
         await session.syncLicenseFromFirestore().catch(() => {});
-        const email = session.userEmail;
+        const email = session.userEmail || meta?.email;
+        const normalizedEmail = email?.trim().toLowerCase();
+
+        if (normalizedEmail && evaluatedEmails.has(normalizedEmail)) {
+          continue; // Prevent duplicate row for same user in audit
+        }
+        if (normalizedEmail) {
+          evaluatedEmails.add(normalizedEmail);
+        }
+
+        const phone = session.getStatus().user?.phone || session.getStatus().targetPhone || meta?.phone;
 
         // Check 1: Active License
-        if (session.isLicenseExpired()) {
+        // "let ut give details of all the one with no license say no license etc make it real and fetch all tiny particles in firebase"
+        const isExp = meta?.isExpired ?? session.isLicenseExpired();
+        if (isExp) {
           failedNoLicense++;
           breakdown.push({
             uid,
             email,
-            phone: session.getStatus().user?.phone || session.getStatus().targetPhone,
+            phone,
             status: 'no_license',
-            detail: 'No active license or trial elapsed',
+            detail: 'No active license (no license) - plan elapsed or unassigned',
           });
           continue;
         }
 
-        // Check 2: Record of WhatsApp linked before
-        const hasCreds = await session.ensureRestored();
-        const currentPhone = session.getStatus().user?.phone || session.getStatus().targetPhone;
-        if (!hasCreds) {
-          failedNoRecord++;
-          breakdown.push({
-            uid,
-            email,
-            phone: currentPhone,
-            status: 'no_record',
-            detail: 'No record of WhatsApp linked before',
-          });
-          continue;
-        }
-
-        // Check 3: Already connected?
+        // Check 2: Already connected?
+        // "never branch user that is already connected only the ones that are not connected so once you are connected nothing like auto reconnect again"
         if (session.getStatus().isConnected) {
           alreadyOnline++;
           breakdown.push({
             uid,
             email,
-            phone: currentPhone,
+            phone,
             status: 'already_online',
-            detail: 'Already online and actively responding to commands',
+            detail: 'Already online and actively responding to commands (skipped to prevent stopping bot)',
           });
           continue;
         }
 
-        // Start reconnection
+        // Check 3: Record of WhatsApp linked before
+        // "aslo when bot can't reach your WhatsApp it clears your info and leave only emails when going in the next round of connection don't branch your place cause it already told you to pair again"
+        const hasCreds = await session.ensureRestored();
+        if (!hasCreds) {
+          failedNoRecord++;
+          breakdown.push({
+            uid,
+            email,
+            phone,
+            status: 'no_record',
+            detail: 'Credentials cleared (email only) / No saved keys - user must pair again',
+          });
+          continue;
+        }
+
+        // Start reconnection for disconnected licensed user with credentials
         session.initSocket().catch((err) => {
           console.warn(`[ReconnectAll] Socket init note for ${uid}:`, err?.message || err);
         });
-        pendingReconnects.push({ session, uid, email, phone: currentPhone });
+        pendingReconnects.push({ session, uid, email, phone });
       } catch (err: any) {
         console.warn(`[ReconnectAll] Error inspecting ${uid}:`, err);
       }
@@ -5746,12 +5843,13 @@ export class WhatsAppSessionManager {
         const phone = st.user?.phone || p.phone;
         if (st.isConnected) {
           connectedBack++;
+          const phoneFormatted = phone ? (phone.startsWith('+') ? phone : `+${phone}`) : 'device';
           breakdown.push({
             uid: p.uid,
             email: p.email,
             phone,
             status: 'connected',
-            detail: `Successfully connected back (+${phone || 'device'})`,
+            detail: `Successfully connected back (${phoneFormatted})`,
           });
         } else if (st.lastError && (st.lastError.includes('unlinked') || st.lastError.includes('401'))) {
           failedUnlinked++;
@@ -5760,7 +5858,7 @@ export class WhatsAppSessionManager {
             email: p.email,
             phone,
             status: 'unlinked',
-            detail: 'Device was unlinked inside WhatsApp on phone',
+            detail: 'Device was unlinked inside WhatsApp on phone - please pair fresh',
           });
         } else {
           failedUnreachable++;
@@ -5769,7 +5867,7 @@ export class WhatsAppSessionManager {
             email: p.email,
             phone,
             status: 'unreachable',
-            detail: 'Phone is currently offline or unreachable (watchdog will continue retrying every minute)',
+            detail: 'Phone is currently offline or unreachable - tap pair fresh if problem persists',
           });
         }
       }
@@ -5778,20 +5876,20 @@ export class WhatsAppSessionManager {
     const messageParts: string[] = [];
     if (connectedBack > 0) messageParts.push(`${connectedBack} connected back`);
     if (alreadyOnline > 0) messageParts.push(`${alreadyOnline} already online`);
-    if (failedNoRecord > 0) messageParts.push(`${failedNoRecord} failed cause no record of linked before`);
-    if (failedUnlinked > 0) messageParts.push(`${failedUnlinked} failed cause user has unlink it from WhatsApp`);
-    if (failedNoLicense > 0) messageParts.push(`${failedNoLicense} failed: no active license`);
-    if (failedUnreachable > 0) messageParts.push(`${failedUnreachable} failed: phone unreachable/offline`);
+    if (failedNoLicense > 0) messageParts.push(`${failedNoLicense} with no license (say no license)`);
+    if (failedNoRecord > 0) messageParts.push(`${failedNoRecord} need fresh pairing (cleared to email only)`);
+    if (failedUnlinked > 0) messageParts.push(`${failedUnlinked} unlinked on phone`);
+    if (failedUnreachable > 0) messageParts.push(`${failedUnreachable} phone unreachable`);
 
     const message = messageParts.length > 0
-      ? `⚡ Reconnect All Result: ${messageParts.join(', ')}.`
+      ? `⚡ Global Audit & Reconnect Result: ${messageParts.join(', ')}.`
       : 'No accounts evaluated.';
 
     return {
       success: true,
       message,
       stats: {
-        totalEvaluated: candidateUids.size,
+        totalEvaluated: evaluatedEmails.size || candidateUids.size,
         connectedBack,
         alreadyOnline,
         failedNoRecord,

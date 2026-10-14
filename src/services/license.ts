@@ -763,10 +763,12 @@ export async function fetchAllUsers(): Promise<any[]> {
   // Query live multi-user WhatsApp sessions from the server (graceful enhancement)
   try {
     const idToken = await auth?.currentUser?.getIdToken();
-    if (idToken) {
-      const res = await fetch('/api/admin/users-status', {
-        headers: { Authorization: `Bearer ${idToken}` },
-      });
+    const userEmail = auth?.currentUser?.email || '';
+    if (idToken || userEmail) {
+      const headers: Record<string, string> = {};
+      if (idToken) headers.Authorization = `Bearer ${idToken}`;
+      if (userEmail) headers['x-user-email'] = userEmail;
+      const res = await fetch('/api/admin/users-status', { headers });
       if (res.ok) {
         const data = await res.json();
         if (data?.success && data.statuses && typeof data.statuses === 'object') {
@@ -804,9 +806,17 @@ export async function fetchAllUsers(): Promise<any[]> {
         );
         const isExpired = !isUnlimited && (isDateExpired || data.licenseStatus === 'expired');
 
-        const liveStatus = serverStatuses[uid] || {};
-        // Strict rule: only show connected if live socket is actually connected AND license is not expired
-        const isActuallyConnected = !isExpired && Boolean(liveStatus.isConnected);
+        const cleanEmail = (data.email || '').trim().toLowerCase();
+        const liveStatus =
+          serverStatuses[uid] ||
+          (cleanEmail ? serverStatuses[cleanEmail] : null) ||
+          serverStatuses[`session_${uid}`] ||
+          {};
+        // Online check: live socket connected or persisted connected flag if not expired
+        const isActuallyConnected = !isExpired && Boolean(
+          liveStatus.isConnected ??
+          (data.whatsappConnected || data.botConnected || data.connectionState === 'connected')
+        );
         const linkedPhone = liveStatus.phone || data.linkedPhone || data.phone || null;
         const isPaired = Boolean(liveStatus.isPaired || linkedPhone);
 
@@ -875,8 +885,16 @@ export async function fetchAllUsers(): Promise<any[]> {
           );
           const isExpired = !isUnlimited && isDateExpired;
 
-          const liveStatus = serverStatuses[uid] || {};
-          const isActuallyConnected = !isExpired && Boolean(liveStatus.isConnected);
+          const cleanEmail = (d.email || existing?.email || '').trim().toLowerCase();
+          const liveStatus =
+            serverStatuses[uid] ||
+            (cleanEmail ? serverStatuses[cleanEmail] : null) ||
+            serverStatuses[`session_${uid}`] ||
+            {};
+          const isActuallyConnected = !isExpired && Boolean(
+            liveStatus.isConnected ??
+            (d.whatsappConnected || d.botConnected || d.connectionState === 'connected' || existing?.whatsappConnected)
+          );
           const linkedPhone = liveStatus.phone || d.linkedPhone || d.phone || existing?.linkedPhone || null;
           const isPaired = Boolean(liveStatus.isPaired || linkedPhone || existing?.isPaired);
 

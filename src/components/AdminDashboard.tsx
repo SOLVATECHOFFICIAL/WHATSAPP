@@ -1829,10 +1829,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                 ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
                                 : item.status === 'already_online'
                                 ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
-                                : 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                                : item.status === 'no_license'
+                                ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                                : item.status === 'no_record'
+                                ? 'bg-purple-500/20 text-purple-300 border border-purple-500/40'
+                                : 'bg-slate-800 text-slate-300 border border-slate-700'
                             }`}
                           >
-                            {item.status.toUpperCase().replace('_', ' ')}
+                            {item.status === 'no_license'
+                              ? 'NO LICENSE'
+                              : item.status === 'no_record'
+                              ? 'NEEDS PAIR'
+                              : item.status.toUpperCase().replace('_', ' ')}
                           </span>
                         </div>
                       ))}
