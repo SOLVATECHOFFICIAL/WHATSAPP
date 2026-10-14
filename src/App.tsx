@@ -1629,7 +1629,7 @@ export default function App() {
                   <div className="space-y-1.5 pt-1">
                     <div className="flex items-center justify-between text-[11px]">
                       <span className="text-slate-300">
-                        Checking if WhatsApp on your phone can be reached (up to 90s)...
+                        Checking if WhatsApp on your phone can be reached (up to 60s)...
                       </span>
                       <span className="font-mono text-emerald-400 font-bold">
                         {status.reconnectRemainingSeconds !== undefined && status.reconnectRemainingSeconds !== null
@@ -1641,12 +1641,12 @@ export default function App() {
                       <div
                         className="bg-gradient-to-r from-emerald-500 to-teal-400 h-full rounded-full transition-all duration-1000"
                         style={{
-                          width: `${Math.min(100, Math.max(5, (((status.reconnectRemainingSeconds ?? 90) / 90) * 100)))}%`,
+                          width: `${Math.min(100, Math.max(5, (((status.reconnectRemainingSeconds ?? 60) / 60) * 100)))}%`,
                         }}
                       />
                     </div>
                     <p className="text-[10px] text-slate-400 leading-relaxed">
-                      If reached within 90 seconds, the bot turns to <strong>Connected</strong>. If unreachable after 90s, old keys are assumed removed and the system automatically resets for fresh pairing.
+                      The Railway watchdog reconnects automatically. If the saved session cannot reconnect after 60 seconds and your license is active, it clears the stale link so you can pair again.
                     </p>
                   </div>
                 </div>

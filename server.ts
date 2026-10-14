@@ -475,12 +475,12 @@ async function startServer() {
     }
   });
 
-  // Global 5-minute worldwide synchronization endpoints
+  // Global one-minute account synchronization endpoints
   app.post('/api/whatsapp/sync-all', async (req, res) => {
     if (!(await requireOwnerAuth(req, res))) return;
     try {
-      const stats = await sessionManager.runGlobal5MinSync();
-      res.json({ success: true, message: 'Worldwide 5-minute synchronization completed', stats });
+      const stats = await sessionManager.runGlobalOneMinuteSync();
+      res.json({ success: true, message: 'One-minute account synchronization completed', stats });
     } catch (err: any) {
       res.status(500).json({ success: false, error: err.message });
     }

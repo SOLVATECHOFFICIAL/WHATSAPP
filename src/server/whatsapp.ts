@@ -1375,7 +1375,7 @@ export class WhatsAppManager {
         this.currentStatus.pairingCode = undefined;
         this.currentStatus.qrCodeUrl = undefined;
         this.currentStatus.reconnectRemainingSeconds = undefined;
-        this.currentStatus.lastError = 'Could not reach your WhatsApp device after 90 seconds. Assuming the session was removed in WhatsApp. Ready for fresh pairing.';
+        this.currentStatus.lastError = 'Could not reach your WhatsApp device after 60 seconds. Ready for fresh pairing.';
       } else {
         // Automatically reconnect 24/7 in background (e.g., after Railway restart or network drop)
         if (!this.sock && !this.isConnecting && !this.isLicenseExpired()) {
@@ -1389,7 +1389,7 @@ export class WhatsAppManager {
         }
 
         const elapsed = Date.now() - (this.reconnectingStartedAt || Date.now());
-        const RECONNECT_TIMEOUT_MS = 90 * 1000; // 90 seconds (90,000 ms)
+        const RECONNECT_TIMEOUT_MS = 60 * 1000; // 60 seconds
         if (elapsed >= RECONNECT_TIMEOUT_MS) {
           this.handleReconnectTimeoutExpired();
         } else {
@@ -1554,7 +1554,7 @@ export class WhatsAppManager {
             this.currentStatus.pairingStage = 'connected';
             const licenseVerified = await this.syncLicenseFromFirestore();
             if (licenseVerified && !this.isLicenseExpired() && !this.sock && !this.isConnecting && !this.reconnectTimedOut) {
-              console.log(`[WhatsApp Auth (${this.userId})] Active credentials found. Starting 90-sec reconnect window...`);
+              console.log(`[WhatsApp Auth (${this.userId})] Active credentials found. Starting 60-sec reconnect window...`);
               this.startReconnectWindow();
               this.initSocket().catch((err) => console.warn('Auto-reconnect note for existing creds:', err));
             }
@@ -1681,7 +1681,7 @@ export class WhatsAppManager {
         this.scheduleFirebaseCredsSync();
         const licenseVerified = await this.syncLicenseFromFirestore();
         if (licenseVerified && !this.isLicenseExpired() && !this.sock && !this.isConnecting && !this.reconnectTimedOut) {
-          console.log(`[WhatsApp Auth (${this.userId})] Valid license detected! Starting 90-sec reconnect window...`);
+          console.log(`[WhatsApp Auth (${this.userId})] Valid license detected! Starting 60-sec reconnect window...`);
           this.startReconnectWindow();
           this.initSocket().catch((err) => console.warn('Auto-reconnect note after restore:', err));
         }
@@ -1844,27 +1844,39 @@ export class WhatsAppManager {
   }
 
   public startReconnectWindow(): void {
+    if (this.reconnectingStartedAt !== null && !this.reconnectTimedOut && !this.isIntentionalClosure) {
+      return;
+    }
     this.reconnectTimedOut = false;
     this.reconnectingStartedAt = Date.now();
     this.isIntentionalClosure = false;
     this.currentStatus.state = 'connecting';
     this.currentStatus.pairingStage = 'connected';
     this.currentStatus.isPaired = true;
-    this.currentStatus.reconnectRemainingSeconds = 90;
+    this.currentStatus.reconnectRemainingSeconds = 60;
 
     if (this.reconnectTimeoutTimer) {
       clearTimeout(this.reconnectTimeoutTimer);
     }
     this.reconnectTimeoutTimer = setTimeout(() => {
       this.handleReconnectTimeoutExpired();
-    }, 90 * 1000);
+    }, 60 * 1000);
   }
 
   public handleReconnectTimeoutExpired(): void {
     if (this.currentStatus.isConnected) {
       return;
     }
-    console.log(`[Baileys Reconnect ${this.userId}] 90 seconds elapsed without reaching WhatsApp phone. Assuming device was removed/unlinked in WhatsApp. Clearing stale credentials so user can pair fresh.`);
+    this.reconnectTimeoutTimer = null;
+    if (this.isLicenseExpired()) {
+      this.reconnectingStartedAt = null;
+      console.log(`[Baileys Reconnect ${this.userId}] License is inactive; preserving the linked phone and saved credentials.`);
+      this.pauseSocket('License inactive during reconnect; credentials preserved').catch((err) =>
+        console.warn(`[Baileys Reconnect ${this.userId}] Could not pause expired session:`, err?.message || err)
+      );
+      return;
+    }
+    console.log(`[Baileys Reconnect ${this.userId}] 60 seconds elapsed without reaching WhatsApp phone. Clearing stale credentials so the licensed user can pair fresh.`);
     this.reconnectTimedOut = true;
     this.reconnectingStartedAt = null;
     this.isConnecting = false;
@@ -1896,14 +1908,14 @@ export class WhatsAppManager {
     this.currentStatus.user = undefined;
     this.currentStatus.targetPhone = undefined;
     this.currentStatus.reconnectRemainingSeconds = undefined;
-    this.currentStatus.lastError = 'Could not reach your WhatsApp device after 90 seconds. Assuming the session was removed in WhatsApp. Ready for fresh pairing.';
+    this.currentStatus.lastError = 'Could not reach your WhatsApp device after 60 seconds. Ready for fresh pairing.';
     this.connectedAt = null;
     this.currentStatus.connectedAt = undefined;
 
     this.addNotification({
       type: 'warning',
-      title: 'WhatsApp Reconnect Timeout (90s)',
-      body: 'Retried for 90 seconds without reaching your WhatsApp device. Old session unlinked. Ready for fresh pairing.',
+      title: 'WhatsApp Reconnect Timeout (60s)',
+      body: 'Retried for 60 seconds without reaching your WhatsApp device. Saved session cleared. Ready for fresh pairing.',
     });
   }
 
@@ -1936,6 +1948,7 @@ export class WhatsAppManager {
 
   public resetReconnectTimeout(): void {
     this.reconnectTimedOut = false;
+    this.reconnectingStartedAt = null;
     this.startReconnectWindow();
   }
 
@@ -5061,7 +5074,7 @@ export class WhatsAppSessionManager {
 
   constructor() {
     this.autoRestoreAllSessions();
-    this.startGlobal5MinSyncWatchdog();
+    this.startGlobalOneMinuteSyncWatchdog();
   }
 
   public getSession(userId: string = 'default', userEmail: string = ''): WhatsAppManager {
@@ -5231,7 +5244,7 @@ export class WhatsAppSessionManager {
           // Now check: has this user linked WhatsApp before?
           const hasCreds = await session.ensureRestored();
           if (hasCreds) {
-            console.log(`[Auto-Restore] User ${uid} (${meta.email || 'user'}) has valid license AND linked WhatsApp credentials. Auto-reconnecting with 90s timeout...`);
+            console.log(`[Auto-Restore] User ${uid} (${meta.email || 'user'}) has valid license AND linked WhatsApp credentials. Auto-reconnecting with 60s timeout...`);
             session.startReconnectWindow();
             if (!session.isSocketActive()) {
               session.initSocket().catch((err) => {
@@ -5251,13 +5264,14 @@ export class WhatsAppSessionManager {
     }
   }
 
-  private sync5MinInterval: NodeJS.Timeout | null = null;
+  private globalSyncInterval: NodeJS.Timeout | null = null;
   private globalSyncRunning = false;
   private lastSyncStats = {
     totalChecked: 0,
     activeOnline: 0,
     reconnected: 0,
     expiredDisconnected: 0,
+    unlockedForPairing: 0,
     lastRun: '',
   };
 
@@ -5265,31 +5279,31 @@ export class WhatsAppSessionManager {
     return this.lastSyncStats;
   }
 
-  public startGlobal5MinSyncWatchdog(): void {
-    if (this.sync5MinInterval) {
-      clearInterval(this.sync5MinInterval);
+  public startGlobalOneMinuteSyncWatchdog(): void {
+    if (this.globalSyncInterval) {
+      clearInterval(this.globalSyncInterval);
     }
-    console.log('[Global 5-Min Sync] Starting worldwide 24/7 background watchdog (syncs every 5 minutes)...');
+    console.log('[Global 1-Min Sync] Starting Railway account watchdog (syncs every 60 seconds)...');
 
-    // Run first sync 5 seconds after server startup
+    // Run first sync shortly after startup, then continue every minute.
     setTimeout(() => {
-      this.runGlobal5MinSync().catch((err) => console.warn('[Global 5-Min Sync] Startup pass error:', err));
+      this.runGlobalOneMinuteSync().catch((err) => console.warn('[Global 1-Min Sync] Startup pass error:', err));
     }, 5000);
 
-    // Run every 5 minutes (300,000 ms)
-    this.sync5MinInterval = setInterval(() => {
-      this.runGlobal5MinSync().catch((err) => console.warn('[Global 5-Min Sync] Periodic pass error:', err));
-    }, 5 * 60 * 1000);
+    this.globalSyncInterval = setInterval(() => {
+      this.runGlobalOneMinuteSync().catch((err) => console.warn('[Global 1-Min Sync] Periodic pass error:', err));
+    }, 60 * 1000);
   }
 
-  public async runGlobal5MinSync(): Promise<{ totalChecked: number; activeOnline: number; reconnected: number; expiredDisconnected: number }> {
+  public async runGlobalOneMinuteSync(): Promise<{ totalChecked: number; activeOnline: number; reconnected: number; expiredDisconnected: number; unlockedForPairing: number }> {
     if (this.globalSyncRunning) {
-      console.warn('[Global 5-Min Sync] Skipping this pass because the previous pass is still running.');
+      console.warn('[Global 1-Min Sync] Skipping this pass because the previous pass is still running.');
       return {
         totalChecked: 0,
         activeOnline: 0,
         reconnected: 0,
         expiredDisconnected: 0,
+        unlockedForPairing: 0,
       };
     }
     this.globalSyncRunning = true;
@@ -5297,14 +5311,16 @@ export class WhatsAppSessionManager {
     console.log(
       `[Runtime Memory] rss=${Math.round(rss / 1048576)}MB heap=${Math.round(heapUsed / 1048576)}MB external=${Math.round(external / 1048576)}MB sessions=${this.sessions.size} mediaCache=${Math.round(processMediaCacheBytes / 1048576)}MB`
     );
-    console.log('[Global 5-Min Sync] Auditing paired sessions and active connections...');
+    console.log('[Global 1-Min Sync] Auditing Firebase phone locks, paired sessions, and active connections...');
     let totalChecked = 0;
     let activeOnline = 0;
     let reconnected = 0;
     let expiredDisconnected = 0;
+    let unlockedForPairing = 0;
 
     try {
       const userIds = new Set<string>();
+      const phoneLockedUserIds = new Set<string>();
 
       // 1. Gather all local session folders
       if (fs.existsSync(this.baseAuthDir)) {
@@ -5332,11 +5348,29 @@ export class WhatsAppSessionManager {
           }
         } catch (err: any) {
           reportFirestoreError(err);
-          console.debug('[Global 5-Min Sync] Firestore whatsapp_sessions note:', err?.message || err);
+          console.debug('[Global 1-Min Sync] Firestore whatsapp_sessions note:', err?.message || err);
         }
       }
 
-      console.log(`[Global 5-Min Sync] Auditing ${userIds.size} paired or active sessions.`);
+      // A Firebase phone lock can outlive the local/server session. Include every
+      // account that still has a linked phone so licensed users can be made pairable.
+      if (!isFirestoreQuotaExhausted()) {
+        try {
+          const usersSnap = await getDocs(collection(db, 'users'));
+          for (const userDoc of usersSnap.docs) {
+            const linkedPhone = userDoc.data()?.linkedPhone;
+            if (typeof linkedPhone === 'string' && linkedPhone.trim()) {
+              phoneLockedUserIds.add(userDoc.id);
+              userIds.add(userDoc.id);
+            }
+          }
+        } catch (err: any) {
+          reportFirestoreError(err);
+          console.warn('[Global 1-Min Sync] Firestore phone-lock scan note:', err?.message || err);
+        }
+      }
+
+      console.log(`[Global 1-Min Sync] Auditing ${userIds.size} paired, active, or phone-locked accounts.`);
 
       for (const uid of userIds) {
         totalChecked++;
@@ -5346,58 +5380,51 @@ export class WhatsAppSessionManager {
           const license = session.getLicenseDetails();
           const isUnlimited = license.isUnlimited;
 
-          // Strict license enforcement: Only pause if license is genuinely expired
+          // No active license means no automatic unlink/reset. Keep the Firebase
+          // phone lock and credentials until the account has valid access again.
           const isExpired = session.isLicenseExpired();
-
           if (isExpired) {
-            if (session.getStatus().isConnected) {
-              console.log(`[Global 5-Min Sync] User ${uid} license has expired. Pausing bot (credentials preserved).`);
-              expiredDisconnected++;
-              session.addNotification({
-                type: 'system',
-                title: '⚠️ License Expired',
-                body: 'Your license duration has elapsed. The bot has been paused. Renew key to resume.',
-              });
-              await session.pauseSocket('License Expired');
-            }
-            try {
-              await setDoc(doc(db, 'users', uid), {
-                whatsappConnected: false,
-                botConnected: false,
-                licenseStatus: 'expired',
-                connectionState: 'expired',
-                updatedAt: new Date().toISOString(),
-              }, { merge: true });
-            } catch {}
+            expiredDisconnected++;
+            console.log(`[Global 1-Min Sync] User ${uid} has no active license; leaving phone lock and saved session unchanged.`);
             continue;
           }
 
           // User has active license (or unlimited or trial)
-          const credsFile = path.join(this.baseAuthDir, `session_${session.sanitizedUserId}`, 'creds.json');
-          const hasLocalCreds = fs.existsSync(credsFile);
-          const status = session.getStatus();
+          let status = session.getStatus();
 
           if (status.isConnected) {
             activeOnline++;
-            try {
-              await setDoc(doc(db, 'users', uid), {
-                whatsappConnected: true,
-                botConnected: true,
-                linkedPhone: status.user?.phone || status.targetPhone || null,
-                licenseStatus: isUnlimited ? 'unlimited' : 'active',
-                connectionState: status.state,
-                updatedAt: new Date().toISOString(),
-              }, { merge: true });
-            } catch {}
           } else {
             const hasCreds = await session.ensureRestored();
+            status = session.getStatus();
             if (hasCreds && !session.reconnectTimedOut && !session.isSocketActive()) {
-              console.log(`[Global 5-Min Sync] User ${uid} has active license and paired credentials but socket is closed. Auto-reconnecting with 90s window...`);
-              reconnected++;
-              session.startReconnectWindow();
-              session.initSocket().catch((err) => {
-                console.warn(`[Global 5-Min Sync] Reconnect error for ${uid}:`, err?.message);
-              });
+              const pairingInProgress =
+                status.state === 'awaiting_pairing' ||
+                status.state === 'pairing_handshake' ||
+                status.pairingStage === 'code_generated' ||
+                status.pairingStage === 'pairing_handshake' ||
+                Boolean(status.pairingCode);
+              if (!pairingInProgress && status.state !== 'connecting') {
+                console.log(`[Global 1-Min Sync] User ${uid} has an active license and saved WhatsApp credentials. Starting automatic reconnect...`);
+                reconnected++;
+                session.startReconnectWindow();
+                session.initSocket().catch((err) => {
+                  console.warn(`[Global 1-Min Sync] Reconnect error for ${uid}:`, err?.message);
+                });
+              }
+            } else if (!hasCreds && phoneLockedUserIds.has(uid)) {
+              const pairingInProgress =
+                status.state === 'awaiting_pairing' ||
+                status.state === 'pairing_handshake' ||
+                status.state === 'connecting' ||
+                status.pairingStage === 'code_generated' ||
+                status.pairingStage === 'pairing_handshake' ||
+                Boolean(status.pairingCode);
+              if (!pairingInProgress) {
+                console.log(`[Global 1-Min Sync] User ${uid} has an active license but no restorable WhatsApp session. Clearing stale phone lock for fresh pairing.`);
+                session.setUnlinkedIdle();
+                unlockedForPairing++;
+              }
             }
           }
           const connectingStatus = session.getStatus();
@@ -5412,7 +5439,7 @@ export class WhatsAppSessionManager {
             }, { merge: true });
           } catch {}
         } catch (uErr) {
-          console.warn(`[Global 5-Min Sync] Error auditing user ${uid}:`, uErr);
+          console.warn(`[Global 1-Min Sync] Error auditing user ${uid}:`, uErr);
         }
       }
 
@@ -5421,17 +5448,18 @@ export class WhatsAppSessionManager {
         activeOnline,
         reconnected,
         expiredDisconnected,
+        unlockedForPairing,
         lastRun: new Date().toISOString(),
       };
 
-      console.log(`[Global 5-Min Sync] ✅ Worldwide sync complete! Total: ${totalChecked}, Active Online: ${activeOnline}, Healed/Reconnected: ${reconnected}, Expired Disconnected: ${expiredDisconnected}`);
+      console.log(`[Global 1-Min Sync] Sync complete. Total: ${totalChecked}, Active online: ${activeOnline}, Reconnected: ${reconnected}, Inactive license skipped: ${expiredDisconnected}, Number locks cleared: ${unlockedForPairing}`);
     } catch (err) {
-      console.error('[Global 5-Min Sync] Error during worldwide sync:', err);
+      console.error('[Global 1-Min Sync] Error during sync:', err);
     } finally {
       this.globalSyncRunning = false;
     }
 
-    return { totalChecked, activeOnline, reconnected, expiredDisconnected };
+    return { totalChecked, activeOnline, reconnected, expiredDisconnected, unlockedForPairing };
   }
 
   public getAllSessions(): Map<string, WhatsAppManager> {
@@ -5439,9 +5467,9 @@ export class WhatsAppSessionManager {
   }
 
   public async shutdownForProcessExit(): Promise<void> {
-    if (this.sync5MinInterval) {
-      clearInterval(this.sync5MinInterval);
-      this.sync5MinInterval = null;
+    if (this.globalSyncInterval) {
+      clearInterval(this.globalSyncInterval);
+      this.globalSyncInterval = null;
     }
     const sessions = Array.from(this.sessions.values());
     await Promise.allSettled(sessions.map((session) => session.flushFirebaseCredsSync()));

@@ -1,0 +1,326 @@
+Now when you pair your accountyour number is locked in firebase you can't put number again that one now for you to put number you have to unlink it permanently like restarting all over pairing again so even wehn your license key is finished bot is disconnected your number stays lock except you unlock it your self now while your number stays lock you have no wear to input number the only 2 button you have is RECONNECT AND PAIR NOW SUTE MUST CHECK EVERY 1min to make sure all users whose number is locked to the account is active so if not he will un lock their number to input number again cause while site was reconnecting he tried for 1min he can't get their old things so you grab a 1MIN GLOBAL SYNC FOR EVERYONE IN THE BOT DONT UNLOCK USER WITH NO LICENSE JUST IGNORE THEM SIMPLE SO THE 1 MIN MUT KEEP RUNNING ON RAILWAY AS HEART BEAT NOTE THE RECONNECT BUTTON IS USELESS CAUSE BOT ALWAYS CHECK EVERY MIN FOR ALL UNCONNECTED USERS AND WHY THEY ARE NOT CONNECTED SO IS RARE FOR USERS TO TAP RECONNECT AND PAIR JUST SEDN CODE TO LOCK NUMBER YOU GRAB
+Gemini 3.8 Flash
+Canceled
+
+summarize_auto
+Action history
+chevron_right
+lightbulb
+Thought for 16 seconds
+terminal
+Ran command
+grep -rn "startGlobal5MinSyncWatchdog" src/ server.ts
+src/server/whatsapp.ts:5064:    this.startGlobal5MinSyncWatchdog();src/server/whatsapp.ts:5268:  public startGlobal5MinSyncWatchdog(): void {
+description
+Read file
+Read 1 file: src/server/whatsapp.ts from line 5264 to line 5419
+lightbulb
+Thought for 11 seconds
+terminal
+Ran command
+grep -rn "linkedPhone" src/App.tsx
+terminal
+Ran command
+grep -rn "onSnapshot" src/App.tsx
+31:import { doc, onSnapshot } from 'firebase/firestore';396:          currentDocUnsub = onSnapshot(
+description
+Read file
+Read 1 file: src/App.tsx from line 389 to line 439
+lightbulb
+Thought for 13 seconds
+description
+Read file
+Read 1 file: src/server/whatsapp.ts from line 4358 to line 4424
+terminal
+Ran command
+grep -rn "public async requestPairingCode" src/server/whatsapp.ts
+4449:  public async requestPairingCode(rawPhoneNumber: string, force = false): Promise<string> {
+description
+Read file
+Read 1 file: src/server/whatsapp.ts from line 4448 to line 4519
+lightbulb
+Thought for 13 seconds
+terminal
+Ran command
+grep -rn "handleLogoutWhatsApp" src/App.tsx
+906:  const handleLogoutWhatsApp = async () => {1573:                      onClick={handleLogoutWhatsApp}1618:                      onClick={handleLogoutWhatsApp}1678:                      onClick={handleLogoutWhatsApp}
+description
+Read file
+Read 1 file: src/App.tsx from line 899 to line 949
+terminal
+Ran command
+grep -rn "/api/whatsapp/logout" server.ts
+1517:  app.post('/api/whatsapp/logout', async (req, res) => {
+description
+Read file
+Read 1 file: server.ts from line 1514 to line 1549
+lightbulb
+Thought for 5 seconds
+description
+Read file
+Read 1 file: server.ts from line 863 to line 944
+lightbulb
+Thought for 19 seconds
+description
+Read file
+Read 1 file: src/App.tsx from line 2079 to line 2199
+lightbulb
+Thought for 8 seconds
+terminal
+Ran command
+grep -rn "/api/whatsapp/reconnect" src/App.tsx
+lightbulb
+Thought for 15 seconds
+description
+Read file
+Read 1 file: src/server/whatsapp.ts from line 379 to line 409
+description
+Read file
+Read 3 files: src/server/whatsapp.ts from line 1359 to line 1419,src/server/whatsapp.ts from line 379 to line 409, and src/server/whatsapp.ts from line 1279 to line 1339
+lightbulb
+Thought for 6 seconds
+terminal
+Ran command
+git status -s
+fatal: not a git repository (or any of the parent directories): .git
+terminal
+Ran command
+grep -rn "startGlobal" src/ server.ts
+src/server/whatsapp.ts:5064:    this.startGlobal5MinSyncWatchdog();src/server/whatsapp.ts:5268:  public startGlobal5MinSyncWatchdog(): void {
+description
+Read file
+Read 1 file: src/server/whatsapp.ts from line 5039 to line 5349
+description
+Read file
+Read 2 files: src/server/whatsapp.ts from line 5039 to line 5349, and src/server/whatsapp.ts from line 5349 to line 5459
+lightbulb
+Thought for 9 seconds
+terminal
+Ran command
+grep -n "linkedPhone" src/App.tsx
+terminal
+Ran command
+grep -n "phone" src/App.tsx
+3:  Smartphone,81:    phone?: string;113:    a.user?.phone === b.user?.phone161:  const [phoneNumber, setPhoneNumber] = useState('');540:              const phoneText = data.status.user?.phone || '';545:                body: `Your phone ${phoneText} is now paired and online 24/7!`,548:              sendDeviceNotification('WhatsApp Connected! 🟢', `SOLVATECH bot paired with ${phoneText} and active 24/7.`);763:    if (!phoneNumber) return;788:    let cleanEntered = phoneNumber.replace(/\D/g, '');816:          phoneNumber: fullNumber,840:          body: `Code: ${data.pairingCode}. Enter this code in WhatsApp > Linked Devices > Link with phone number.`,845:          `Enter ${data.pairingCode} in WhatsApp > Linked Devices > Link with phone number to pair.`1568:                          {status.user?.phone || status.targetPhone || 'Active Device'}1613:                          {status.user?.phone || status.targetPhone || 'Paired Phone'}1632:                        Checking if WhatsApp on your phone can be reached (up to 90s)...1661:                        <Smartphone className="w-5 h-5 text-amber-400" />1673:                          {status.user?.phone || status.targetPhone || 'Paired Device'}1881:                                ? `Handshake received from WhatsApp phone! ${1885:                                ? 'Waiting for you to enter code on WhatsApp phone...'1886:                                : 'Awaiting phone input & companion handshake'}1919:                                ? `Linked with ${status.user?.phone || status.targetPhone || 'Device'}. Bot active!`1936:              {!status.isConnected && !status.isPaired && !status.user?.phone && (2139:                            value={phoneNumber}2146:                        {phoneNumber.trim() && (2151:                              {phoneNumber.replace(/\D/g, '').replace(/^0+/, '')}2152:                              {phoneNumber.trim().startsWith('0') && ' (leading 0 auto-removed)'}2160:                        disabled={loading || !phoneNumber}2190:                        Open WhatsApp on your phone &gt; Settings / Menu &gt; Linked Devices &gt; Link a Device &gt; Scan this code.2246:                          {status.targetPhone || `+${phoneNumber.replace(/\D/g, '')}`}2254:                          <span>Didn't receive a notification on your phone?</span>2264:                          👉 How to link your phone right now (Takes 10 seconds):2271:                            Open <strong>WhatsApp</strong> on your phone ({status.targetPhone || phoneNumber})2280:                            Look at the bottom of the camera screen and tap <strong className="text-emerald-400">"Link with phone number instead"</strong>2289:                        ⚡ Once entered, your phone completes the secure companion handshake instantly. The bot will automatically switch to Live 🟢.2302:              isPaired={Boolean(status.isPaired || status.user?.phone)}2305:              targetPhone={status.user?.phone || status.targetPhone}
+description
+Read file
+Read 1 file: src/App.tsx from line 1929 to line 2199
+description
+Read file
+Read 2 files: src/App.tsx from line 1929 to line 2199, and src/App.tsx from line 1549 to line 1749
+lightbulb
+Thought for 11 seconds
+terminal
+Ran command
+grep -rn "lockedPhone" src/ server.ts
+terminal
+Ran command
+grep -rn "linkedPhone" src/server/whatsapp.ts
+958:          linkedPhone: this.currentStatus.user?.phone || this.currentStatus.targetPhone || null,1783:            linkedPhone: this.currentStatus.user?.phone || this.currentStatus.targetPhone || null,1834:            linkedPhone: null,2092:                  linkedPhone: `+${phone}`,2618:          const linkedPhoneClean = (this.currentStatus.user?.phone || '').replace(/\D/g, '');2622:            (linkedPhoneClean && senderNum === linkedPhoneClean) ||2676:                    quotedParticipant.replace(/\D/g, '') === linkedPhoneClean)))4128:              linkedPhone: this.currentStatus.user?.phone,4287:        const linkedPhoneClean = (this.currentStatus.user?.phone || this.currentStatus.targetPhone || '').replace(/\D/g, '');4295:            return (botPhone && pDigits === botPhone) || (linkedPhoneClean && pDigits === linkedPhoneClean);4302:            if (botPhone && leaderDigits !== botPhone && (!linkedPhoneClean || leaderDigits !== linkedPhoneClean)) {4315:            (linkedPhoneClean && clean === linkedPhoneClean)4792:    const linkedPhoneClean = (this.currentStatus.user?.phone || this.currentStatus.targetPhone || '').replace(/\D/g, '');4797:    if (linkedPhoneClean) targetPhones.add(linkedPhoneClean);4938:      const linkedPhoneClean = (this.currentStatus.user?.phone || this.currentStatus.targetPhone || '').replace(/\D/g, '');4944:      if (linkedPhoneClean) targetPhones.add(linkedPhoneClean);5112:      const candidateUsers = new Map<string, { email?: string; linkedPhone?: string }>();5146:                linkedPhone: candidateUsers.get(rawId)?.linkedPhone,5156:      // 3. Scan Firestore `users` collection for users with valid license or linkedPhone5164:            const linkedPhone = typeof uData?.linkedPhone === 'string' ? uData.linkedPhone : '';5171:            if (linkedPhone || hasActiveLicense) {5174:                linkedPhone: linkedPhone || candidateUsers.get(uid)?.linkedPhone,5191:              linkedPhone: candidateUsers.get(lic.claimedBy)?.linkedPhone,5207:                linkedPhone: candidateUsers.get(targetUid)?.linkedPhone,5386:                linkedPhone: status.user?.phone || status.targetPhone || null,5408:              linkedPhone: connectingStatus.user?.phone || connectingStatus.targetPhone || null,
+description
+Read file
+Read 1 file: src/server/whatsapp.ts from line 2074 to line 2114
+terminal
+Ran command
+grep -n -C 10 "requestPairingCode" src/server/whatsapp.ts
+4439-4440-        return sock;4441-      } finally {4442-        this.initPromise = null;4443-      }4444-    })();4445-4446-    return this.initPromise;4447-  }4448-4449:  public async requestPairingCode(rawPhoneNumber: string, force = false): Promise<string> {4450-    let cleanPhone = rawPhoneNumber.replace(/\D/g, '');4451-    if (cleanPhone.startsWith('00')) {4452-      cleanPhone = cleanPhone.slice(2);4453-    }4454-    // Automatically detect and fix accidental double country codes (e.g., 234234..., 4444..., 11...)4455-    // AND automatically detect and fix domestic trunk zero after country code (e.g. 234080... -> 23480..., 4407... -> 447...)4456-    const commonCodes = [4457-      '234', '233', '254', '256', '255', '27', '1', '44', '91', '62', '55', '92',4458-      '20', '212', '213', '216', '218', '220', '221', '222', '223', '224', '225',4459-      '226', '227', '228', '229', '230', '231', '232', '235', '236', '237', '238',--4554-4555-    // 3. Initialize fresh socket without loading stale Firebase credentials4556-    const sock = await this.initSocket(true);4557-4558-    // 4. Wait for WebSocket connection to establish with WhatsApp servers4559-    console.log(`[Baileys Pairing] Waiting for WebSocket connection to establish for +${cleanPhone}...`);4560-4561-    let pairingCodeResult: string | null = null;4562-    let lastErr: any = null;4563-4564:    // Ensure the underlying WebSocket connection is open before calling requestPairingCode4565-    for (let wait = 0; wait < 25; wait++) {4566-      if (this.currentStatus.isConnected) return 'ALREADY_PAIRED';4567-      const activeSock = this.sock || sock;4568-      if (activeSock && (activeSock as any).ws?.readyState === 1) {4569-        console.log(`[Baileys Pairing] WebSocket is fully OPEN and authenticated with WhatsApp.`);4570-        break;4571-      }4572-      await new Promise((r) => setTimeout(r, 400));4573-    }4574---4578-        return 'ALREADY_PAIRED';4579-      }4580-4581-      await new Promise((r) => setTimeout(r, attempt === 1 ? 1500 : 2000));4582-4583-      const activeSock = this.sock || sock;4584-      if (!activeSock) continue;4585-4586-      try {4587-        console.log(`[Baileys Pairing] Requesting pairing code from WhatsApp server (attempt ${attempt}/3)...`);4588:        const raw = await activeSock.requestPairingCode(cleanPhone);4589-        if (raw && typeof raw === 'string') {4590-          pairingCodeResult = raw;4591-          console.log(`[Baileys Pairing] Received genuine pairing code: ${raw}`);4592-          break;4593-        }4594-      } catch (err: any) {4595-        lastErr = err;4596-        const msg = err?.message || String(err);4597-        console.log(`[Baileys Pairing] Attempt ${attempt} note: ${msg}`);4598-        if (msg.includes('already') || this.currentStatus.isConnected) {
+description
+Read file
+Read 1 file: src/server/whatsapp.ts from line 4489 to line 4554
+lightbulb
+Thought for 4 seconds
+terminal
+Ran command
+grep -n -A 35 "public getStatus(): WhatsAppStatus" src/server/whatsapp.ts
+1279:  public getStatus(): WhatsAppStatus {1280-    const credsFile = path.join(this.authDir, 'creds.json');1281-    let hasLocalCreds = false;1282-    let registeredPhone = '';1283-    let registeredUserJid = '';1284-    let registeredName = '';1285-1286-    if (fs.existsSync(credsFile)) {1287-      try {1288-        const raw = fs.readFileSync(credsFile, 'utf-8');1289-        const creds = JSON.parse(raw);1290-        if (creds.registered && (creds.me?.id || (creds as any).account?.details)) {1291-          hasLocalCreds = true;1292-          registeredUserJid = creds.me?.id || '';1293-          registeredPhone = registeredUserJid1294-            ? (registeredUserJid.split(':')[0] || registeredUserJid.split('@')[0])1295-            : this.currentStatus.targetPhone?.replace(/\D/g, '') || '';1296-          registeredName = creds.me?.name || 'SOLVATECH Linked Phone';1297-        }1298-      } catch {}1299-    }1300-1301-    // A phone is genuinely paired ONLY if registered companion credentials exist on disk or live connection confirms it1302-    const isPaired = hasLocalCreds || Boolean(this.currentStatus.isConnected && this.currentStatus.user?.phone);1303-    this.currentStatus.isPaired = isPaired;1304-    if (registeredPhone) {1305-      this.currentStatus.user = {1306-        id: registeredUserJid || `${registeredPhone}@s.whatsapp.net`,1307-        name: registeredName,1308-        phone: `+${registeredPhone}`,1309-      };1310-    } else if (!isPaired && !this.currentStatus.isConnected) {1311-      this.currentStatus.user = undefined;1312-    }1313-1314-    // Re-check trial store if session license is currently expired or uninitialized
+lightbulb
+Thought for 12 seconds
+description
+Read file
+Read 1 file: server.ts
+description
+Read file
+Read 3 files: server.ts from line 819 to line 949,server.ts from line 949 to line 1049, and server.ts from line 1049 to line 1099
+terminal
+Ran command
+grep -n -C 10 "app.post('/api/whatsapp/logout'" server.ts
+1507-          session.isGroupParticipantAdmin(gid, participantJid),1508-      });1509-1510-      res.json({ success: true, result });1511-    } catch (err: any) {1512-      res.status(500).json({ success: false, error: err.message });1513-    }1514-  });1515-1516-  // Explicit user action: unlinks companion device permanently from server & Firebase1517:  app.post('/api/whatsapp/logout', async (req, res) => {1518-    try {1519-      const userId = (req.body?.userId as string) || (req.query?.userId as string) || (req.headers['x-user-id'] as string) || '';1520-      await sessionManager.logoutSession(userId, true);1521-      res.json({ success: true, message: 'Session logged out and cleared for this user account' });1522-    } catch (err: any) {1523-      res.status(500).json({1524-        success: false,1525-        error: err.message || 'Failed to logout session',1526-      });1527-    }
+terminal
+Ran command
+grep -n -C 10 "reconnect" server.ts
+1540-      res.json({ success: true, message: unlink ? 'Device unlinked permanently' : 'Bot socket paused (pairing strictly preserved)' });1541-    } catch (err: any) {1542-      res.status(500).json({1543-        success: false,1544-        error: err.message || 'Failed to disconnect session',1545-      });1546-    }1547-  });1548-1549-  // Reconnect/Resume bot without needing new QR or pairing code1550:  app.post('/api/whatsapp/reconnect', async (req, res) => {1551-    try {1552-      const userId = (req.body?.userId as string) || '';1553-      if (!userId) {1554-        return res.status(400).json({ success: false, error: 'User ID is required.' });1555-      }1556-      const session = sessionManager.getSession(userId);1557-      session.resetReconnectTimeout();1558-      await session.syncLicenseFromFirestore().catch(() => {});1559-      if (session.isLicenseExpired()) {1560-        return res.status(403).json({1561-          success: false,1562:          error: 'Cannot reconnect: License is expired. Please renew your license key on the website.',1563-        });1564-      }1565-      await session.initSocket();1566-      res.json({ success: true, message: 'WhatsApp connection resumed 24/7', status: session.getStatus() });1567-    } catch (err: any) {1568-      res.status(500).json({ success: false, error: err.message });1569-    }1570-  });1571-1572-  // 🛡️ 24/7 INSTANT HEALTH CHECKS: Compatible with Railway, UptimeRobot, and cloud load balancers--1625-          ws: { server },1626-        },1627-        appType: 'spa',1628-      });1629-      app.use(vite.middlewares);1630-    }1631-  }1632-1633-  server.listen(PORT, '0.0.0.0', () => {1634-    console.log(`[SOLVATECH] Primary server listening on port ${PORT}`);1635:    // Instant reconnection on startup / Railway crash recovery:1636-    // Checks all previously connected sessions, validates licenses, and restores them1637-    setTimeout(() => {1638:      console.log('[SOLVATECH] Running startup auto-restore and instant reconnect pass...');1639-      sessionManager.autoRestoreAllSessions().catch((err) => {1640-        console.warn('[SOLVATECH] Startup auto-restore note:', err);1641-      });1642-    }, 2000);1643-  });1644-1645-  if (isRailway && PORT !== 8080) {1646-    try {1647-      const secondaryServer = http.createServer(app);1648-      secondaryServer.on('error', (err: any) => {
+description
+Read file
+Read 1 file: src/server/whatsapp.ts from line 69 to line 139
+terminal
+Ran command
+grep -n -A 25 "export interface WhatsAppStatus" src/server/whatsapp.ts
+371:export interface WhatsAppStatus {372-  state: 'disconnected' | 'connecting' | 'awaiting_pairing' | 'pairing_handshake' | 'connected' | 'expired';373-  isConnected: boolean;374-  isPaired?: boolean;375-  pairingStage: PairingStage;376-  pairingCode?: string;377-  qrCodeUrl?: string;378-  targetPhone?: string;379-  uptime?: number;380-  connectedAt?: number;381-  lastError?: string;382-  latestHandshakeTime?: string;383-  isExpired?: boolean;384-  licenseExpiresAt?: string | null;385-  reconnectRemainingSeconds?: number | null;386-  user?: {387-    id: string;388-    name?: string;389-    phone?: string;390-  };391-}392-393-// Helper: Generate short, fancy, bold & italic WhatsApp-formatted welcome messages394-export function buildWelcomeMessage(395-  groupSubject: string,396-  groupDesc: string | undefined,
+lightbulb
+Thought for 2 seconds
+description
+Read file
+Read 4 files: src/server/whatsapp.ts from line 744 to line 834,src/server/whatsapp.ts from line 1599 to line 1659,src/server/whatsapp.ts from line 1659 to line 1714, and src/server/whatsapp.ts from line 1769 to line 1839
+lightbulb
+Thought for 9 seconds
+description
+Read file
+Read 1 file: src/server/whatsapp.ts from line 1339 to line 1439
+terminal
+Ran command
+grep -n -A 30 "handleReconnectTimeoutExpired" src/server/whatsapp.ts
+1394:          this.handleReconnectTimeoutExpired();1395-        } else {1396-          const remainingSec = Math.max(0, Math.ceil((RECONNECT_TIMEOUT_MS - elapsed) / 1000));1397-          this.currentStatus.isConnected = false;1398-          this.currentStatus.state = 'connecting';1399-          this.currentStatus.pairingStage = 'connected';1400-          this.currentStatus.isPaired = true;1401-          this.currentStatus.pairingCode = undefined;1402-          this.currentStatus.reconnectRemainingSeconds = remainingSec;1403-        }1404-      }1405-    } else if (!this.isConnecting && this.currentStatus.state !== 'awaiting_pairing') {1406-      this.reconnectingStartedAt = null;1407-      this.currentStatus.isConnected = false;1408-      this.currentStatus.state = 'disconnected';1409-      this.currentStatus.reconnectRemainingSeconds = undefined;1410-      if (!isPaired) {1411-        this.currentStatus.pairingStage = 'idle';1412-        this.currentStatus.user = undefined;1413-        this.connectedAt = null;1414-        this.currentStatus.connectedAt = undefined;1415-      } else {1416-        this.currentStatus.pairingStage = 'connected';1417-      }1418-    }1419-    this.currentStatus.connectedAt = this.connectedAt || undefined;1420-    return this.currentStatus;1421-  }1422-1423-  public getConnectedAt(): number | null {1424-    return this.connectedAt;--1859:      this.handleReconnectTimeoutExpired();1860-    }, 90 * 1000);1861-  }1862-1863:  public handleReconnectTimeoutExpired(): void {1864-    if (this.currentStatus.isConnected) {1865-      return;1866-    }1867-    console.log(`[Baileys Reconnect ${this.userId}] 90 seconds elapsed without reaching WhatsApp phone. Assuming device was removed/unlinked in WhatsApp. Clearing stale credentials so user can pair fresh.`);1868-    this.reconnectTimedOut = true;1869-    this.reconnectingStartedAt = null;1870-    this.isConnecting = false;1871-    if (this.reconnectTimeoutTimer) {1872-      clearTimeout(this.reconnectTimeoutTimer);1873-      this.reconnectTimeoutTimer = null;1874-    }1875-    if (this.reconnectTimer) {1876-      clearTimeout(this.reconnectTimer);1877-      this.reconnectTimer = null;1878-    }1879-    if (this.sock) {1880-      try {1881-        (this.sock as any)._isIntentionalClose = true;1882-        this.sock.end(undefined);1883-      } catch {}1884-      this.sock = null;1885-    }1886-1887-    // Wipe stale credentials on disk & Firebase so user can pair fresh without getting stuck on dead keys1888-    this.logout(true).catch((err) => console.warn(`[Timeout Cleanup ${this.userId}] Logout error:`, err));1889-1890-    this.currentStatus.isConnected = false;1891-    this.currentStatus.isPaired = false;1892-    this.currentStatus.state = 'disconnected';1893-    this.currentStatus.pairingStage = 'idle';
+description
+Read file
+Read 2 files: src/server/whatsapp.ts from line 1859 to line 1914, and src/server/whatsapp.ts from line 1444 to line 1519
+terminal
+Ran command
+grep -n -A 35 "public async logout(" src/server/whatsapp.ts
+4662:  public async logout(unlinkPermanent = true): Promise<void> {4663-    if (!unlinkPermanent) {4664-      return this.pauseSocket('Socket paused without unlinking');4665-    }4666-    if (this.reconnectTimeoutTimer) {4667-      clearTimeout(this.reconnectTimeoutTimer);4668-      this.reconnectTimeoutTimer = null;4669-    }4670-    if (this.reconnectTimer) {4671-      clearTimeout(this.reconnectTimer);4672-      this.reconnectTimer = null;4673-    }4674-    if (this.heartbeatInterval) {4675-      clearInterval(this.heartbeatInterval);4676-      this.heartbeatInterval = null;4677-    }4678-    this.isIntentionalClosure = true;4679-4680-    try {4681-      if (this.sock) {4682-        await this.sock.logout().catch(() => {});4683-        this.sock.end(undefined);4684-        this.sock = null;4685-      }4686-    } catch {4687-      // Ignore4688-    }4689-4690-    try {4691-      if (fs.existsSync(this.authDir)) {4692-        fs.rmSync(this.authDir, { recursive: true, force: true });4693-      }4694-      await this.clearCredsFromFirebase();4695-    } catch (e) {4696-      console.error('Error clearing auth dir / Firebase:', e);4697-    }
+lightbulb
+Thought for 17 seconds
+terminal
+Ran command
+grep -n -C 10 "onSnapshot" src/App.tsx
+21-  Lock,22-  User as UserIcon,23-  ArrowRight,24-  Trash2,25-  Crown,26-  Shield,27-  Sparkles,28-  Gift,29-} from 'lucide-react';30-import type { User } from 'firebase/auth';31:import { doc, onSnapshot } from 'firebase/firestore';32-import {33-  db,34-  onAuthChange,35-  signInWithGoogle,36-  signInWithEmail,37-  signUpWithEmail,38-} from './services/firebase';39-import { COUNTRIES, Country } from './data/countries';40-import { CountrySelect } from './components/CountrySelect';41-import { AuthModal } from './components/AuthModal';--386-            }387-          })388-          .catch(() => {389-            checkUserTrialStatus(user.uid, user.email).then((claimed) => {390-              if (claimed) setHasClaimedTrial(true);391-            });392-          });393-394-        // Real-time Firestore sync395-        try {396:          currentDocUnsub = onSnapshot(397-            doc(db, 'users', user.uid),398-            (snap) => {399-              if (snap.exists()) {400-                const data = snap.data();401-                if (data.hasUsedTrial === true || data.lifetimeTrialLocked === true || data.trialClaimedAt) {402-                  setHasClaimedTrial(true);403-                  try {404-                    localStorage.setItem(`solvatech_trial_claimed_${user.uid}`, 'true');405-                    if (user.email) localStorage.setItem(`solvatech_trial_claimed_${user.email.toLowerCase()}`, 'true');406-                  } catch {}
+description
+Read file
+Read 1 file: src/App.tsx from line 394 to line 449
+lightbulb
+Thought for 22 seconds
+terminal
+Ran command
+grep -n -C 10 "reconnect" src/App.tsx
+67-  isPaired?: boolean;68-  pairingStage: 'idle' | 'code_generated' | 'pairing_handshake' | 'connected' | 'expired';69-  pairingCode?: string;70-  qrCodeUrl?: string;71-  targetPhone?: string;72-  uptime?: number;73-  lastError?: string;74-  latestHandshakeTime?: string;75-  isExpired?: boolean;76-  licenseExpiresAt?: string | null;77:  reconnectRemainingSeconds?: number | null;78-  user?: {79-    id: string;80-    name?: string;81-    phone?: string;82-  };83-}84-85-export async function safeParseJson<T = any>(res: Response | null | undefined): Promise<T | null> {86-  if (!res) return null;87-  const contentType = res.headers.get('content-type') || '';--100-    a.state === b.state &&101-    a.isConnected === b.isConnected &&102-    a.isPaired === b.isPaired &&103-    a.pairingStage === b.pairingStage &&104-    a.pairingCode === b.pairingCode &&105-    a.qrCodeUrl === b.qrCodeUrl &&106-    a.targetPhone === b.targetPhone &&107-    a.lastError === b.lastError &&108-    a.isExpired === b.isExpired &&109-    a.licenseExpiresAt === b.licenseExpiresAt &&110:    a.reconnectRemainingSeconds === b.reconnectRemainingSeconds &&111-    a.user?.id === b.user?.id &&112-    a.user?.name === b.user?.name &&113-    a.user?.phone === b.user?.phone114-  );115-}116-117-export function sendDeviceNotification(title: string, body: string, icon = '/solva.webp') {118-  if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {119-    try {120-      new Notification(title, { body, icon });--1597-                <div className="p-4 rounded-2xl bg-gradient-to-r from-emerald-950/40 via-slate-900 to-teal-950/30 border border-emerald-500/50 space-y-3 shadow-xl">1598-                  <div className="flex items-center justify-between">1599-                    <div className="flex items-center gap-2.5">1600-                      <div className="w-9 h-9 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center border border-emerald-500/40">1601-                        <RefreshCw className="w-5 h-5 text-emerald-400 animate-spin" />1602-                      </div>1603-                      <div>1604-                        <div className="flex items-center gap-2">1605-                          <h3 className="font-bold text-sm text-white">Reconnecting to WhatsApp...</h3>1606-                          <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[9px] font-bold uppercase tracking-wider animate-pulse">1607:                            {status.reconnectRemainingSeconds !== undefined && status.reconnectRemainingSeconds !== null1608:                              ? `${status.reconnectRemainingSeconds}s REMAINING`1609-                              : 'CONNECTING 24/7'}1610-                          </span>1611-                        </div>1612-                        <p className="text-[11px] text-emerald-300 font-mono">1613-                          {status.user?.phone || status.targetPhone || 'Paired Phone'}1614-                        </p>1615-                      </div>1616-                    </div>1617-                    <button1618-                      onClick={handleLogoutWhatsApp}--1625-                    </button>1626-                  </div>1627-1628-                  {/* Background Reconnection Progress Indicator */}1629-                  <div className="space-y-1.5 pt-1">1630-                    <div className="flex items-center justify-between text-[11px]">1631-                      <span className="text-slate-300">1632-                        Checking if WhatsApp on your phone can be reached (up to 90s)...1633-                      </span>1634-                      <span className="font-mono text-emerald-400 font-bold">1635:                        {status.reconnectRemainingSeconds !== undefined && status.reconnectRemainingSeconds !== null1636:                          ? `${status.reconnectRemainingSeconds}s remaining`1637-                          : 'Connecting...'}1638-                      </span>1639-                    </div>1640-                    <div className="w-full bg-slate-800/80 h-1.5 rounded-full overflow-hidden">1641-                      <div1642-                        className="bg-gradient-to-r from-emerald-500 to-teal-400 h-full rounded-full transition-all duration-1000"1643-                        style={{1644:                          width: `${Math.min(100, Math.max(5, (((status.reconnectRemainingSeconds ?? 90) / 90) * 100)))}%`,1645-                        }}1646-                      />1647-                    </div>1648-                    <p className="text-[10px] text-slate-400 leading-relaxed">1649-                      If reached within 90 seconds, the bot turns to <strong>Connected</strong>. If unreachable after 90s, old keys are assumed removed and the system automatically resets for fresh pairing.1650-                    </p>1651-                  </div>1652-                </div>1653-              )}1654---2049-                    </div>2050-                  )}2051-2052-                  {!isLicenseActive && hasClaimedTrial && (2053-                    <div className="p-3.5 rounded-xl bg-amber-950/30 border border-amber-500/40 text-amber-300 text-xs flex items-start justify-between gap-3">2054-                      <div className="flex items-start gap-2.5">2055-                        <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-amber-400" />2056-                        <div>2057-                          <p className="font-semibold text-white">License Key Required</p>2058-                          <p className="text-[11px] text-amber-300/80 mt-0.5">2059:                            Your 30-minute free trial has ended. Renew with an official license key to reconnect.2060-                          </p>2061-                        </div>2062-                      </div>2063-                      <button2064-                        type="button"2065-                        onClick={() => setActiveTab('license')}2066-                        className="px-3 py-1.5 rounded-lg bg-amber-500 text-slate-950 font-bold text-[11px] flex items-center gap-1 shrink-0 active:scale-95 cursor-pointer"2067-                      >2068-                        <span>Get Key</span>2069-                        <Zap className="w-3 h-3" />
+lightbulb
+Thought for 7 seconds
+description
+Read file
+Read 1 file: src/server/whatsapp.ts from line 5264 to line 5349
+lightbulb
+Thought for 29 seconds
+description
+Read file
+Read 2 files: src/server/whatsapp.ts from line 369 to line 399, and src/server/whatsapp.ts from line 549 to line 599
+lightbulb
+Thought for 3 seconds
+description
+Read file
+Read 1 file: src/server/whatsapp.ts from line 1279 to line 1329
+lightbulb
+Thought for 9 seconds
+description
+Read file
+Read 1 file: src/server/whatsapp.ts from line 5249 to line 5434
+lightbulb
+Thought for 25 seconds
+description
+Read file
+Read 1 file: src/server/whatsapp.ts from line 369 to line 394
+edit
+Edited 1 file
+src/server/whatsapp.ts
+check_circle
+description
+Read file
+Read 1 file: src/server/whatsapp.ts from line 549 to line 564
+edit
+Edited 1 file
+src/server/whatsapp.ts
+check_circle
+description
+Read file
+Read 1 file: src/server/whatsapp.ts from line 749 to line 774
+edit
+Edited 1 file
+src/server/whatsapp.ts
+check_circle
+description
+Read file
+Read 1 file: src/server/whatsapp.ts from line 1284 to line 1344
+lightbulb
+Thought for 3 seconds
+description
+Read file
+Read 1 file: src/server/whatsapp.ts from line 1364 to line 1424
+lightbulb
+Thought for 5 seconds
+edit
+Edited 1 file
+src/server/whatsapp.ts
+check_circle
+description
+Read file
+Read 1 file: src/server/whatsapp.ts from line 1379 to line 1399
+edit
+Edited 1 file
+src/server/whatsapp.ts
+check_circle
+description
+Read file
+Read 1 file: src/server/whatsapp.ts from line 1819 to line 1849
+description
+Read file
+Read 1 file: src/server/whatsapp.ts from line 1849 to line 1874
+description
+Read file
+Read 1 file: src/server/whatsapp.ts from line 1869 to line 1929
+lightbulb
+Thought for 19 seconds
+edit
+Edited 1 file
+src/server/whatsapp.ts
+check_circle
+description
+Read file
+Read 1 file: src/server/whatsapp.ts from line 4559 to line 4594
+lightbulb
+Thought for 4 seconds
+description
+Read file
+Read 1 file: src/server/whatsapp.ts from line 4589 to line 4614
+edit
+Edited 1 file
+src/server/whatsapp.ts
+check_circle
+description
+Read file
+Read 1 file: src/server/whatsapp.ts from line 2079 to line 2114
+description
+Read file
+Read 1 file: src/server/whatsapp.ts from line 2139 to line 2199
+edit
+Edited 1 file
+src/server/whatsapp.ts
+check_circle
+description
+Read file
+Read 1 file: src/server/whatsapp.ts from line 5269 to line 5439
+description
+Read file
+Read 1 file: src/server/whatsapp.ts from line 5439 to line 5519
+description
+Read file
+Read 1 file: src/server/whatsapp.ts from line 5519 to line 5559
+lightbulb
+Thought for 27 seconds
+edit
+Edited 1 file
+src/server/whatsapp.ts
+check_circle
+description
+Read file
+Read 1 file: src/server/whatsapp.ts from line 5059 to line 5079
+terminal
+Ran command
+grep -n -C 5 "class WhatsAppSessionManager" src/server/whatsapp.ts
+5169-    // STRICT REQUIREMENT: Absolutely no mock or sample groups!5170-    return result;5171-  }5172-}5173-5174:export class WhatsAppSessionManager {5175-  private sessions = new Map<string, WhatsAppManager>();5176-  private baseAuthDir = path.resolve(process.cwd(), '.baileys_auth');5177-5178-  constructor() {5179-    this.autoRestoreAllSessions();
+close
+Canceled
+Read 1 file: src/server/whatsapp.ts
+error
+Quota limits exceeded
+flag
+Checkpoint
+lightbulb_tips
+Suggestions
