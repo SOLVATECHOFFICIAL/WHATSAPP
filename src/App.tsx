@@ -1629,7 +1629,7 @@ export default function App() {
                   <div className="space-y-1.5 pt-1">
                     <div className="flex items-center justify-between text-[11px]">
                       <span className="text-slate-300">
-                        Checking if WhatsApp on your phone can be reached...
+                        Checking if WhatsApp on your phone can be reached (up to 90s)...
                       </span>
                       <span className="font-mono text-emerald-400 font-bold">
                         {status.reconnectRemainingSeconds !== undefined && status.reconnectRemainingSeconds !== null
@@ -1641,12 +1641,12 @@ export default function App() {
                       <div
                         className="bg-gradient-to-r from-emerald-500 to-teal-400 h-full rounded-full transition-all duration-1000"
                         style={{
-                          width: `${Math.min(100, Math.max(5, (((status.reconnectRemainingSeconds ?? 300) / 300) * 100)))}%`,
+                          width: `${Math.min(100, Math.max(5, (((status.reconnectRemainingSeconds ?? 90) / 90) * 100)))}%`,
                         }}
                       />
                     </div>
                     <p className="text-[10px] text-slate-400 leading-relaxed">
-                      If your device is reached, the bot will turn to <strong>Connected</strong> automatically. You can also click <strong>Change Number</strong> above to start a fresh pairing anytime.
+                      If reached within 90 seconds, the bot turns to <strong>Connected</strong>. If unreachable after 90s, old keys are assumed removed and the system automatically resets for fresh pairing.
                     </p>
                   </div>
                 </div>
@@ -2068,6 +2068,16 @@ export default function App() {
                         <span>Get Key</span>
                         <Zap className="w-3 h-3" />
                       </button>
+                    </div>
+                  )}
+
+                  {status.lastError && status.pairingStage === 'idle' && !status.isConnected && !pairingError && (
+                    <div className="p-3 rounded-xl bg-amber-950/40 border border-amber-500/40 text-amber-300 text-xs flex items-start gap-2.5">
+                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-amber-400" />
+                      <div>
+                        <p className="font-semibold text-amber-200">Reconnection Update</p>
+                        <p className="text-[11px] text-amber-300/90 mt-0.5 leading-relaxed">{status.lastError}</p>
+                      </div>
                     </div>
                   )}
 
