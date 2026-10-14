@@ -1625,26 +1625,28 @@ export default function App() {
                     </button>
                   </div>
 
-                  {/* 45-Second Reconnect Timeout Progress Indicator */}
+                  {/* Background Reconnection Progress Indicator */}
                   <div className="space-y-1.5 pt-1">
                     <div className="flex items-center justify-between text-[11px]">
                       <span className="text-slate-300">
                         Checking if WhatsApp on your phone can be reached...
                       </span>
                       <span className="font-mono text-emerald-400 font-bold">
-                        {status.reconnectRemainingSeconds ?? 45}s / 45s
+                        {status.reconnectRemainingSeconds !== undefined && status.reconnectRemainingSeconds !== null
+                          ? `${status.reconnectRemainingSeconds}s remaining`
+                          : 'Connecting...'}
                       </span>
                     </div>
                     <div className="w-full bg-slate-800/80 h-1.5 rounded-full overflow-hidden">
                       <div
                         className="bg-gradient-to-r from-emerald-500 to-teal-400 h-full rounded-full transition-all duration-1000"
                         style={{
-                          width: `${Math.min(100, Math.max(5, (((status.reconnectRemainingSeconds ?? 45) / 45) * 100)))}%`,
+                          width: `${Math.min(100, Math.max(5, (((status.reconnectRemainingSeconds ?? 300) / 300) * 100)))}%`,
                         }}
                       />
                     </div>
                     <p className="text-[10px] text-slate-400 leading-relaxed">
-                      If your device is reached, the bot will turn to <strong>Connected</strong> automatically. If WhatsApp cannot be reached within 45 seconds, the pairing screen will automatically reappear so you can enter your phone number again.
+                      If your device is reached, the bot will turn to <strong>Connected</strong> automatically. You can also click <strong>Change Number</strong> above to start a fresh pairing anytime.
                     </p>
                   </div>
                 </div>

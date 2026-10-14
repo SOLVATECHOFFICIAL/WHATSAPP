@@ -1263,6 +1263,18 @@ export class WhatsAppManager {
     return Boolean(this.sock || this.isConnecting);
   }
 
+  public hasRegisteredCredentials(): boolean {
+    const credsFile = path.join(this.authDir, 'creds.json');
+    if (!fs.existsSync(credsFile)) return false;
+    try {
+      const raw = fs.readFileSync(credsFile, 'utf-8');
+      const creds = JSON.parse(raw);
+      return Boolean(creds?.registered === true && (creds?.me?.id || (creds as any)?.account?.details));
+    } catch {
+      return false;
+    }
+  }
+
   public getStatus(): WhatsAppStatus {
     const credsFile = path.join(this.authDir, 'creds.json');
     let hasLocalCreds = false;
@@ -1931,7 +1943,7 @@ export class WhatsAppManager {
           },
           logger: pinoLogger,
           printQRInTerminal: false,
-          browser: Browsers.macOS('Desktop'),
+          browser: Browsers.ubuntu('Chrome'),
           connectTimeoutMs: 60000,
           defaultQueryTimeoutMs: 60000,
           keepAliveIntervalMs: 25000,
@@ -2065,8 +2077,7 @@ export class WhatsAppManager {
                 this.currentStatus.pairingStage === 'code_generated' ||
                 this.currentStatus.pairingStage === 'pairing_handshake' ||
                 this.currentStatus.state === 'awaiting_pairing';
-              const credsFile = path.join(this.authDir, 'creds.json');
-              const hasLocalCreds = fs.existsSync(credsFile);
+              const hasRegisteredCreds = this.hasRegisteredCredentials();
 
               this.isConnecting = false;
               this.sock = null;
@@ -2089,17 +2100,6 @@ export class WhatsAppManager {
                 });
                 await this.logout(true);
               } else {
-                // Keep the saved pairing, but never report a closed socket as online.
-                if (hasLocalCreds && !this.isLicenseExpired()) {
-                  this.currentStatus.state = 'connecting';
-                  this.currentStatus.pairingStage = 'connected';
-                } else {
-                  if (!isAwaitingPairing) {
-                    this.currentStatus.state = this.isLicenseExpired() ? 'expired' : 'disconnected';
-                  }
-                }
-                await this.syncConnectionStatusToFirestore();
-
                 if (statusCode === 515 || statusCode === DisconnectReason.restartRequired) {
                   console.log('[Baileys Connection] Connection closed (code: 515 restartRequired). Device pairing accepted by phone, restarting connection immediately...');
                   this.currentStatus.pairingStage = 'connected';
@@ -2121,10 +2121,18 @@ export class WhatsAppManager {
                       });
                     }, 500);
                   }
-                } else {
-                  console.log(`[Baileys Connection] Connection closed (code: ${statusCode || 'unknown'}). Keeping session and credentials intact, auto-reconnecting 24/7 in background...`);
-                  // Only auto-reconnect if already paired. DO NOT reconnect if still awaiting pairing code entry, as reconnecting creates a new socket with a different key!
-                  if (!this.isLicenseExpired() && hasLocalCreds) {
+                } else if (hasRegisteredCreds) {
+                  // Keep the saved pairing for already registered devices, auto-reconnect in background
+                  if (!this.isLicenseExpired()) {
+                    this.currentStatus.state = 'connecting';
+                    this.currentStatus.pairingStage = 'connected';
+                  } else {
+                    this.currentStatus.state = 'expired';
+                  }
+                  await this.syncConnectionStatusToFirestore();
+
+                  console.log(`[Baileys Connection] Connection closed (code: ${statusCode || 'unknown'}). Keeping registered session intact, auto-reconnecting 24/7 in background...`);
+                  if (!this.isLicenseExpired()) {
                     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
                     this.reconnectTimer = setTimeout(() => {
                       this.initSocket().catch((err) => {
@@ -2132,6 +2140,15 @@ export class WhatsAppManager {
                       });
                     }, 2000);
                   }
+                } else {
+                  // Connection closed while awaiting pairing code entry or idle.
+                  // Do NOT trigger reconnect timer or switch to 'connecting', which destroys the active pairing socket!
+                  if (!isAwaitingPairing) {
+                    this.currentStatus.state = this.isLicenseExpired() ? 'expired' : 'disconnected';
+                    this.currentStatus.pairingStage = 'idle';
+                  }
+                  await this.syncConnectionStatusToFirestore();
+                  console.log(`[Baileys Connection] Connection closed (code: ${statusCode || 'unknown'}) while awaiting pairing. Holding pairing socket intact.`);
                 }
               }
             } else if (connection === 'open') {
