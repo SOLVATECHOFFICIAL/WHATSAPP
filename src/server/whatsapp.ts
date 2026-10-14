@@ -5474,6 +5474,213 @@ export class WhatsAppSessionManager {
 
     return statusMap;
   }
+
+  public async reconnectAll(): Promise<{
+    success: boolean;
+    message: string;
+    stats: {
+      totalEvaluated: number;
+      connectedBack: number;
+      alreadyOnline: number;
+      failedNoRecord: number;
+      failedUnlinked: number;
+      failedNoLicense: number;
+      failedUnreachable: number;
+    };
+    breakdown: Array<{
+      uid: string;
+      email?: string;
+      phone?: string;
+      status: 'connected' | 'already_online' | 'no_record' | 'unlinked' | 'no_license' | 'unreachable';
+      detail: string;
+    }>;
+  }> {
+    const candidateUids = new Set<string>();
+
+    // 1. Gather from memory
+    for (const uid of this.sessions.keys()) {
+      candidateUids.add(uid);
+    }
+
+    // 2. Gather from disk
+    if (fs.existsSync(this.baseAuthDir)) {
+      try {
+        const items = fs.readdirSync(this.baseAuthDir, { withFileTypes: true });
+        for (const item of items) {
+          if (item.isDirectory() && item.name.startsWith('session_')) {
+            candidateUids.add(item.name.replace(/^session_/, ''));
+          }
+        }
+      } catch {}
+    }
+
+    // 3. Gather from Firestore whatsapp_sessions
+    if (!isFirestoreQuotaExhausted()) {
+      try {
+        const sSnap = await getDocs(collection(db, 'whatsapp_sessions'));
+        for (const d of sSnap.docs) {
+          if (d.id.startsWith('session_')) {
+            candidateUids.add(d.id.replace(/^session_/, ''));
+          }
+        }
+      } catch {}
+    }
+
+    // 4. Gather from Firestore users
+    if (!isFirestoreQuotaExhausted()) {
+      try {
+        const uSnap = await getDocs(collection(db, 'users'));
+        for (const d of uSnap.docs) {
+          candidateUids.add(d.id);
+        }
+      } catch {}
+    }
+
+    let connectedBack = 0;
+    let alreadyOnline = 0;
+    let failedNoRecord = 0;
+    let failedUnlinked = 0;
+    let failedNoLicense = 0;
+    let failedUnreachable = 0;
+    const breakdown: Array<{
+      uid: string;
+      email?: string;
+      phone?: string;
+      status: 'connected' | 'already_online' | 'no_record' | 'unlinked' | 'no_license' | 'unreachable';
+      detail: string;
+    }> = [];
+
+    const pendingReconnects: Array<{ session: WhatsAppManager; uid: string; email?: string; phone?: string }> = [];
+
+    for (const uid of candidateUids) {
+      try {
+        const session = this.getSession(uid);
+        await session.syncLicenseFromFirestore().catch(() => {});
+        const email = session.userEmail;
+
+        // Check 1: Active License
+        if (session.isLicenseExpired()) {
+          failedNoLicense++;
+          breakdown.push({
+            uid,
+            email,
+            phone: session.getStatus().user?.phone || session.getStatus().targetPhone,
+            status: 'no_license',
+            detail: 'No active license or trial elapsed',
+          });
+          continue;
+        }
+
+        // Check 2: Record of WhatsApp linked before
+        const hasCreds = await session.ensureRestored();
+        const currentPhone = session.getStatus().user?.phone || session.getStatus().targetPhone;
+        if (!hasCreds) {
+          failedNoRecord++;
+          breakdown.push({
+            uid,
+            email,
+            phone: currentPhone,
+            status: 'no_record',
+            detail: 'No record of WhatsApp linked before',
+          });
+          continue;
+        }
+
+        // Check 3: Already connected?
+        if (session.getStatus().isConnected) {
+          alreadyOnline++;
+          breakdown.push({
+            uid,
+            email,
+            phone: currentPhone,
+            status: 'already_online',
+            detail: 'Already online and actively responding to commands',
+          });
+          continue;
+        }
+
+        // Start reconnection
+        session.initSocket().catch((err) => {
+          console.warn(`[ReconnectAll] Socket init note for ${uid}:`, err?.message || err);
+        });
+        pendingReconnects.push({ session, uid, email, phone: currentPhone });
+      } catch (err: any) {
+        console.warn(`[ReconnectAll] Error inspecting ${uid}:`, err);
+      }
+    }
+
+    // Wait up to 10 seconds in parallel for socket connection handshakes to complete
+    if (pendingReconnects.length > 0) {
+      const waitStart = Date.now();
+      while (Date.now() - waitStart < 10000) {
+        const allSettled = pendingReconnects.every(
+          (p) => p.session.getStatus().isConnected || p.session.getStatus().lastError
+        );
+        if (allSettled) break;
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+
+      for (const p of pendingReconnects) {
+        const st = p.session.getStatus();
+        const phone = st.user?.phone || p.phone;
+        if (st.isConnected) {
+          connectedBack++;
+          breakdown.push({
+            uid: p.uid,
+            email: p.email,
+            phone,
+            status: 'connected',
+            detail: `Successfully connected back (+${phone || 'device'})`,
+          });
+        } else if (st.lastError && (st.lastError.includes('unlinked') || st.lastError.includes('401'))) {
+          failedUnlinked++;
+          breakdown.push({
+            uid: p.uid,
+            email: p.email,
+            phone,
+            status: 'unlinked',
+            detail: 'Device was unlinked inside WhatsApp on phone',
+          });
+        } else {
+          failedUnreachable++;
+          breakdown.push({
+            uid: p.uid,
+            email: p.email,
+            phone,
+            status: 'unreachable',
+            detail: 'Phone is currently offline or unreachable (watchdog will continue retrying every minute)',
+          });
+        }
+      }
+    }
+
+    const messageParts: string[] = [];
+    if (connectedBack > 0) messageParts.push(`${connectedBack} connected back`);
+    if (alreadyOnline > 0) messageParts.push(`${alreadyOnline} already online`);
+    if (failedNoRecord > 0) messageParts.push(`${failedNoRecord} failed cause no record of linked before`);
+    if (failedUnlinked > 0) messageParts.push(`${failedUnlinked} failed cause user has unlink it from WhatsApp`);
+    if (failedNoLicense > 0) messageParts.push(`${failedNoLicense} failed: no active license`);
+    if (failedUnreachable > 0) messageParts.push(`${failedUnreachable} failed: phone unreachable/offline`);
+
+    const message = messageParts.length > 0
+      ? `⚡ Reconnect All Result: ${messageParts.join(', ')}.`
+      : 'No accounts evaluated.';
+
+    return {
+      success: true,
+      message,
+      stats: {
+        totalEvaluated: candidateUids.size,
+        connectedBack,
+        alreadyOnline,
+        failedNoRecord,
+        failedUnlinked,
+        failedNoLicense,
+        failedUnreachable,
+      },
+      breakdown,
+    };
+  }
 }
 
 export const sessionManager = new WhatsAppSessionManager();

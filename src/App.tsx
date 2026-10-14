@@ -195,6 +195,15 @@ export default function App() {
 
   const [isRefreshingStatus, setIsRefreshingStatus] = useState(false);
 
+  // User Reconnect State (tries for 1 minute to old WhatsApp with live countdown)
+  const [isReconnecting, setIsReconnecting] = useState(false);
+  const [reconnectSecondsLeft, setReconnectSecondsLeft] = useState(0);
+  const [reconnectFeedback, setReconnectFeedback] = useState<{
+    type: 'success' | 'error';
+    message: string;
+    reason?: string;
+  } | null>(null);
+
   // 30-Minute Free Test (Once in a Lifetime) state
   const [hasClaimedTrial, setHasClaimedTrial] = useState(false);
   const [claimingTrial, setClaimingTrial] = useState(false);
@@ -1041,6 +1050,93 @@ export default function App() {
     userLicenseData.isUnlimited ||
     !calculateRemainingTime(userLicenseData.expiresAt, false, Date.now() + serverClockOffsetMs).isExpired;
 
+  // Reconnect to existing companion WhatsApp session (tries for 1 minute, drops exact reason)
+  const handleUserReconnect = async () => {
+    if (!currentUser?.uid) {
+      setIsAuthModalOpen(true);
+      return;
+    }
+
+    if (!isLicenseActive) {
+      setReconnectFeedback({
+        type: 'error',
+        message: 'Cannot reconnect: Your license duration has elapsed. Please enter a valid license key or activate a test first.',
+        reason: 'no_license',
+      });
+      return;
+    }
+
+    setIsReconnecting(true);
+    setReconnectFeedback(null);
+    setReconnectSecondsLeft(60);
+
+    const timer = setInterval(() => {
+      setReconnectSecondsLeft((prev) => {
+        if (prev <= 1) {
+          clearInterval(timer);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    try {
+      const res = await fetch('/api/whatsapp/reconnect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: currentUser.uid,
+          userEmail: currentUser.email,
+        }),
+      });
+      clearInterval(timer);
+      const data = await safeParseJson(res);
+
+      if (res.ok && data?.success) {
+        setReconnectFeedback({
+          type: 'success',
+          message: data.message || '🎉 Successfully reconnected to your WhatsApp account! Bot is active 24/7.',
+        });
+        if (data.status) {
+          setStatus(data.status);
+        }
+        setToastNotification({
+          id: 'reconnected_' + Date.now(),
+          type: 'connection',
+          title: 'WhatsApp Reconnected! 🟢',
+          body: data.message || 'Your WhatsApp account is active and listening for commands 24/7.',
+          timestamp: new Date().toLocaleTimeString(),
+        });
+      } else {
+        const reason = data?.reason;
+        let msg = data?.error || 'Failed to reconnect.';
+        if (reason === 'no_record') {
+          msg = "No record of WhatsApp linked before for this account. Tap 'Pair WhatsApp' below to link your phone number first.";
+        } else if (reason === 'unlinked') {
+          msg = "This device was unlinked from WhatsApp on your phone. Tap 'Pair WhatsApp' below to link fresh with a new pairing code.";
+        } else if (reason === 'no_license') {
+          msg = "Cannot reconnect: License is expired. Please enter a license key to activate your account.";
+        } else if (reason === 'unreachable' || res?.status === 504) {
+          msg = "Could not reach WhatsApp on your phone within 1 minute. Ensure your phone has internet and WhatsApp open, or tap 'Pair WhatsApp' instead.";
+        }
+        setReconnectFeedback({
+          type: 'error',
+          message: msg,
+          reason,
+        });
+      }
+    } catch (err: any) {
+      clearInterval(timer);
+      setReconnectFeedback({
+        type: 'error',
+        message: err?.message || "Could not communicate with WhatsApp server. Tap 'Pair WhatsApp' instead.",
+      });
+    } finally {
+      setIsReconnecting(false);
+      setReconnectSecondsLeft(0);
+    }
+  };
+
   // 3-Step Live Confirmation Flags
   const isStep1Active =
     !!pairingCode ||
@@ -1623,6 +1719,19 @@ export default function App() {
                     </button>
                   </div>
 
+                  {/* Manual Reconnect Action Trigger */}
+                  <div className="flex items-center gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={handleUserReconnect}
+                      disabled={isReconnecting || loading}
+                      className="w-full py-2 px-3.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-500 hover:to-teal-400 text-slate-950 font-black text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-950/40 transition-all cursor-pointer disabled:opacity-50"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${isReconnecting ? 'animate-spin' : ''}`} />
+                      <span>{isReconnecting ? `Trying Reconnect (${reconnectSecondsLeft}s)...` : '⚡ Reconnect Now (1-Min Try)'}</span>
+                    </button>
+                  </div>
+
                   {/* Background Reconnection Cloud Assurance */}
                   <div className="p-2.5 rounded-xl bg-slate-950/60 border border-emerald-500/30 space-y-1">
                     <div className="flex items-center gap-2 text-xs text-emerald-300 font-medium">
@@ -1672,6 +1781,17 @@ export default function App() {
                       ? 'Your WhatsApp companion device is linked. 24/7 automation is currently paused because your active license duration has elapsed. Redeem a license key below to resume immediately.'
                       : 'Your device is linked but the bot is paused. Resume the connection from this page when you are ready.'}
                   </p>
+                  {isLicenseActive && status.state !== 'expired' && (
+                    <button
+                      type="button"
+                      onClick={handleUserReconnect}
+                      disabled={isReconnecting || loading}
+                      className="w-full mt-2 py-2 px-3.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-500 hover:to-teal-400 text-slate-950 font-black text-xs flex items-center justify-center gap-2 shadow-lg shadow-emerald-950/40 transition-all cursor-pointer disabled:opacity-50"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${isReconnecting ? 'animate-spin' : ''}`} />
+                      <span>{isReconnecting ? `Trying Reconnect (${reconnectSecondsLeft}s)...` : '⚡ Reconnect WhatsApp (1-Min Try)'}</span>
+                    </button>
+                  )}
                   {(!isLicenseActive || status.state === 'expired') && (
                     <button
                       type="button"
@@ -1933,6 +2053,74 @@ export default function App() {
                     >
                       <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingStatus ? 'animate-spin' : ''}`} />
                       <span>{isRefreshingStatus ? 'Refreshing...' : 'Refresh Status'}</span>
+                    </button>
+                  </div>
+
+                  {/* Reconnect Feedback Banner (with detailed dropped reason) */}
+                  {reconnectFeedback && (
+                    <div
+                      className={`p-3.5 rounded-2xl text-xs space-y-2 border transition-all ${
+                        reconnectFeedback.type === 'success'
+                          ? 'bg-emerald-950/40 border-emerald-500/50 text-emerald-300'
+                          : 'bg-rose-950/40 border-rose-500/50 text-rose-300'
+                      }`}
+                    >
+                      <div className="flex items-start gap-2.5">
+                        {reconnectFeedback.type === 'success' ? (
+                          <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                        ) : (
+                          <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                        )}
+                        <div className="space-y-1.5 min-w-0">
+                          <p className="font-semibold leading-relaxed">{reconnectFeedback.message}</p>
+                          {reconnectFeedback.reason === 'no_license' && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setReconnectFeedback(null);
+                                setActiveTab('license');
+                              }}
+                              className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl bg-amber-500 text-slate-950 font-bold text-[11px] shadow-sm cursor-pointer"
+                            >
+                              <Key className="w-3.5 h-3.5" />
+                              <span>Go to License Tab to Enter Key →</span>
+                            </button>
+                          )}
+                          {(reconnectFeedback.reason === 'unlinked' ||
+                            reconnectFeedback.reason === 'no_record' ||
+                            reconnectFeedback.reason === 'unreachable') && (
+                            <button
+                              type="button"
+                              onClick={() => setReconnectFeedback(null)}
+                              className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold text-[11px] border border-slate-700 cursor-pointer"
+                            >
+                              <span>Tap Pair with Phone Number Below ↓</span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Fast-Track Reconnect to Old WhatsApp card */}
+                  <div className="p-3 rounded-2xl bg-gradient-to-r from-emerald-950/30 via-slate-900 to-teal-950/20 border border-emerald-500/30 flex items-center justify-between gap-3 flex-wrap">
+                    <div className="space-y-0.5 min-w-0">
+                      <span className="text-xs font-bold text-white flex items-center gap-1.5">
+                        <Zap className="w-3.5 h-3.5 text-emerald-400" />
+                        <span>Already Linked Before?</span>
+                      </span>
+                      <p className="text-[10px] text-slate-400">
+                        Try reconnecting for 1 min to your old WhatsApp session without a new code.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleUserReconnect}
+                      disabled={isReconnecting || loading}
+                      className="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-500 hover:to-teal-400 text-slate-950 text-xs font-black flex items-center gap-1.5 transition-all active:scale-95 shadow-md shadow-emerald-950/40 cursor-pointer disabled:opacity-50"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${isReconnecting ? 'animate-spin' : ''}`} />
+                      <span>{isReconnecting ? `Trying Reconnect (${reconnectSecondsLeft}s)...` : '⚡ Reconnect WhatsApp'}</span>
                     </button>
                   </div>
 

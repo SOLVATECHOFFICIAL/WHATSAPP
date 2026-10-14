@@ -60,6 +60,7 @@ import {
   OWNER_EMAILS,
   isOwnerEmail,
 } from '../services/license';
+import { auth } from '../services/firebase';
 
 interface AdminDashboardProps {
   currentUserEmail?: string | null;
@@ -195,6 +196,35 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [broadcastText, setBroadcastText] = useState('');
   const [broadcastSending, setBroadcastSending] = useState(false);
   const [broadcastSuccess, setBroadcastSuccess] = useState<string | null>(null);
+
+  // Reconnect state (Single user & Reconnect All)
+  const [reconnectingAll, setReconnectingAll] = useState(false);
+  const [reconnectingUid, setReconnectingUid] = useState<string | null>(null);
+  const [reconnectAllResult, setReconnectAllResult] = useState<{
+    success: boolean;
+    message: string;
+    stats: {
+      totalEvaluated: number;
+      connectedBack: number;
+      alreadyOnline: number;
+      failedNoRecord: number;
+      failedUnlinked: number;
+      failedNoLicense: number;
+      failedUnreachable: number;
+    };
+    breakdown: Array<{
+      uid: string;
+      email?: string;
+      phone?: string;
+      status: string;
+      detail: string;
+    }>;
+  } | null>(null);
+  const [reconnectNotice, setReconnectNotice] = useState<{
+    title: string;
+    message: string;
+    type: 'success' | 'error' | 'info';
+  } | null>(null);
 
   // Toast alert
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -460,6 +490,108 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       showToast('Failed to revoke access.');
     } finally {
       setActionLoadingUid(null);
+    }
+  };
+
+  // Helper to get authenticated headers for admin RPCs
+  const getAdminAuthHeaders = async (): Promise<Record<string, string>> => {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'x-fallback-user-email': currentUserEmail || OWNER_EMAIL,
+    };
+    try {
+      const token = await auth?.currentUser?.getIdToken();
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+    } catch {}
+    return headers;
+  };
+
+  // RECONNECT ALL (BULK ADMIN ACTION: Tries all accounts with active license and WhatsApp records)
+  const handleReconnectAll = async () => {
+    setReconnectingAll(true);
+    setReconnectAllResult(null);
+    try {
+      const headers = await getAdminAuthHeaders();
+      const res = await fetch('/api/admin/whatsapp/reconnect-all', {
+        method: 'POST',
+        headers,
+      });
+      const data = await res.json();
+      if (res.ok && data?.success) {
+        setReconnectAllResult(data);
+        showToast(data.message || 'Bulk reconnection complete!');
+        void refreshAdminUsers();
+        void loadLiveStatus();
+      } else {
+        const errorMsg = data?.error || data?.message || 'Reconnect all failed.';
+        showToast(`Failed: ${errorMsg}`);
+        setReconnectNotice({
+          title: 'Reconnect All Failed',
+          message: errorMsg,
+          type: 'error',
+        });
+      }
+    } catch (err: any) {
+      console.error(err);
+      const netMsg = `Network error: ${err?.message || 'Bulk reconnect request failed'}`;
+      showToast(netMsg);
+      setReconnectNotice({
+        title: 'Network Error',
+        message: netMsg,
+        type: 'error',
+      });
+    } finally {
+      setReconnectingAll(false);
+    }
+  };
+
+  // RECONNECT SINGLE USER (TRIES FOR UP TO 1 MINUTE, DROPS EXACT REASON)
+  const handleReconnectUser = async (user: any) => {
+    setReconnectingUid(user.uid);
+    try {
+      const headers = await getAdminAuthHeaders();
+      const res = await fetch('/api/admin/whatsapp/reconnect-user', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ targetUid: user.uid, timeoutSeconds: 60 }),
+      });
+      const data = await res.json();
+      if (res.ok && data?.success) {
+        showToast(data.message || `User ${user.displayName || user.email} successfully connected back! 🟢`);
+        void refreshAdminUsers();
+        void loadLiveStatus();
+      } else {
+        const reason = data?.reason;
+        let reasonMsg = data?.error || 'Reconnection failed.';
+        if (reason === 'no_record') {
+          reasonMsg = `Cannot reconnect ${user.email}: No record of WhatsApp linked before. Tap pair instead.`;
+        } else if (reason === 'unlinked') {
+          reasonMsg = `Cannot reconnect ${user.email}: User has unlinked device from WhatsApp on phone. Tap pair instead.`;
+        } else if (reason === 'no_license') {
+          reasonMsg = `Cannot reconnect ${user.email}: No active license or trial elapsed.`;
+        } else if (reason === 'unreachable' || res.status === 504) {
+          reasonMsg = `Could not reach WhatsApp for ${user.email} within 1 minute. Can't reach WhatsApp or phone is offline. Tap pair instead.`;
+        }
+        setReconnectNotice({
+          title: `Reconnect Result: ${user.displayName || user.email}`,
+          message: reasonMsg,
+          type: 'error',
+        });
+        showToast(reasonMsg);
+      }
+    } catch (err: any) {
+      console.error(err);
+      const errMsg = `Error reconnecting user: ${err?.message || 'Network error'}`;
+      setReconnectNotice({
+        title: `Reconnect Error: ${user.displayName || user.email}`,
+        message: errMsg,
+        type: 'error',
+      });
+      showToast(errMsg);
+    } finally {
+      setReconnectingUid(null);
     }
   };
 
@@ -1169,6 +1301,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <div className="flex flex-wrap items-center gap-2 w-full md:w-auto">
                 <button
                   type="button"
+                  onClick={handleReconnectAll}
+                  disabled={reconnectingAll}
+                  className="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-500 hover:to-teal-400 text-slate-950 text-[11px] font-black flex items-center gap-1.5 transition-all shrink-0 active:scale-95 shadow-md shadow-emerald-950/40 cursor-pointer disabled:opacity-50"
+                  title="Reconnect all accounts with active licenses and WhatsApp records back to their WhatsApp"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${reconnectingAll ? 'animate-spin' : ''}`} />
+                  <span>{reconnectingAll ? 'Reconnecting All...' : '⚡ Reconnect All'}</span>
+                </button>
+                <button
+                  type="button"
                   onClick={handleGrantSevenDaysToAll}
                   className="px-3 py-1.5 rounded-xl bg-teal-500/20 hover:bg-teal-500/30 text-teal-300 border border-teal-500/40 text-[11px] font-bold flex items-center gap-1.5 transition-all shrink-0 active:scale-95 shadow-xs cursor-pointer"
                   title="Add +7 Days to all users"
@@ -1409,6 +1551,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                               <div className="flex items-center justify-end gap-1.5">
                                 <button
                                   type="button"
+                                  onClick={() => handleReconnectUser(user)}
+                                  disabled={reconnectingUid === user.uid || isActionLoadingThis}
+                                  className="px-2 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 text-[10px] font-bold border border-emerald-500/40 cursor-pointer flex items-center gap-1 transition-all disabled:opacity-50"
+                                  title="Try reconnecting this user to their WhatsApp for 1 minute"
+                                >
+                                  <RefreshCw className={`w-2.5 h-2.5 text-emerald-400 ${reconnectingUid === user.uid ? 'animate-spin' : ''}`} />
+                                  <span>{reconnectingUid === user.uid ? 'Connecting...' : 'Reconnect'}</span>
+                                </button>
+                                <button
+                                  type="button"
                                   onClick={() => handleAddDays(user, 7)}
                                   disabled={isActionLoadingThis}
                                   className="px-2.5 py-1 rounded-lg bg-teal-500/20 hover:bg-teal-500/30 text-teal-300 text-[10px] font-bold border border-teal-500/40 cursor-pointer flex items-center gap-1"
@@ -1567,6 +1719,160 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold cursor-pointer"
                     >
                       Close
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* RECONNECT ALL AUDIT & TELEMETRY RESULT MODAL */}
+            {reconnectAllResult && (
+              <div className="fixed inset-0 z-[95] bg-slate-950/85 backdrop-blur-md flex items-center justify-center p-4">
+                <div className="bg-slate-900 border border-emerald-500/50 rounded-3xl max-w-2xl w-full p-6 space-y-5 shadow-2xl relative animate-in zoom-in-95 duration-150 max-h-[90vh] flex flex-col">
+                  {/* Header */}
+                  <div className="flex items-center justify-between border-b border-slate-800 pb-3 shrink-0">
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-10 h-10 rounded-2xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center border border-emerald-500/40">
+                        <RefreshCw className="w-5 h-5 text-emerald-400" />
+                      </div>
+                      <div>
+                        <h3 className="text-base font-black text-white flex items-center gap-2">
+                          <span>⚡ Reconnect All Report</span>
+                          <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 text-[10px] font-bold">
+                            AUDIT COMPLETE
+                          </span>
+                        </h3>
+                        <p className="text-xs text-slate-400">Targeting accounts with active license and WhatsApp records</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setReconnectAllResult(null)}
+                      className="p-1.5 rounded-xl bg-slate-800 text-slate-400 hover:text-white"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  {/* Summary Banner */}
+                  <div className="p-4 rounded-2xl bg-emerald-950/40 border border-emerald-500/40 space-y-1.5 shrink-0">
+                    <div className="flex items-center gap-2 text-xs font-bold text-emerald-300">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <span>{reconnectAllResult.message}</span>
+                    </div>
+                    <p className="text-[11px] text-slate-300">
+                      Evaluated {reconnectAllResult.stats.totalEvaluated} accounts. Active WhatsApp sockets remain persistent 24/7.
+                    </p>
+                  </div>
+
+                  {/* Stats Grid */}
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 text-xs shrink-0">
+                    <div className="p-3 rounded-2xl bg-slate-950 border border-emerald-500/30">
+                      <span className="text-[10px] text-slate-400 block">Connected Back</span>
+                      <strong className="text-emerald-400 text-lg font-black">{reconnectAllResult.stats.connectedBack}</strong>
+                      <span className="text-[9px] text-emerald-500/80 block">🟢 Online now</span>
+                    </div>
+
+                    <div className="p-3 rounded-2xl bg-slate-950 border border-amber-500/30">
+                      <span className="text-[10px] text-slate-400 block">Already Online</span>
+                      <strong className="text-amber-300 text-lg font-black">{reconnectAllResult.stats.alreadyOnline}</strong>
+                      <span className="text-[9px] text-amber-500/80 block">⚡ Actively serving</span>
+                    </div>
+
+                    <div className="p-3 rounded-2xl bg-slate-950 border border-slate-800">
+                      <span className="text-[10px] text-slate-400 block">No Record Linked</span>
+                      <strong className="text-slate-300 text-lg font-black">{reconnectAllResult.stats.failedNoRecord}</strong>
+                      <span className="text-[9px] text-slate-500 block">Needs first pair</span>
+                    </div>
+
+                    <div className="p-3 rounded-2xl bg-slate-950 border border-rose-500/30">
+                      <span className="text-[10px] text-slate-400 block">Unlinked on Phone</span>
+                      <strong className="text-rose-400 text-lg font-black">{reconnectAllResult.stats.failedUnlinked}</strong>
+                      <span className="text-[9px] text-rose-500/80 block">Unlinked from WA app</span>
+                    </div>
+
+                    <div className="p-3 rounded-2xl bg-slate-950 border border-rose-500/30">
+                      <span className="text-[10px] text-slate-400 block">No Active License</span>
+                      <strong className="text-rose-300 text-lg font-black">{reconnectAllResult.stats.failedNoLicense}</strong>
+                      <span className="text-[9px] text-rose-400/80 block">Plan elapsed</span>
+                    </div>
+
+                    <div className="p-3 rounded-2xl bg-slate-950 border border-slate-800">
+                      <span className="text-[10px] text-slate-400 block">Phone Unreachable</span>
+                      <strong className="text-amber-400 text-lg font-black">{reconnectAllResult.stats.failedUnreachable}</strong>
+                      <span className="text-[9px] text-amber-500/80 block">Offline / No Net</span>
+                    </div>
+                  </div>
+
+                  {/* Account Breakdown List */}
+                  <div className="space-y-1.5 flex-1 overflow-y-auto pr-1 min-h-36">
+                    <span className="text-[11px] font-bold text-slate-400 block">Account Audit Breakdown:</span>
+                    <div className="space-y-1.5">
+                      {reconnectAllResult.breakdown.map((item, idx) => (
+                        <div
+                          key={item.uid + '_' + idx}
+                          className="p-2.5 rounded-xl bg-slate-950/70 border border-slate-800 flex items-center justify-between text-xs"
+                        >
+                          <div className="min-w-0 pr-2">
+                            <span className="font-bold text-white block truncate">{item.email || item.uid}</span>
+                            <span className="text-[10px] text-slate-400 font-mono">
+                              {item.phone ? `+${item.phone} • ` : ''}
+                              {item.detail}
+                            </span>
+                          </div>
+                          <span
+                            className={`px-2 py-0.5 rounded-lg text-[10px] font-bold shrink-0 ${
+                              item.status === 'connected'
+                                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                                : item.status === 'already_online'
+                                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                                : 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                            }`}
+                          >
+                            {item.status.toUpperCase().replace('_', ' ')}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Footer */}
+                  <div className="flex justify-end pt-2 border-t border-slate-800 shrink-0">
+                    <button
+                      onClick={() => setReconnectAllResult(null)}
+                      className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-slate-950 font-bold text-xs cursor-pointer shadow-lg shadow-emerald-950/40"
+                    >
+                      Dismiss Report
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* SINGLE RECONNECT NOTICE MODAL */}
+            {reconnectNotice && (
+              <div className="fixed inset-0 z-[95] bg-slate-950/80 backdrop-blur-sm flex items-center justify-center p-4">
+                <div className="bg-slate-900 border border-slate-700 rounded-3xl max-w-md w-full p-6 space-y-4 shadow-2xl relative animate-in zoom-in-95 duration-150">
+                  <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                    <h3 className="font-bold text-sm text-white flex items-center gap-2">
+                      <AlertCircle className="w-4 h-4 text-amber-400" />
+                      <span>{reconnectNotice.title}</span>
+                    </h3>
+                    <button
+                      onClick={() => setReconnectNotice(null)}
+                      className="p-1 rounded-lg text-slate-400 hover:text-white"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <p className="text-xs text-slate-300 leading-relaxed bg-slate-950 p-3.5 rounded-2xl border border-slate-800">
+                    {reconnectNotice.message}
+                  </p>
+                  <div className="flex justify-end pt-2 border-t border-slate-800">
+                    <button
+                      onClick={() => setReconnectNotice(null)}
+                      className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs cursor-pointer"
+                    >
+                      Okay
                     </button>
                   </div>
                 </div>

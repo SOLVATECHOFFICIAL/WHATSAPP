@@ -1549,23 +1549,203 @@ async function startServer() {
   // Reconnect/Resume bot without needing new QR or pairing code
   app.post('/api/whatsapp/reconnect', async (req, res) => {
     try {
-      const userId = (req.body?.userId as string) || '';
+      const userId =
+        (req.body?.userId as string) ||
+        (req.query?.userId as string) ||
+        (req.headers['x-user-id'] as string) ||
+        '';
       if (!userId) {
         return res.status(400).json({ success: false, error: 'User ID is required.' });
       }
-      const session = sessionManager.getSession(userId);
-      session.resetReconnectTimeout();
+      const userEmail =
+        (req.body?.userEmail as string) ||
+        (req.query?.userEmail as string) ||
+        (req.headers['x-user-email'] as string) ||
+        '';
+      const session = sessionManager.getSession(userId, userEmail);
+      if (userEmail && !session.userEmail) {
+        session.userEmail = userEmail;
+      }
+
       await session.syncLicenseFromFirestore().catch(() => {});
       if (session.isLicenseExpired()) {
         return res.status(403).json({
           success: false,
+          reason: 'no_license',
           error: 'Cannot reconnect: License is expired. Please renew your license key on the website.',
         });
       }
-      await session.initSocket();
-      res.json({ success: true, message: 'WhatsApp connection resumed 24/7', status: session.getStatus() });
+
+      const hasCreds = await session.ensureRestored();
+      const currentStatus = session.getStatus();
+      const hasPhoneRecord = Boolean(currentStatus.user?.phone || currentStatus.targetPhone);
+
+      if (!hasCreds) {
+        return res.status(404).json({
+          success: false,
+          reason: 'no_record',
+          error: hasPhoneRecord
+            ? 'No active companion session keys found in cloud backup. Tap "Pair WhatsApp" instead to relink your phone with a fresh code.'
+            : 'No record of WhatsApp linked before for this account. Tap "Pair WhatsApp" to link your phone number first.',
+        });
+      }
+
+      if (currentStatus.isConnected) {
+        return res.json({
+          success: true,
+          alreadyConnected: true,
+          message: `WhatsApp is already connected and active for ${currentStatus.user?.phone || 'your phone'}! 🟢`,
+          status: currentStatus,
+        });
+      }
+
+      // Try reconnecting for up to 60 seconds
+      console.log(`[Manual Reconnect] Starting 60s reconnect pass for ${userId} (${currentStatus.user?.phone || 'device'})...`);
+      await session.initSocket().catch((err) => {
+        console.warn(`[Manual Reconnect] Socket init note:`, err?.message || err);
+      });
+
+      const startTime = Date.now();
+      const MAX_WAIT_MS = 60 * 1000;
+      let connected = false;
+      let unlinked = false;
+      let latestStatus = session.getStatus();
+
+      while (Date.now() - startTime < MAX_WAIT_MS) {
+        await new Promise((r) => setTimeout(r, 1200));
+        latestStatus = session.getStatus();
+        if (latestStatus.isConnected) {
+          connected = true;
+          break;
+        }
+        if (latestStatus.lastError && (latestStatus.lastError.includes('unlinked') || latestStatus.lastError.includes('401'))) {
+          unlinked = true;
+          break;
+        }
+      }
+
+      if (connected) {
+        return res.json({
+          success: true,
+          message: `🎉 Successfully reconnected to your WhatsApp account (+${latestStatus.user?.phone || 'device'})! Bot is active 24/7.`,
+          status: latestStatus,
+        });
+      }
+
+      if (unlinked) {
+        return res.status(401).json({
+          success: false,
+          reason: 'unlinked',
+          error: "This device was unlinked from WhatsApp on your phone. Tap 'Pair WhatsApp' instead to link fresh with a new pairing code.",
+          status: latestStatus,
+        });
+      }
+
+      return res.status(504).json({
+        success: false,
+        reason: 'unreachable',
+        error: "Could not reach WhatsApp on your phone within 1 minute. Ensure your phone is turned on with active internet and WhatsApp open, or tap 'Pair / Change Number' to relink fresh.",
+        status: latestStatus,
+      });
     } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message });
+      res.status(500).json({ success: false, error: err.message || 'Failed to reconnect session' });
+    }
+  });
+
+  // Admin Bulk Action: Reconnect All accounts with active license and WhatsApp records
+  app.post('/api/admin/whatsapp/reconnect-all', async (req, res) => {
+    try {
+      const authorized = await requireOwnerAuth(req, res);
+      if (!authorized) return;
+
+      console.log('[Admin Reconnect All] Running bulk reconnect across all licensed accounts with WhatsApp records...');
+      const result = await sessionManager.reconnectAll();
+      res.json(result);
+    } catch (err: any) {
+      console.error('[Admin Reconnect All] Error:', err);
+      res.status(500).json({ success: false, error: err?.message || 'Bulk reconnection failed' });
+    }
+  });
+
+  // Admin Single User Action: Reconnect a specific user
+  app.post('/api/admin/whatsapp/reconnect-user', async (req, res) => {
+    try {
+      const authorized = await requireOwnerAuth(req, res);
+      if (!authorized) return;
+
+      const targetUid = (req.body?.targetUid as string) || (req.query?.targetUid as string) || '';
+      if (!targetUid) {
+        return res.status(400).json({ success: false, error: 'targetUid is required' });
+      }
+
+      const session = sessionManager.getSession(targetUid);
+      await session.syncLicenseFromFirestore().catch(() => {});
+      if (session.isLicenseExpired()) {
+        return res.status(403).json({
+          success: false,
+          reason: 'no_license',
+          error: `Cannot reconnect user ${targetUid}: License is expired.`,
+        });
+      }
+
+      const hasCreds = await session.ensureRestored();
+      if (!hasCreds) {
+        return res.status(404).json({
+          success: false,
+          reason: 'no_record',
+          error: `No record of WhatsApp linked before for user ${targetUid}. User needs to pair first.`,
+        });
+      }
+
+      await session.initSocket();
+
+      // Try reconnecting for up to 60 seconds (1 full minute)
+      const maxWaitMs = Math.min(Number(req.body?.timeoutSeconds || 60) * 1000, 60000);
+      const startTime = Date.now();
+      let connected = false;
+      let unlinked = false;
+      let latestStatus = session.getStatus();
+
+      while (Date.now() - startTime < maxWaitMs) {
+        await new Promise((r) => setTimeout(r, 1000));
+        latestStatus = session.getStatus();
+        if (latestStatus.isConnected) {
+          connected = true;
+          break;
+        }
+        if (latestStatus.lastError && (latestStatus.lastError.includes('unlinked') || latestStatus.lastError.includes('401'))) {
+          unlinked = true;
+          break;
+        }
+      }
+
+      if (connected) {
+        const phone = latestStatus.user?.phone || latestStatus.targetPhone || '';
+        return res.json({
+          success: true,
+          message: `User ${targetUid} (+${phone || 'device'}) successfully connected back to WhatsApp! 🟢`,
+          status: latestStatus,
+        });
+      }
+
+      if (unlinked) {
+        return res.status(401).json({
+          success: false,
+          reason: 'unlinked',
+          error: `User unlinked the device from WhatsApp on their phone. Tap pair instead.`,
+          status: latestStatus,
+        });
+      }
+
+      return res.status(504).json({
+        success: false,
+        reason: 'unreachable',
+        error: `Could not reach WhatsApp on phone within 1 minute. Can't reach WhatsApp or phone is offline. Tap pair instead.`,
+        status: latestStatus,
+      });
+    } catch (err: any) {
+      console.error('[Admin Reconnect User] Error:', err);
+      res.status(500).json({ success: false, error: err?.message || 'Reconnection failed' });
     }
   });
 
