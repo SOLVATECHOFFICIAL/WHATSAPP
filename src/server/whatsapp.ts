@@ -22,11 +22,14 @@ import webpmux from 'node-webpmux';
 
 const execFileAsync = promisify(execFile);
 import { createWorker } from 'tesseract.js';
-import { commandHandler, parseSpamArgs, GROUP_ONLY_COMMANDS } from './commands.ts';
+import { commandHandler, parseSpamArgs, GROUP_ONLY_COMMANDS, ADMIN_ONLY_GROUP_COMMANDS } from './commands.ts';
 import { isFirestoreQuotaExhausted, reportFirestoreError } from '../services/firestore-status.ts';
 import { db, doc, getDoc, setDoc, deleteDoc, collection, getDocs, writeBatch } from './firebase-admin.ts';
 import { isOwnerEmail } from '../services/admin-config.ts';
 import { findActiveLicenseByUser, getAllLicenseRecords } from './license-store.ts';
+
+// Shared greeting lock across all bot sessions to prevent multiple admin bots from welcoming the same user
+const globalAdminGreetingLock = new Map<string, number>();
 
 // Prevent sharp/libvips from hoarding unmanaged memory in Node (essential for Railway 512MB RAM stability)
 sharp.cache(false);
@@ -97,6 +100,9 @@ export async function getSolvaBrandBuffer(): Promise<Buffer | null> {
   }
   return null;
 }
+
+// Pre-warm brand JPEG buffer in memory on boot for instant responses
+void getSolvaBrandBuffer().catch(() => {});
 
 // Helper: Iteratively unwrap ephemeral, viewOnce, and document wrappers
 export function unwrapMessage(msgObj: any): any {
@@ -2698,16 +2704,19 @@ export class WhatsAppManager {
           const botPhone = (botUserJid.split(':')[0] || botUserJid.split('@')[0]).replace(/\D/g, '');
           const botLidNum = (botUserLid.split(':')[0] || botUserLid.split('@')[0]).replace(/\D/g, '');
           const linkedPhoneClean = (this.currentStatus.user?.phone || '').replace(/\D/g, '');
-          const mappedSenderPhone = this.getLidReverseMapping(senderNum);
+          const participantRaw = msg.key.participant || senderJid || '';
+          const participantNum = participantRaw.split('@')[0].split(':')[0].replace(/\D/g, '');
+          const mappedSenderPhone = this.getLidReverseMapping(senderNum) || (participantNum ? this.getLidReverseMapping(participantNum) : '');
 
           const isOwner =
             isFromMe ||
-            (botPhone && senderNum === botPhone) ||
-            (linkedPhoneClean && senderNum === linkedPhoneClean) ||
-            (botLidNum && senderNum === botLidNum) ||
+            (botPhone && (senderNum === botPhone || participantNum === botPhone)) ||
+            (linkedPhoneClean && (senderNum === linkedPhoneClean || participantNum === linkedPhoneClean)) ||
+            (botLidNum && (senderNum === botLidNum || participantNum === botLidNum)) ||
             Boolean(mappedSenderPhone && botPhone && mappedSenderPhone === botPhone) ||
             Boolean(mappedSenderPhone && linkedPhoneClean && mappedSenderPhone === linkedPhoneClean) ||
             senderNum === '2349049979183' ||
+            participantNum === '2349049979183' ||
             mappedSenderPhone === '2349049979183';
 
           // Check if sender is a group administrator
@@ -2717,7 +2726,7 @@ export class WhatsAppManager {
               const groupMeta = await this.getCachedGroupMetadata(sock, remoteJid);
               if (groupMeta?.participants) {
                 const senderLidPhone = this.getLidReverseMapping(senderNum);
-                const senderIds = new Set([senderNum, senderLidPhone].filter(Boolean));
+                const senderIds = new Set([senderNum, participantNum, senderLidPhone, mappedSenderPhone].filter(Boolean));
                 const participantJid = msg.key.participant || senderJid;
                 const p = groupMeta.participants.find(
                   (x: any) => {
@@ -2731,10 +2740,20 @@ export class WhatsAppManager {
                   }
                 );
                 isSenderAdmin = p?.admin === 'admin' || p?.admin === 'superadmin';
+
+                // Reverse map participant LID if it matches bot phone
+                if (p && (p.phoneNumber === botPhone || p.id?.replace(/\D/g, '') === botPhone || p.id?.replace(/\D/g, '') === linkedPhoneClean)) {
+                  if (p.lid) {
+                    const cleanL = p.lid.split('@')[0].split(':')[0].replace(/\D/g, '');
+                    const cleanP = (p.phoneNumber || p.id).split('@')[0].split(':')[0].replace(/\D/g, '');
+                    if (cleanL && cleanP) setBoundedCache(this.reverseLidMap, cleanL, cleanP, 2000);
+                  }
+                }
               }
             } catch {}
           }
-          const isAuthorizedAdmin = isOwner || isSenderAdmin;
+          // STRICT RULE: Group admin commands require the user to be BOTH a group admin AND the bot owner!
+          const isAuthorizedAdmin = isOwner && isSenderAdmin;
 
           const isGroupInfoTrigger = /^\.(groupinfo|gcinfo|group)(\s|$)/i.test(text.trim());
 
@@ -2750,23 +2769,54 @@ export class WhatsAppManager {
             } else {
               const sec = commandHandler.getSecuritySettings(remoteJid, this.userId);
 
-            // 1. Anti-Bot: Detect any member message starting with '.' or containing words like .at, .with, or replying to/with bot interactions
-            const isWordStartingWithDot =
-              text.trim().startsWith('.') ||
-              text.toLowerCase().startsWith('.at') ||
-              text.toLowerCase().startsWith('.with') ||
-              /(^|\s)\.[a-zA-Z0-9_]/.test(text);
-            const isQuotedFromBot = !!(
-              quotedText &&
-              (quotedText.trim().startsWith('.') ||
+            // 1. Anti-Bot: Broad, Smart Detection Engine
+            // A) Commands starting with bot prefixes: . ! / # $ ? \ % +
+            const trimmedText = text.trim();
+            const isBotPrefixCommand =
+              /^[.!/#$?%\\+][a-zA-Z0-9_]{1,30}(\s|$)/.test(trimmedText) ||
+              /(^|\s)[.!/#$?%\\+][a-zA-Z0-9_]{1,30}(\s|$)/.test(trimmedText);
+
+            // B) Quoted bot message: distinguishes between users driving a bot vs. casual human chat
+            let isDrivingBot = false;
+            if (quotedText) {
+              const isQuotedFromAnyBot =
                 quotedText.toLowerCase().includes('solvatech') ||
                 quotedText.includes('🤖') ||
                 quotedText.includes('⚡') ||
+                /^[.!/#$?%\\+][a-zA-Z0-9_]/.test(quotedText.trim()) ||
+                /latency|uptime|ping|speed|powered by|developer/i.test(quotedText) ||
                 (quotedParticipant &&
                   (quotedParticipant.replace(/\D/g, '') === botPhone ||
-                    quotedParticipant.replace(/\D/g, '') === linkedPhoneClean)))
-            );
-            const isBotDetected = isWordStartingWithDot || (isQuotedFromBot && text.trim().length > 0);
+                    quotedParticipant.replace(/\D/g, '') === linkedPhoneClean));
+
+              if (isQuotedFromAnyBot) {
+                // Check if reply is casual human speech/complaints/chitchat (PROTECTED - NOT A BOT)
+                const isHumanCasual =
+                  /^(stop|rest|leave|who|why|bro|guy|wassup|sup|abeg|pls|please|nah|dumb|kick|mute|admin|chill|wetin|dey|wait|no|yes)\b/i.test(trimmedText) ||
+                  /\b(stop using bot|stop it|who invited|abeg rest|leave am|guy rest|admin kick|stop spam)\b/i.test(trimmedText);
+
+                if (!isHumanCasual) {
+                  // Check if user is replying to drive/operate the bot (numbers, single characters, prompts, wallet, command inputs)
+                  const isCommandInput =
+                    /^[0-9]{1,3}$/.test(trimmedText) || // "1", "2", "3" to select menu item
+                    /^[a-zA-Z0-9_]{1,3}$/.test(trimmedText) || // short selection code
+                    /^(0x[a-fA-F0-9]{40}|[13][a-km-zA-HJ-NP-Z1-9]{25,34}|T[A-Za-z1-9]{33})$/.test(trimmedText) || // crypto wallet
+                    /^[.!/#$?%\\+]/.test(trimmedText); // another command inside reply
+
+                  if (isCommandInput) {
+                    isDrivingBot = true;
+                  }
+                }
+              }
+            }
+
+            // C) Foreign Rogue Bot Payload / Piggybacking:
+            // Detect automated messages from other bots (automated menus, interactive buttons, template lists, bot footers)
+            const isForeignBotResponse =
+              !!(rawMsg?.templateButtonReplyMessage || rawMsg?.buttonsResponseMessage || rawMsg?.listResponseMessage) ||
+              /(\*response time:\*|\*latency:\*|\*speed:\*|\*uptime:\*|\*prefix:\*|\*owner:\*|powered by|created by|bot by)/i.test(trimmedText);
+
+            const isBotDetected = isBotPrefixCommand || isDrivingBot || isForeignBotResponse;
 
             if (sec.antibot && isBotDetected) {
               try { await sock.sendMessage(remoteJid, { delete: msg.key }); } catch {}
@@ -2774,12 +2824,12 @@ export class WhatsAppManager {
               if (warn.count >= warn.max) {
                 try { await sock.groupParticipantsUpdate(remoteJid, [senderJid], 'remove'); } catch {}
                 await sock.sendMessage(remoteJid, {
-                  text: `🚨 *[GROUP SECURITY ENFORCEMENT]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👤 *User:* @${senderNum}\n⛔ *Offense:* Unauthorized bot commands (*.*) or bot automation\n⚠️ *Warnings:* *${warn.count}/${warn.max} (LIMIT EXCEEDED)*\n🔨 *Punishment:* *Auto-removed from group*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
+                  text: `🚨 *[GROUP SECURITY ENFORCEMENT]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👤 *User:* @${senderNum}\n⛔ *Offense:* Unauthorized bot commands or automated bot interaction\n⚠️ *Warnings:* *${warn.count}/${warn.max} (LIMIT EXCEEDED)*\n🔨 *Punishment:* *Auto-removed from group*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
                   mentions: [senderJid],
                 });
               } else {
                 await sock.sendMessage(remoteJid, {
-                  text: `🤖 *[ANTI-BOT DEFENSE SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👤 *User:* @${senderNum}\n⚠️ *Notice:* Regular members are strictly prohibited from using bot commands (*.*) or bot automation!\n🗑️ *Action:* *Message deleted*\n📊 *Warning:* *${warn.count}/${warn.max}* (Auto-kick at ${warn.max})\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
+                  text: `⚠️ *[BE WARNED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👤 *User:* @${senderNum}\nBot commands and automation are strictly prohibited in this group. Your message has been removed.\n📊 *Warning:* *${warn.count}/${warn.max}* (Auto-kick at ${warn.max})\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
                   mentions: [senderJid],
                 });
               }
@@ -2800,7 +2850,7 @@ export class WhatsAppManager {
                 });
               } else {
                 await sock.sendMessage(remoteJid, {
-                  text: `🛡️ *[ANTI-LINK DEFENSE SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👤 *User:* @${senderNum}\n⚠️ *Notice:* External links are strictly prohibited in this group!\n🗑️ *Action:* *Link message deleted*\n📊 *Warning:* *${warn.count}/${warn.max}* (Auto-kick at ${warn.max})\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
+                  text: `⚠️ *[BE WARNED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👤 *User:* @${senderNum}\nLinks are strictly not allowed in this group. Your message has been removed.\n📊 *Warning:* *${warn.count}/${warn.max}* (Auto-kick at ${warn.max})\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
                   mentions: [senderJid],
                 });
               }
@@ -2826,7 +2876,7 @@ export class WhatsAppManager {
                 });
               } else {
                 await sock.sendMessage(remoteJid, {
-                  text: `📱 *[ANTI-STATUS DEFENSE SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👤 *User:* @${senderNum}\n⚠️ *Notice:* Mentioning this group in your personal WhatsApp status is prohibited!\n🗑️ *Action:* *Status notification deleted*\n📊 *Warning:* *${warn.count}/${warn.max}* (Auto-kick at ${warn.max})\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
+                  text: `⚠️ *[BE WARNED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👤 *User:* @${senderNum}\nMentioning this group in your personal status is not allowed. Your message has been removed.\n📊 *Warning:* *${warn.count}/${warn.max}* (Auto-kick at ${warn.max})\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
                   mentions: [senderJid],
                 });
               }
@@ -2923,7 +2973,7 @@ export class WhatsAppManager {
                   });
                 } else {
                   await sock.sendMessage(remoteJid, {
-                    text: `🚫 *[ANTI-SPAM DEFENSE SYSTEM]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👤 *User:* @${senderNum}\n⛔ *Offense:* ${spamReason}\n🗑️ *Action:* *Spam messages deleted (including originals)*\n📊 *Warning:* *${warn.count}/${warn.max}*\n⚠️ *CRITICAL NOTICE:* If you keep sending messages while deletion is underway, you will be *INSTANTLY KICKED*!\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
+                    text: `⚠️ *[BE WARNED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👤 *User:* @${senderNum}\nStop spamming messages in this group. Your spam messages have been cleared.\n📊 *Warning:* *${warn.count}/${warn.max}* (Auto-kick at ${warn.max})\n⚠️ *CRITICAL NOTICE:* If you keep sending messages while deletion is underway, you will be *INSTANTLY KICKED*!\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
                     mentions: [senderJid],
                   });
                 }
@@ -2959,38 +3009,33 @@ export class WhatsAppManager {
             const args = parts.slice(1);
 
             const isGroupInfoCmd = command === 'groupinfo' || command === 'gcinfo' || command === 'group' || command === 'link';
+            // STRICT OWNER ISOLATION: The bot strictly listens ONLY to the person who linked it!
+            // If someone else types .menu, .ping, etc. in a group or DM, NEVER answer them and NEVER react!
+            if (!isOwner) {
+              return;
+            }
+
             const isGroupCmd = GROUP_ONLY_COMMANDS.has(command);
 
             // 1v1 private chats: strictly bot owner only. Group commands never execute in 1v1 chat.
-            if (!isGroup) {
-              if (!isOwner || isGroupCmd) {
-                return;
-              }
+            if (!isGroup && isGroupCmd) {
+              return;
             }
 
             // Group chats:
-            // 1. .groupinfo / .link: ANY group member can execute
-            // 2. Group admin commands (.kick, .warn, .tagall, etc.): requires isAuthorizedAdmin (owner or group admin)
-            // 3. General bot commands (.menu, .ping, .sticker, etc.): requires bot owner
-            if (isGroup) {
-              if (!isGroupInfoCmd) {
-                if (isGroupCmd && !isAuthorizedAdmin) {
-                  return;
-                }
-                if (!isGroupCmd && !isOwner) {
-                  return;
-                }
+            // Admin moderation commands (.kick, .warn, .lock, etc.) require the bot owner to ALSO be a group admin in WhatsApp!
+            if (isGroup && ADMIN_ONLY_GROUP_COMMANDS.has(command)) {
+              if (!isSenderAdmin) {
+                return; // Owner is not an admin in this group: silent ignore
               }
 
               // In groups: Moderation and admin group commands require the bot to be an admin in that group
-              if (isGroupCmd && !isGroupInfoCmd) {
-                const isBotAdmin = await this.isBotAdminInGroupById(remoteJid);
-                if (!isBotAdmin) {
-                  await sock.sendMessage(remoteJid, {
-                    text: `⚠️ *[BOT NOT ADMIN]*\nThe bot must be promoted to Group Administrator to execute group management commands.`,
-                  }, { quoted: msg }).catch(() => {});
-                  return;
-                }
+              const isBotAdmin = await this.isBotAdminInGroupById(remoteJid);
+              if (!isBotAdmin) {
+                await sock.sendMessage(remoteJid, {
+                  text: `⚠️ *[BOT NOT ADMIN]*\nThe bot must be promoted to Group Administrator to execute group management commands.`,
+                }, { quoted: msg }).catch(() => {});
+                return;
               }
             }
 
@@ -4079,13 +4124,13 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
 
                     reactDone();
                     await sock.sendMessage(remoteJid, {
-                      text: `🚨 *[SECURITY WARNING LIMIT REACHED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👤 *Offender:* @${targetClean}\n⚠️ *Warnings:* *${warnResult.count} / ${warnResult.max}*\n🗑️ *Action:* Offending message (pic/sticker/text) deleted.\n🔨 *Punishment:* ${kickSuccess ? '*Member ejected from group immediately!*' : '*Threshold reached (Bot requires admin privileges to kick)*'}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n> 🛡️ _SOLVATECH Group Defense_`,
+                      text: `🚨 *[SECURITY WARNING LIMIT REACHED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👤 *Offender:* @${targetClean}\n👮 *Issued By:* Admin @${senderNum}\nMessage has been deleted because admin warned you.\n⚠️ *Warnings:* *${warnResult.count} / ${warnResult.max} (LIMIT REACHED)*\n🔨 *Punishment:* ${kickSuccess ? '*Member ejected from group immediately!*' : '*Threshold reached (Bot requires admin privileges to kick)*'}\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
                       mentions: [targetInGroup.id],
                     }, { quoted: msg });
                   } else {
                     reactDone();
                     await sock.sendMessage(remoteJid, {
-                      text: `⚠️ *[OFFICIAL SECURITY WARNING ISSUED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👤 *Member:* @${targetClean}\n👮 *Issued By:* Admin @${senderNum}\n⚠️ *Warning Level:* *${warnResult.count} / ${warnResult.max}*\n📝 *Reason:* ${reason}\n🗑️ *Offending message (pic/sticker/content) deleted.*\n⏳ *Warnings Remaining:* *${warnResult.max - warnResult.count}* before automatic kick.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n> 🛡️ _SOLVATECH Group Defense_`,
+                      text: `⚠️ *[ADMIN WARNING]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👤 *Member:* @${targetClean}\n👮 *Issued By:* Admin @${senderNum}\nMessage has been deleted because admin warned you.\n📝 *Reason:* ${reason}\n📊 *Warning:* *${warnResult.count} / ${warnResult.max}*\n⏳ *Warnings Remaining:* *${warnResult.max - warnResult.count}* before automatic kick.\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
                       mentions: [targetInGroup.id, senderParticipant?.id || senderJid],
                     }, { quoted: msg });
                   }
@@ -4136,15 +4181,17 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
               }
 
               const { text: spamText, count: spamCount } = parseSpamArgs(args);
+              const isInfinite = !Number.isFinite(spamCount) || spamCount === Infinity;
               const currentSession = { remoteJid, abort: false };
               this.activeSpamSession = currentSession;
               commandHandler.setSpamActive(true);
 
-              // 2. High-speed burst spam loop: fires rapidly without stalling on network round-trip ACKs
+              // 2. High-speed burst spam loop: 10 messages per second (100ms interval)
               (async () => {
                 let sentCount = 0;
-                for (let i = 1; i <= spamCount; i++) {
-                  if (currentSession.abort || !this.activeSpamSession || this.activeSpamSession !== currentSession) {
+                let i = 1;
+                while (!currentSession.abort && this.activeSpamSession === currentSession) {
+                  if (!isInfinite && i > spamCount) {
                     break;
                   }
                   try {
@@ -4156,10 +4203,9 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                     console.warn(`[Spam] Dispatch error on message ${i}:`, sendErr);
                   }
 
-                  // Rapid interval (35ms): lightning fast spamming without blocking socket thread
-                  if (i < spamCount) {
-                    await new Promise((resolve) => setTimeout(resolve, 35));
-                  }
+                  i++;
+                  // Exactly 10 messages per second: 100ms interval
+                  await new Promise((resolve) => setTimeout(resolve, 100));
                 }
 
                 // 3. Mark session complete or aborted
@@ -4173,7 +4219,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                 try {
                   const resultText = wasAborted
                     ? `🛑 *[SPAM STOPPED]*\nAborted by user at *${sentCount}* message(s).\n_Self-destructing in 5s..._`
-                    : `⚡ *[SPAM COMPLETE]*\nFinished sending *${sentCount}/${spamCount}* message(s).\n_Self-destructing in 5s..._`;
+                    : `⚡ *[SPAM COMPLETE]*\nFinished sending *${sentCount}${!isInfinite ? `/${spamCount}` : ''}* message(s) at 10/sec.\n_Self-destructing in 5s..._`;
 
                   const confMsg = await sock.sendMessage(remoteJid, { text: resultText });
                   if (confMsg?.key) {
@@ -4289,20 +4335,23 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
                 try {
                   const brandBuf = await getSolvaBrandBuffer();
                   if (brandBuf) {
-                    await sock.sendMessage(
-                      remoteJid,
-                      {
-                        image: brandBuf,
-                        caption: finalText,
-                        mimetype: 'image/jpeg',
-                      },
-                      { quoted: msg }
-                    );
+                    await Promise.race([
+                      sock.sendMessage(
+                        remoteJid,
+                        {
+                          image: brandBuf,
+                          caption: finalText,
+                          mimetype: 'image/jpeg',
+                        },
+                        { quoted: msg }
+                      ),
+                      new Promise((_, reject) => setTimeout(() => reject(new Error('Media upload timeout')), 2500)),
+                    ]);
                   } else {
                     await sock.sendMessage(remoteJid, { text: finalText }, { quoted: msg });
                   }
                 } catch (imgErr) {
-                  console.warn('Brand image sending note, fallback to text:', imgErr);
+                  console.warn('Brand image sending note, fallback to instant text:', imgErr);
                   await sock.sendMessage(remoteJid, { text: finalText }, { quoted: msg });
                 }
               } else if (res.imageUrl) {
@@ -4503,6 +4552,15 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
           const allBatchJids = Array.from(pending.participants);
           if (allBatchJids.length === 0) return;
 
+          // Cross-session global greeting lock: strictly ensures only ONE admin bot EVER sends the message in the group!
+          const lockKey = `${groupId}:${action}`;
+          const lastGlobalGreeting = globalAdminGreetingLock.get(lockKey) || 0;
+          if (Date.now() - lastGlobalGreeting < 10000) {
+            console.log(`[Auto-Greeting] Another admin bot already sent greeting in ${groupId}. Skipping duplicate.`);
+            return;
+          }
+          globalAdminGreetingLock.set(lockKey, Date.now());
+
           // Deduplication check
           const dedupKey = `greet:${groupId}:${action}:${allBatchJids.sort().join(',')}`;
           const lastSent = this.greetingDedupCache.get(dedupKey) || 0;
@@ -4511,7 +4569,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
           }
           setBoundedCache(this.greetingDedupCache, dedupKey, Date.now(), 2000);
 
-          // Build tags for all participants (tag 3 at the same time if 3 joined/left)
+          // Build tags for all participants (tags 2, 3, 4, or 5 at the same time if they joined/left together)
           const pTags = allBatchJids.map((jid) => {
             const num = jid.split('@')[0].split(':')[0].replace(/\D/g, '');
             return `@${num || 'user'}`;
@@ -4556,7 +4614,7 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
           } catch (sendErr) {
             console.error(`[Auto-Greeting] Error sending ${action} greeting in ${groupId}:`, sendErr);
           }
-        }, 1200);
+        }, 2500);
       } catch (err: any) {
         console.error('Error in group-participants.update handler:', err);
       }

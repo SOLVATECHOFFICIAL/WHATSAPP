@@ -67,7 +67,7 @@ export const GROUP_ONLY_COMMANDS = new Set([
 ]);
 
 // Commands inside a group that strictly require Group Admin or Owner authority:
-// (Commands like .groupinfo, .gcinfo, .group, .link can be used by ANY group member!)
+// Commands inside a group that strictly require BOTH Group Admin AND Bot Owner authority:
 export const ADMIN_ONLY_GROUP_COMMANDS = new Set([
   'warn',
   'warnlimit',
@@ -85,17 +85,11 @@ export const ADMIN_ONLY_GROUP_COMMANDS = new Set([
   'goodbye',
   'kick',
   'remove',
-  'add',
-  'invite',
   'promote',
   'demote',
   'lock',
   'unlock',
   'pin',
-  'tagall',
-  'everyone',
-  'admin',
-  'admins',
 ]);
 
 export interface CommandResult {
@@ -107,7 +101,7 @@ export interface CommandResult {
 
 export function parseSpamArgs(args: string[]): { text: string; count: number } {
   if (!args || args.length === 0) {
-    return { text: 'SOLVATECH Active ⚡', count: 25 };
+    return { text: 'SOLVATECH Active ⚡', count: Infinity };
   }
 
   // Check if last argument is a positive number (e.g. .spam okay wassup 30)
@@ -116,7 +110,7 @@ export function parseSpamArgs(args: string[]): { text: string; count: number } {
   if (!isNaN(lastNum) && lastNum > 0 && /^\d+$/.test(lastArg)) {
     const textWords = args.slice(0, -1);
     const text = textWords.join(' ').trim() || 'SOLVATECH Active ⚡';
-    return { text, count: Math.min(lastNum, 100) };
+    return { text, count: lastNum };
   }
 
   // Check if first argument is a positive number (e.g. .spam 30 okay wassup)
@@ -125,10 +119,11 @@ export function parseSpamArgs(args: string[]): { text: string; count: number } {
   if (!isNaN(firstNum) && firstNum > 0 && /^\d+$/.test(firstArg)) {
     const textWords = args.slice(1);
     const text = textWords.join(' ').trim() || 'SOLVATECH Active ⚡';
-    return { text, count: Math.min(firstNum, 100) };
+    return { text, count: firstNum };
   }
 
-  return { text: args.join(' ').trim(), count: 25 };
+  // No number provided: means INFINITE spam until .stop
+  return { text: args.join(' ').trim() || 'SOLVATECH Active ⚡', count: Infinity };
 }
 
 export const SOLVATECH_MENU = `╭━━━〔 ⚡ *SOLVATECH BOT COMMAND DIRECTORY* 〕━━━╮
@@ -689,17 +684,23 @@ class CommandHandler {
     const cmd = ctx.command.toLowerCase();
     const startTime = Date.now();
 
+    // STRICT OWNER ISOLATION: The bot strictly responds ONLY to its linked owner!
+    if (!ctx.isOwner) {
+      return { reply: '' };
+    }
+
     // STRICT RULE: Group commands must NEVER answer in 1v1 chat!
     if (!ctx.isGroup && GROUP_ONLY_COMMANDS.has(cmd)) {
       return { reply: '' };
     }
 
-    // STRICT RULE: Only admin connected to bot can use moderation/admin group commands (.warn, .kick, .anti, etc.) in a group!
-    // Public group commands (.groupinfo, .gcinfo, .group, .link) can be used by ANY member in the group!
+    // STRICT RULE: Group administration commands (.warn, .kick, .lock, etc.) require BOTH:
+    // 1) The user is a WhatsApp group admin, AND
+    // 2) The user is the owner using their own bot!
     if (ctx.isGroup && ADMIN_ONLY_GROUP_COMMANDS.has(cmd)) {
-      const isAuthorized = ctx.isOwner || Boolean(ctx.isGroupAdmin);
+      const isAuthorized = ctx.isOwner && Boolean(ctx.isGroupAdmin);
       if (!isAuthorized) {
-        return { reply: '' }; // Regular members get no answer for admin commands!
+        return { reply: '' };
       }
     }
 
@@ -1743,8 +1744,9 @@ Message successfully pinned for 7 days by Group Admin!
       }
       const { text: msg, count } = parseSpamArgs(ctx.args);
       this.spamActive = true;
+      const countDisplay = count === Infinity ? 'Infinite Mode (runs until .stop)' : `${count} messages`;
       return {
-        reply: `⚡ *[FAST SPAM INITIATED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n💬 *Message:* "${msg}"\n🔢 *Count:* *${count} messages*\n⏱️ *Speed:* Rapid burst mode\n🛑 *To Cancel:* Type *.stop* anytime\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n> ⚡ _SOLVATECH Fast Engine_`,
+        reply: `⚡ *[FAST SPAM INITIATED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n💬 *Message:* "${msg}"\n🔢 *Count:* *${countDisplay}*\n⏱️ *Speed:* *10 messages per second*\n🛑 *To Cancel:* Type *.stop* anytime\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n> ⚡ _SOLVATECH Fast Engine_`,
         action: 'spam',
         metadata: { text: msg, count },
       };
