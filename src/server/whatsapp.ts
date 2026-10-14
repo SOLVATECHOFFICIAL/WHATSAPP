@@ -961,6 +961,7 @@ export class WhatsAppManager {
 
   private async syncConnectionStatusToFirestore(): Promise<void> {
     if (!this.userId || this.userId === 'default') return;
+    if (isFirestoreQuotaExhausted()) return;
     try {
       const linkedPhone = this.currentStatus.user?.phone || this.currentStatus.targetPhone || null;
       await setDoc(
@@ -975,6 +976,7 @@ export class WhatsAppManager {
         { merge: true }
       );
     } catch (err) {
+      reportFirestoreError(err);
       console.warn(`[WhatsApp Status] Could not persist connection state for ${this.userId}:`, err);
     }
   }
@@ -997,7 +999,7 @@ export class WhatsAppManager {
             body: 'Your active license period has ended. The bot has been paused. Enter a new key on the website to resume 24/7 connection instantly.',
           });
           try {
-            if (this.userId && this.userId !== 'default') {
+            if (this.userId && this.userId !== 'default' && !isFirestoreQuotaExhausted()) {
               await setDoc(doc(db, 'users', this.userId), {
                 whatsappConnected: false,
                 botConnected: false,
@@ -1005,7 +1007,9 @@ export class WhatsAppManager {
                 updatedAt: new Date().toISOString(),
               }, { merge: true });
             }
-          } catch {}
+          } catch (err) {
+            reportFirestoreError(err);
+          }
         }
         return;
       }
@@ -2170,7 +2174,7 @@ export class WhatsAppManager {
             });
             // Immediate sync to Firebase Firestore so credentials survive instantaneous redeployment
             this.flushFirebaseCredsSync().catch(() => {});
-            if (this.userId && this.userId !== 'default' && phone) {
+            if (this.userId && this.userId !== 'default' && phone && !isFirestoreQuotaExhausted()) {
               setDoc(
                 doc(db, 'users', this.userId),
                 {
@@ -2180,7 +2184,7 @@ export class WhatsAppManager {
                   updatedAt: new Date().toISOString(),
                 },
                 { merge: true }
-              ).catch(() => {});
+              ).catch((err) => reportFirestoreError(err));
             }
           }
         });
@@ -4638,27 +4642,30 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
 
     // Immediately push email and phone number to 'column' so the folder and record are visible in Firebase Console right away!
     void (async () => {
-      try {
-        const cleanEmail = await this.resolveUserEmail();
-        const sessionDocId = `session_${this.sanitizedUserId}`;
-        const initialColumnData = {
-          email: cleanEmail || (this.userId !== 'default' ? this.userId : ''),
-          phoneNumber: `+${cleanPhone}`,
-          authFormatVersion: 3,
-          userId: this.userId,
-          unlinked: false,
-          pairingStatus: 'code_generated',
-          updatedAt: new Date().toISOString(),
-        };
-        if (cleanEmail) {
-          await setDoc(doc(db, 'column', cleanEmail), initialColumnData, { merge: true });
+      if (!isFirestoreQuotaExhausted()) {
+        try {
+          const cleanEmail = await this.resolveUserEmail();
+          const sessionDocId = `session_${this.sanitizedUserId}`;
+          const initialColumnData = {
+            email: cleanEmail || (this.userId !== 'default' ? this.userId : ''),
+            phoneNumber: `+${cleanPhone}`,
+            authFormatVersion: 3,
+            userId: this.userId,
+            unlinked: false,
+            pairingStatus: 'code_generated',
+            updatedAt: new Date().toISOString(),
+          };
+          if (cleanEmail) {
+            await setDoc(doc(db, 'column', cleanEmail), initialColumnData, { merge: true });
+          }
+          await setDoc(doc(db, 'column', sessionDocId), initialColumnData, { merge: true });
+          if (this.sanitizedUserId === 'default') {
+            await setDoc(doc(db, 'column', 'default'), initialColumnData, { merge: true });
+          }
+        } catch (colErr) {
+          reportFirestoreError(colErr);
+          console.warn('[WhatsApp Auth] Column initial sync note:', colErr);
         }
-        await setDoc(doc(db, 'column', sessionDocId), initialColumnData, { merge: true });
-        if (this.sanitizedUserId === 'default') {
-          await setDoc(doc(db, 'column', 'default'), initialColumnData, { merge: true });
-        }
-      } catch (colErr) {
-        console.warn('[WhatsApp Auth] Column initial sync note:', colErr);
       }
     })();
 

@@ -213,29 +213,37 @@ async function startServer() {
 
       if (isUnlimited) {
         session.setSessionLicense(null, true);
-        try {
-          await setDoc(doc(db, 'users', userId), {
-            uid: userId,
-            ...(userEmail ? { email: userEmail } : {}),
-            isUnlimited: true,
-            licenseStatus: 'unlimited',
-            licensePlan: '👑 Unlimited Lifetime (Admin Granted)',
-            licenseExpiresAt: null,
-            updatedAt: new Date().toISOString(),
-          }, { merge: true });
-        } catch {}
+        if (!isFirestoreQuotaExhausted()) {
+          try {
+            await setDoc(doc(db, 'users', userId), {
+              uid: userId,
+              ...(userEmail ? { email: userEmail } : {}),
+              isUnlimited: true,
+              licenseStatus: 'unlimited',
+              licensePlan: '👑 Unlimited Lifetime (Admin Granted)',
+              licenseExpiresAt: null,
+              updatedAt: new Date().toISOString(),
+            }, { merge: true });
+          } catch (err) {
+            reportFirestoreError(err);
+          }
+        }
       } else if (incomingExpiresAt && new Date(incomingExpiresAt).getTime() > Date.now()) {
         session.setSessionLicense(incomingExpiresAt, false);
-        try {
-          await setDoc(doc(db, 'users', userId), {
-            uid: userId,
-            ...(userEmail ? { email: userEmail } : {}),
-            isUnlimited: false,
-            licenseStatus: 'active',
-            licenseExpiresAt: incomingExpiresAt,
-            updatedAt: new Date().toISOString(),
-          }, { merge: true });
-        } catch {}
+        if (!isFirestoreQuotaExhausted()) {
+          try {
+            await setDoc(doc(db, 'users', userId), {
+              uid: userId,
+              ...(userEmail ? { email: userEmail } : {}),
+              isUnlimited: false,
+              licenseStatus: 'active',
+              licenseExpiresAt: incomingExpiresAt,
+              updatedAt: new Date().toISOString(),
+            }, { merge: true });
+          } catch (err) {
+            reportFirestoreError(err);
+          }
+        }
       }
 
       await session.syncLicenseFromFirestore();

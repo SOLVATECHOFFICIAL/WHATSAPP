@@ -80,40 +80,43 @@ export interface UserProfile {
 
 // Sync user to Firestore
 export async function syncUserProfile(user: { uid: string; email: string | null; displayName: string | null; photoURL?: string | null }) {
-  try {
-    if (!db || !(db as any).app) return;
-    const userRef = doc(db, 'users', user.uid);
-    const snap = await getDoc(userRef);
-    if (!snap.exists()) {
-      await setDoc(userRef, {
-        uid: user.uid,
-        email: user.email,
-        displayName: user.displayName || 'Solvatech User',
-        photoURL: user.photoURL || null,
-        licenseKey: null,
-        licensePlan: 'New User (No Key)',
-        licenseStatus: 'expired',
-        licenseExpiresAt: null,
-        hasUsedTrial: false,
-        createdAt: serverTimestamp(),
-        lastLogin: serverTimestamp(),
-      });
-    } else {
-      await setDoc(userRef, { lastLogin: serverTimestamp() }, { merge: true });
-    }
-    if (user.uid && user.email) {
-      void fetch('/api/users/sync', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+  if (!isFirestoreQuotaExhausted() && db && (db as any).app) {
+    try {
+      const userRef = doc(db, 'users', user.uid);
+      const snap = await getDoc(userRef);
+      if (!snap.exists()) {
+        await setDoc(userRef, {
           uid: user.uid,
           email: user.email,
-          displayName: user.displayName || user.email.split('@')[0],
-        }),
-      }).catch(() => {});
+          displayName: user.displayName || 'Solvatech User',
+          photoURL: user.photoURL || null,
+          licenseKey: null,
+          licensePlan: 'New User (No Key)',
+          licenseStatus: 'expired',
+          licenseExpiresAt: null,
+          hasUsedTrial: false,
+          createdAt: serverTimestamp(),
+          lastLogin: serverTimestamp(),
+        });
+      } else {
+        await setDoc(userRef, { lastLogin: serverTimestamp() }, { merge: true });
+      }
+    } catch (e) {
+      reportFirestoreError(e);
+      console.warn('Firestore profile sync note:', e);
     }
-  } catch (e) {
-    console.warn('Firestore profile sync note:', e);
+  }
+
+  if (user.uid && user.email) {
+    void fetch('/api/users/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        uid: user.uid,
+        email: user.email,
+        displayName: user.displayName || user.email.split('@')[0],
+      }),
+    }).catch(() => {});
   }
 }
 

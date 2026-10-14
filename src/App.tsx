@@ -35,6 +35,8 @@ import {
   signInWithGoogle,
   signInWithEmail,
   signUpWithEmail,
+  isFirestoreQuotaExhausted,
+  reportFirestoreError,
 } from './services/firebase';
 import { COUNTRIES, Country } from './data/countries';
 import { CountrySelect } from './components/CountrySelect';
@@ -405,79 +407,83 @@ export default function App() {
 
         // Real-time Firestore sync
         try {
-          currentDocUnsub = onSnapshot(
-            doc(db, 'users', user.uid),
-            (snap) => {
-              if (snap.exists()) {
-                const data = snap.data();
-                if (data.hasUsedTrial === true || data.lifetimeTrialLocked === true || data.trialClaimedAt) {
-                  setHasClaimedTrial(true);
-                  try {
-                    localStorage.setItem(`solvatech_trial_claimed_${user.uid}`, 'true');
-                    if (user.email) localStorage.setItem(`solvatech_trial_claimed_${user.email.toLowerCase()}`, 'true');
-                  } catch {}
-                }
-
-                const isUserUnlimited = isOwner || Boolean(data.isUnlimited) || data.licenseStatus === 'unlimited' || Boolean(data.licensePlan?.includes('Unlimited'));
-
-                setUserLicenseData((prev) => {
-                  const now = Date.now();
-                  const prevExpMs = prev.expiresAt ? new Date(prev.expiresAt).getTime() : 0;
-                  const newExpMs = data.licenseExpiresAt ? new Date(data.licenseExpiresAt).getTime() : 0;
-                  let localExpMs = 0;
-                  try {
-                    const lExp = localStorage.getItem(`solvatech_license_expiresAt_${user.uid}`) ||
-                      (user.email ? localStorage.getItem(`solvatech_license_expiresAt_${user.email.toLowerCase()}`) : null);
-                    if (lExp) localExpMs = new Date(lExp).getTime();
-                  } catch {}
-
-                  let finalExpiresAt = isUserUnlimited ? null : (data.licenseExpiresAt || null);
-                  let finalPlan = isUserUnlimited ? '👑 Unlimited Lifetime (Admin Granted)' : (data.licensePlan || 'Active Plan');
-
-                  // If current active countdown is still running and snapshot has null/older, retain the active countdown
-                  if (!isUserUnlimited) {
-                    if (prevExpMs > now && (!newExpMs || newExpMs < prevExpMs)) {
-                      finalExpiresAt = prev.expiresAt;
-                      finalPlan = prev.plan;
-                    } else if (localExpMs > now && (!newExpMs || newExpMs < localExpMs)) {
-                      finalExpiresAt = new Date(localExpMs).toISOString();
-                    }
-                  }
-
-                  if (finalExpiresAt && new Date(finalExpiresAt).getTime() > now) {
+          if (!isFirestoreQuotaExhausted() && db && (db as any).app) {
+            currentDocUnsub = onSnapshot(
+              doc(db, 'users', user.uid),
+              (snap) => {
+                if (snap.exists()) {
+                  const data = snap.data();
+                  if (data.hasUsedTrial === true || data.lifetimeTrialLocked === true || data.trialClaimedAt) {
+                    setHasClaimedTrial(true);
                     try {
-                      localStorage.setItem(`solvatech_license_expiresAt_${user.uid}`, finalExpiresAt);
-                      if (user.email) localStorage.setItem(`solvatech_license_expiresAt_${user.email.toLowerCase()}`, finalExpiresAt);
+                      localStorage.setItem(`solvatech_trial_claimed_${user.uid}`, 'true');
+                      if (user.email) localStorage.setItem(`solvatech_trial_claimed_${user.email.toLowerCase()}`, 'true');
                     } catch {}
                   }
 
-                  return {
-                    expiresAt: finalExpiresAt,
-                    isUnlimited: isUserUnlimited,
-                    plan: isUserUnlimited ? '👑 Unlimited Lifetime (Admin Granted)' : finalPlan,
-                    key: data.licenseKey || prev.key || null,
-                  };
-                });
-              }
-            },
-            (err) => {
-              const uEmail = user.email ? `&userEmail=${encodeURIComponent(user.email)}` : '';
-              fetch(`/api/whatsapp/status?userId=${encodeURIComponent(user.uid)}${uEmail}`, {
-                headers: { 'x-user-email': user.email || '' },
-              })
-                .then((r) => r.json())
-                .then((st) => {
-                  if (st?.status?.licenseExpiresAt) {
-                    setUserLicenseData((prev) => ({
-                      ...prev,
-                      expiresAt: st.status.licenseExpiresAt,
-                    }));
-                  }
+                  const isUserUnlimited = isOwner || Boolean(data.isUnlimited) || data.licenseStatus === 'unlimited' || Boolean(data.licensePlan?.includes('Unlimited'));
+
+                  setUserLicenseData((prev) => {
+                    const now = Date.now();
+                    const prevExpMs = prev.expiresAt ? new Date(prev.expiresAt).getTime() : 0;
+                    const newExpMs = data.licenseExpiresAt ? new Date(data.licenseExpiresAt).getTime() : 0;
+                    let localExpMs = 0;
+                    try {
+                      const lExp = localStorage.getItem(`solvatech_license_expiresAt_${user.uid}`) ||
+                        (user.email ? localStorage.getItem(`solvatech_license_expiresAt_${user.email.toLowerCase()}`) : null);
+                      if (lExp) localExpMs = new Date(lExp).getTime();
+                    } catch {}
+
+                    let finalExpiresAt = isUserUnlimited ? null : (data.licenseExpiresAt || null);
+                    let finalPlan = isUserUnlimited ? '👑 Unlimited Lifetime (Admin Granted)' : (data.licensePlan || 'Active Plan');
+
+                    // If current active countdown is still running and snapshot has null/older, retain the active countdown
+                    if (!isUserUnlimited) {
+                      if (prevExpMs > now && (!newExpMs || newExpMs < prevExpMs)) {
+                        finalExpiresAt = prev.expiresAt;
+                        finalPlan = prev.plan;
+                      } else if (localExpMs > now && (!newExpMs || newExpMs < localExpMs)) {
+                        finalExpiresAt = new Date(localExpMs).toISOString();
+                      }
+                    }
+
+                    if (finalExpiresAt && new Date(finalExpiresAt).getTime() > now) {
+                      try {
+                        localStorage.setItem(`solvatech_license_expiresAt_${user.uid}`, finalExpiresAt);
+                        if (user.email) localStorage.setItem(`solvatech_license_expiresAt_${user.email.toLowerCase()}`, finalExpiresAt);
+                      } catch {}
+                    }
+
+                    return {
+                      expiresAt: finalExpiresAt,
+                      isUnlimited: isUserUnlimited,
+                      plan: isUserUnlimited ? '👑 Unlimited Lifetime (Admin Granted)' : finalPlan,
+                      key: data.licenseKey || prev.key || null,
+                    };
+                  });
+                }
+              },
+              (err) => {
+                reportFirestoreError(err);
+                const uEmail = user.email ? `&userEmail=${encodeURIComponent(user.email)}` : '';
+                fetch(`/api/whatsapp/status?userId=${encodeURIComponent(user.uid)}${uEmail}`, {
+                  headers: { 'x-user-email': user.email || '' },
                 })
-                .catch(() => {});
-            }
-          );
+                  .then((r) => r.json())
+                  .then((st) => {
+                    if (st?.status?.licenseExpiresAt) {
+                      setUserLicenseData((prev) => ({
+                        ...prev,
+                        expiresAt: st.status.licenseExpiresAt,
+                      }));
+                    }
+                  })
+                  .catch(() => {});
+              }
+            );
+          }
         } catch (e) {
+          reportFirestoreError(e);
           console.debug('Firestore user listener note:', e);
         }
       } else {

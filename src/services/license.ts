@@ -105,11 +105,14 @@ export async function createLicense(plan: LicensePlan, createdBy: string = OWNER
   }
 
   // 2. Also save to Firestore
-  try {
-    const docRef = doc(db, 'licenses', record.key);
-    await setDoc(docRef, record);
-  } catch (err) {
-    console.warn('Firestore license write:', err);
+  if (!isFirestoreQuotaExhausted()) {
+    try {
+      const docRef = doc(db, 'licenses', record.key);
+      await setDoc(docRef, record).catch((err) => reportFirestoreError(err));
+    } catch (err) {
+      reportFirestoreError(err);
+      console.warn('Firestore license write:', err);
+    }
   }
 
   return record;
@@ -217,29 +220,33 @@ export async function redeemKey(
   } catch {}
 
   // Update client Firestore user document directly for reactive UI sync
-  try {
-    const userRef = doc(db, 'users', userUid);
-    void setDoc(userRef, {
-      uid: userUid,
-      email: cleanEmail,
-      licenseExpiresAt: newExpiresAt,
-      licensePlan: data.planName || 'Active Paid Plan',
-      licenseKey: cleanKey,
-      licenseStatus: 'active',
-      isUnlimited: false,
-      updatedAt: serverTimestamp(),
-    }, { merge: true });
+  if (!isFirestoreQuotaExhausted() && db && (db as any).app) {
+    try {
+      const userRef = doc(db, 'users', userUid);
+      setDoc(userRef, {
+        uid: userUid,
+        email: cleanEmail,
+        licenseExpiresAt: newExpiresAt,
+        licensePlan: data.planName || 'Active Paid Plan',
+        licenseKey: cleanKey,
+        licenseStatus: 'active',
+        isUnlimited: false,
+        updatedAt: serverTimestamp(),
+      }, { merge: true }).catch((err) => reportFirestoreError(err));
 
-    const userLicRef = doc(db, 'user_licenses', userUid);
-    void setDoc(userLicRef, {
-      userId: userUid,
-      email: cleanEmail,
-      activeKey: cleanKey,
-      plan: data.planName || 'Active Paid Plan',
-      expiresAt: newExpiresAt,
-      updatedAt: serverTimestamp(),
-    }, { merge: true });
-  } catch {}
+      const userLicRef = doc(db, 'user_licenses', userUid);
+      setDoc(userLicRef, {
+        userId: userUid,
+        email: cleanEmail,
+        activeKey: cleanKey,
+        plan: data.planName || 'Active Paid Plan',
+        expiresAt: newExpiresAt,
+        updatedAt: serverTimestamp(),
+      }, { merge: true }).catch((err) => reportFirestoreError(err));
+    } catch (e) {
+      reportFirestoreError(e);
+    }
+  }
 
   // Trigger server session license sync
   try {
@@ -297,60 +304,65 @@ export async function toggleUserUnlimited(
     return true;
   }
 
-  try {
-    const userRef = doc(db, 'users', userUid);
-    await setDoc(
-      userRef,
-      {
-        uid: userUid,
-        email,
-        isUnlimited: enableUnlimited,
-        licenseStatus: enableUnlimited ? 'unlimited' : 'expired',
-        licensePlan: enableUnlimited ? '👑 Unlimited Lifetime (Admin Granted)' : 'Expired Plan',
-        licenseKey: enableUnlimited ? 'SOLVA-ADMIN-UNLIMITED-VIP' : 'REVOKED',
-        licenseExpiresAt: enableUnlimited ? null : new Date().toISOString(),
-        updatedAt: serverTimestamp(),
-      },
-      { merge: true }
-    );
+  if (!isFirestoreQuotaExhausted() && db && (db as any).app) {
+    try {
+      const userRef = doc(db, 'users', userUid);
+      await setDoc(
+        userRef,
+        {
+          uid: userUid,
+          email,
+          isUnlimited: enableUnlimited,
+          licenseStatus: enableUnlimited ? 'unlimited' : 'expired',
+          licensePlan: enableUnlimited ? '👑 Unlimited Lifetime (Admin Granted)' : 'Expired Plan',
+          licenseKey: enableUnlimited ? 'SOLVA-ADMIN-UNLIMITED-VIP' : 'REVOKED',
+          licenseExpiresAt: enableUnlimited ? null : new Date().toISOString(),
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      ).catch((err) => reportFirestoreError(err));
 
-    const userLicRef = doc(db, 'user_licenses', userUid);
-    await setDoc(
-      userLicRef,
-      {
-        userId: userUid,
-        email,
-        isUnlimited: enableUnlimited,
-        status: enableUnlimited ? 'unlimited' : 'expired',
-        updatedAt: serverTimestamp(),
-      },
-      { merge: true }
-    );
+      const userLicRef = doc(db, 'user_licenses', userUid);
+      await setDoc(
+        userLicRef,
+        {
+          userId: userUid,
+          email,
+          isUnlimited: enableUnlimited,
+          status: enableUnlimited ? 'unlimited' : 'expired',
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      ).catch((err) => reportFirestoreError(err));
 
-    // Sync any secondary Firestore records with the same email
-    if (email && email.includes('@')) {
-      try {
-        const qSnap = await getDocs(query(collection(db, 'users'), where('email', '==', email.trim().toLowerCase())));
-        for (const d of qSnap.docs) {
-          if (d.id !== userUid) {
-            await setDoc(
-              doc(db, 'users', d.id),
-              {
-                isUnlimited: enableUnlimited,
-                licenseStatus: enableUnlimited ? 'unlimited' : 'expired',
-                licensePlan: enableUnlimited ? '👑 Unlimited Lifetime (Admin Granted)' : 'Expired Plan',
-                licenseKey: enableUnlimited ? 'SOLVA-ADMIN-UNLIMITED-VIP' : 'REVOKED',
-                licenseExpiresAt: enableUnlimited ? null : new Date().toISOString(),
-                updatedAt: serverTimestamp(),
-              },
-              { merge: true }
-            );
+      // Sync any secondary Firestore records with the same email
+      if (email && email.includes('@')) {
+        try {
+          const qSnap = await getDocs(query(collection(db, 'users'), where('email', '==', email.trim().toLowerCase())));
+          for (const d of qSnap.docs) {
+            if (d.id !== userUid) {
+              await setDoc(
+                doc(db, 'users', d.id),
+                {
+                  isUnlimited: enableUnlimited,
+                  licenseStatus: enableUnlimited ? 'unlimited' : 'expired',
+                  licensePlan: enableUnlimited ? '👑 Unlimited Lifetime (Admin Granted)' : 'Expired Plan',
+                  licenseKey: enableUnlimited ? 'SOLVA-ADMIN-UNLIMITED-VIP' : 'REVOKED',
+                  licenseExpiresAt: enableUnlimited ? null : new Date().toISOString(),
+                  updatedAt: serverTimestamp(),
+                },
+                { merge: true }
+              ).catch((err) => reportFirestoreError(err));
+            }
           }
+        } catch (subErr) {
+          reportFirestoreError(subErr);
         }
-      } catch {}
+      }
+    } catch (err) {
+      reportFirestoreError(err);
+      console.warn('Firestore toggle unlimited:', err);
     }
-  } catch (err) {
-    console.warn('Firestore toggle unlimited:', err);
   }
 
   try {
@@ -434,59 +446,64 @@ export async function grantUserExtraDays(
   const newExpiryMs = baseTime + days * 24 * 60 * 60 * 1000;
   const newExpiresAt = new Date(newExpiryMs).toISOString();
 
-  try {
-    const userRef = doc(db, 'users', userUid);
-    await setDoc(
-      userRef,
-      {
-        uid: userUid,
-        email: userEmail,
-        licenseExpiresAt: newExpiresAt,
-        licensePlan: `Admin Granted (+${days} Days)`,
-        licenseStatus: 'active',
-        isUnlimited: false,
-        updatedAt: serverTimestamp(),
-      },
-      { merge: true }
-    );
+  if (!isFirestoreQuotaExhausted() && db && (db as any).app) {
+    try {
+      const userRef = doc(db, 'users', userUid);
+      await setDoc(
+        userRef,
+        {
+          uid: userUid,
+          email: userEmail,
+          licenseExpiresAt: newExpiresAt,
+          licensePlan: `Admin Granted (+${days} Days)`,
+          licenseStatus: 'active',
+          isUnlimited: false,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      ).catch((err) => reportFirestoreError(err));
 
-    const userLicRef = doc(db, 'user_licenses', userUid);
-    await setDoc(
-      userLicRef,
-      {
-        userId: userUid,
-        email: userEmail,
-        expiresAt: newExpiresAt,
-        plan: `Admin Granted (+${days} Days)`,
-        status: 'active',
-        isUnlimited: false,
-        updatedAt: serverTimestamp(),
-      },
-      { merge: true }
-    );
+      const userLicRef = doc(db, 'user_licenses', userUid);
+      await setDoc(
+        userLicRef,
+        {
+          userId: userUid,
+          email: userEmail,
+          expiresAt: newExpiresAt,
+          plan: `Admin Granted (+${days} Days)`,
+          status: 'active',
+          isUnlimited: false,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      ).catch((err) => reportFirestoreError(err));
 
-    if (userEmail && userEmail.includes('@')) {
-      try {
-        const qSnap = await getDocs(query(collection(db, 'users'), where('email', '==', userEmail.trim().toLowerCase())));
-        for (const d of qSnap.docs) {
-          if (d.id !== userUid) {
-            await setDoc(
-              doc(db, 'users', d.id),
-              {
-                licenseExpiresAt: newExpiresAt,
-                licensePlan: `Admin Granted (+${days} Days)`,
-                licenseStatus: 'active',
-                isUnlimited: false,
-                updatedAt: serverTimestamp(),
-              },
-              { merge: true }
-            );
+      if (userEmail && userEmail.includes('@')) {
+        try {
+          const qSnap = await getDocs(query(collection(db, 'users'), where('email', '==', userEmail.trim().toLowerCase())));
+          for (const d of qSnap.docs) {
+            if (d.id !== userUid) {
+              await setDoc(
+                doc(db, 'users', d.id),
+                {
+                  licenseExpiresAt: newExpiresAt,
+                  licensePlan: `Admin Granted (+${days} Days)`,
+                  licenseStatus: 'active',
+                  isUnlimited: false,
+                  updatedAt: serverTimestamp(),
+                },
+                { merge: true }
+              ).catch((err) => reportFirestoreError(err));
+            }
           }
+        } catch (subErr) {
+          reportFirestoreError(subErr);
         }
-      } catch {}
+      }
+    } catch (e) {
+      reportFirestoreError(e);
+      console.error('Error granting extra days in Firestore:', e);
     }
-  } catch (e) {
-    console.error('Error granting extra days in Firestore:', e);
   }
 
   // Persist directly to backend database so refresh never loses state
@@ -541,21 +558,24 @@ export async function revokeUserAccess(
   userEmail?: string | null
 ): Promise<{ success: boolean; message: string }> {
   const nowIso = new Date().toISOString();
-  try {
-    const userRef = doc(db, 'users', userUid);
-    await setDoc(
-      userRef,
-      {
-        licenseExpiresAt: nowIso,
-        licenseStatus: 'expired',
-        licensePlan: 'Revoked by Admin',
-        isUnlimited: false,
-        updatedAt: serverTimestamp(),
-      },
-      { merge: true }
-    );
-  } catch (e) {
-    console.warn('Error revoking in Firestore:', e);
+  if (!isFirestoreQuotaExhausted() && db && (db as any).app) {
+    try {
+      const userRef = doc(db, 'users', userUid);
+      await setDoc(
+        userRef,
+        {
+          licenseExpiresAt: nowIso,
+          licenseStatus: 'expired',
+          licensePlan: 'Revoked by Admin',
+          isUnlimited: false,
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      ).catch((err) => reportFirestoreError(err));
+    } catch (e) {
+      reportFirestoreError(e);
+      console.warn('Error revoking in Firestore:', e);
+    }
   }
 
   await postAdminUpdate({
@@ -1175,21 +1195,25 @@ export async function claim30MinuteTrial(
   } catch {}
 
   // Update client Firestore user document directly for immediate reactive UI update
-  try {
-    const userRef = doc(db, 'users', userUid);
-    void setDoc(userRef, {
-      uid: userUid,
-      email: cleanEmail,
-      licenseExpiresAt: finalExpiresAt,
-      licensePlan: '⚡ 30-Minute Test (Active)',
-      licenseStatus: 'active',
-      isUnlimited: false,
-      hasUsedTrial: true,
-      trialClaimedAt: new Date().toISOString(),
-      trialEmail: cleanEmail,
-      lifetimeTrialLocked: true,
-    }, { merge: true });
-  } catch {}
+  if (!isFirestoreQuotaExhausted() && db && (db as any).app) {
+    try {
+      const userRef = doc(db, 'users', userUid);
+      setDoc(userRef, {
+        uid: userUid,
+        email: cleanEmail,
+        licenseExpiresAt: finalExpiresAt,
+        licensePlan: '⚡ 30-Minute Test (Active)',
+        licenseStatus: 'active',
+        isUnlimited: false,
+        hasUsedTrial: true,
+        trialClaimedAt: new Date().toISOString(),
+        trialEmail: cleanEmail,
+        lifetimeTrialLocked: true,
+      }, { merge: true }).catch((err) => reportFirestoreError(err));
+    } catch (e) {
+      reportFirestoreError(e);
+    }
+  }
 
   // Trigger background socket synchronization
   try {
@@ -1218,71 +1242,75 @@ export async function terminateAllLicenses(): Promise<{ success: boolean; count:
   const nowIso = new Date().toISOString();
 
   // 1. Terminate all users in Firestore
-  try {
-    const colRef = collection(db, 'users');
-    const snap = await getDocs(colRef);
-    const updates: Promise<void>[] = [];
+  if (!isFirestoreQuotaExhausted() && db && (db as any).app) {
+    try {
+      const colRef = collection(db, 'users');
+      const snap = await getDocs(colRef);
+      const updates: Promise<void>[] = [];
 
-    snap.forEach((d) => {
-      const data = d.data() || {};
-      const email = (data.email || '').toLowerCase();
-      // Master Founder Account is NEVER terminated
-      if (isOwnerEmail(email)) return;
+      snap.forEach((d) => {
+        const data = d.data() || {};
+        const email = (data.email || '').toLowerCase();
+        // Master Founder Account is NEVER terminated
+        if (isOwnerEmail(email)) return;
 
-      updates.push(
-        setDoc(
-          doc(db, 'users', d.id),
-          {
-            licenseExpiresAt: nowIso,
-            licenseStatus: 'expired',
-            licensePlan: 'Terminated by Admin',
-            isUnlimited: false,
-            updatedAt: serverTimestamp(),
-          },
-          { merge: true }
-        )
-      );
-
-      updates.push(
-        setDoc(
-          doc(db, 'user_licenses', d.id),
-          {
-            expiresAt: nowIso,
-            status: 'expired',
-            isUnlimited: false,
-            updatedAt: serverTimestamp(),
-          },
-          { merge: true }
-        )
-      );
-      terminatedCount++;
-    });
-
-    await Promise.all(updates);
-  } catch (e) {
-    console.warn('Firestore terminate all licenses warning:', e);
-  }
-
-  // 2. Also terminate active licenses in collection
-  try {
-    const licRef = collection(db, 'licenses');
-    const licSnap = await getDocs(licRef);
-    const licUpdates: Promise<void>[] = [];
-    licSnap.forEach((d) => {
-      const data = d.data() || {};
-      if (data.status === 'active') {
-        licUpdates.push(
+        updates.push(
           setDoc(
-            doc(db, 'licenses', d.id),
-            { status: 'expired', expiresAt: nowIso },
+            doc(db, 'users', d.id),
+            {
+              licenseExpiresAt: nowIso,
+              licenseStatus: 'expired',
+              licensePlan: 'Terminated by Admin',
+              isUnlimited: false,
+              updatedAt: serverTimestamp(),
+            },
             { merge: true }
-          )
+          ).catch((err) => reportFirestoreError(err))
         );
-      }
-    });
-    await Promise.all(licUpdates);
-  } catch (e) {
-    console.warn('Licenses collection termination note:', e);
+
+        updates.push(
+          setDoc(
+            doc(db, 'user_licenses', d.id),
+            {
+              expiresAt: nowIso,
+              status: 'expired',
+              isUnlimited: false,
+              updatedAt: serverTimestamp(),
+            },
+            { merge: true }
+          ).catch((err) => reportFirestoreError(err))
+        );
+        terminatedCount++;
+      });
+
+      await Promise.all(updates);
+    } catch (e) {
+      reportFirestoreError(e);
+      console.warn('Firestore terminate all licenses warning:', e);
+    }
+
+    // 2. Also terminate active licenses in collection
+    try {
+      const licRef = collection(db, 'licenses');
+      const licSnap = await getDocs(licRef);
+      const licUpdates: Promise<void>[] = [];
+      licSnap.forEach((d) => {
+        const data = d.data() || {};
+        if (data.status === 'active') {
+          licUpdates.push(
+            setDoc(
+              doc(db, 'licenses', d.id),
+              { status: 'expired', expiresAt: nowIso },
+              { merge: true }
+            ).catch((err) => reportFirestoreError(err))
+          );
+        }
+      });
+      await Promise.all(licUpdates);
+    } catch (e) {
+      reportFirestoreError(e);
+      console.warn('Licenses collection termination note:', e);
+    }
   }
 
   return {
