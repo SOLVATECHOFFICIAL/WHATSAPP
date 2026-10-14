@@ -378,7 +378,7 @@ async function startServer() {
       // Delete any duplicates in Firebase with same email but different UID
       try {
         const snap = await getDocs(collection(db, 'users'));
-        snap.forEach((d) => {
+        snap.forEach((d: any) => {
           if (d.id !== uid) {
             const data = d.data() || {};
             if (typeof data.email === 'string' && data.email.trim().toLowerCase() === email) {

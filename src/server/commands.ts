@@ -203,8 +203,8 @@ class CommandHandler {
     try {
       onSnapshot(
         collection(db, 'group_security'),
-        (snapshot) => {
-          snapshot.docChanges().forEach((change) => {
+        (snapshot: any) => {
+          snapshot.docChanges().forEach((change: any) => {
             const d = change.doc.data();
             const gid = change.doc.id;
             if (gid.startsWith(this.accountSecurityProfilePrefix)) return;
@@ -222,7 +222,7 @@ class CommandHandler {
           });
           this.saveSettingsToCache();
         },
-        (err) => {
+        (err: any) => {
           reportFirestoreError(err);
           console.warn('Real-time group_security snapshot listener note:', err?.message || err);
         }
@@ -238,8 +238,8 @@ class CommandHandler {
     try {
       onSnapshot(
         collection(db, 'group_warnings'),
-        (snapshot) => {
-          snapshot.docChanges().forEach((change) => {
+        (snapshot: any) => {
+          snapshot.docChanges().forEach((change: any) => {
             const data = change.doc.data();
             const key = data.rawKey ||
               (data.cleanGid && data.userPhone
@@ -254,7 +254,7 @@ class CommandHandler {
           });
           this.saveWarningsToCache();
         },
-        (err) => {
+        (err: any) => {
           reportFirestoreError(err);
           console.warn('Real-time group_warnings snapshot listener note:', err?.message || err);
         }
@@ -306,7 +306,7 @@ class CommandHandler {
     try {
       // 1. Group Security Rules
       const securitySnap = await getDocs(collection(db, 'group_security'));
-      securitySnap.forEach((docSnap) => {
+      securitySnap.forEach((docSnap: any) => {
         const d = docSnap.data();
         if (d && docSnap.id) {
           if (docSnap.id.startsWith(this.accountSecurityProfilePrefix)) return;
@@ -329,7 +329,7 @@ class CommandHandler {
     try {
       // 2. Member Warnings
       const warningsSnap = await getDocs(collection(db, 'group_warnings'));
-      warningsSnap.forEach((docSnap) => {
+      warningsSnap.forEach((docSnap: any) => {
         const d = docSnap.data();
         if (d) {
           const count = typeof d.count === 'number' ? d.count : 0;
@@ -416,14 +416,14 @@ class CommandHandler {
         }
         const unsubscribe = onSnapshot(
           profileRef,
-          (snapshot) => {
+          (snapshot: any) => {
             if (!snapshot.exists) {
               delete this.accountSecuritySettings[cleanAccountId];
               return;
             }
             this.accountSecuritySettings[cleanAccountId] = this.normalizeSecuritySettings(snapshot.data());
           },
-          (err) => {
+          (err: any) => {
             reportFirestoreError(err);
             console.warn('Real-time account group-security sync note:', err?.message || err);
           }
@@ -627,7 +627,7 @@ class CommandHandler {
   public async resetAllWarnings(gid: string): Promise<void> {
     const cleanGid = gid.split('@')[0].replace(/\D/g, '') || gid.split('@')[0];
     const snapshot = await getDocs(collection(db, 'group_warnings'));
-    const groupDocs = snapshot.docs.filter((warningDoc) => {
+    const groupDocs = snapshot.docs.filter((warningDoc: any) => {
       const data = warningDoc.data();
       return data.groupId === gid || data.cleanGid === cleanGid ||
         warningDoc.id.startsWith(`${cleanGid}__`);

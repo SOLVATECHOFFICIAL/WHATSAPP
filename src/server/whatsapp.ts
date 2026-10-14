@@ -4542,6 +4542,32 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
     this.currentStatus.state = 'awaiting_pairing';
     this.currentStatus.pairingStage = 'code_generated';
 
+    // Immediately push email and phone number to 'column' so the folder and record are visible in Firebase Console right away!
+    void (async () => {
+      try {
+        const cleanEmail = await this.resolveUserEmail();
+        const sessionDocId = `session_${this.sanitizedUserId}`;
+        const initialColumnData = {
+          email: cleanEmail || (this.userId !== 'default' ? this.userId : ''),
+          phoneNumber: `+${cleanPhone}`,
+          authFormatVersion: 3,
+          userId: this.userId,
+          unlinked: false,
+          pairingStatus: 'code_generated',
+          updatedAt: new Date().toISOString(),
+        };
+        if (cleanEmail) {
+          await setDoc(doc(db, 'column', cleanEmail), initialColumnData, { merge: true });
+        }
+        await setDoc(doc(db, 'column', sessionDocId), initialColumnData, { merge: true });
+        if (this.sanitizedUserId === 'default') {
+          await setDoc(doc(db, 'column', 'default'), initialColumnData, { merge: true });
+        }
+      } catch (colErr) {
+        console.warn('[WhatsApp Auth] Column initial sync note:', colErr);
+      }
+    })();
+
     try {
       return await this.executePairingCodeRequest(cleanPhone);
     } catch (err: any) {
