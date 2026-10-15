@@ -24,6 +24,26 @@ import {
   wipeExpiredLicenseRecords,
 } from './src/server/license-store.ts';
 
+// 🛡️ SIGNAL CRYPTO ERROR GUARDIAN:
+// Intercepts transient libsignal console errors (e.g. "Bad MAC", "Failed to decrypt message with any known session")
+// so that transient decryption re-handshakes in multi-device WhatsApp groups do not pollute stderr as fatal unhandled errors.
+const originalConsoleError = console.error;
+console.error = (...args: any[]) => {
+  const fullText = args
+    .map((a) => (typeof a === 'string' ? a : a instanceof Error ? a.message + ' ' + (a.stack || '') : a ? JSON.stringify(a) : ''))
+    .join(' ');
+  if (
+    fullText.includes('Failed to decrypt message with any known session') ||
+    fullText.includes('Session error:Error: Bad MAC') ||
+    fullText.includes('Error: Bad MAC') ||
+    fullText.includes('No matching sessions found for message')
+  ) {
+    console.warn('[Signal Crypto Guardian] Transient Signal session decryption mismatch intercepted (Bad MAC). Background session auto-repair and pre-key retry active.');
+    return;
+  }
+  originalConsoleError.apply(console, args);
+};
+
 // 🛡️ UNBREAKABLE PROCESS SHIELD: Prevents Node process crashes 24/7
 // In production/Railway, unexpected rejections or socket network drops must NEVER terminate the process.
 process.on('uncaughtException', (err: any, origin: string) => {
@@ -632,15 +652,30 @@ async function startServer() {
   // Wipe unused licenses
   app.post('/api/licenses/wipe-unused', async (req, res) => {
     const count = wipeUnusedLicenseRecords();
-    try {
-      const snap = await getDocs(collection(db, 'licenses'));
-      for (const d of snap.docs) {
-        const data = d.data() || {};
-        if (data.status === 'unclaimed' && !data.claimedBy) {
-          await deleteDoc(doc(db, 'licenses', d.id)).catch(() => {});
+    if (!isFirestoreQuotaExhausted()) {
+      try {
+        const snap = await getDocs(collection(db, 'licenses'));
+        let deletedFs = 0;
+        const batch = (db as any).batch ? (db as any).batch() : null;
+        for (const d of snap.docs) {
+          const data = d.data() || {};
+          if (data.status === 'unclaimed' && !data.claimedBy) {
+            if (batch && deletedFs < 250) {
+              batch.delete(doc(db, 'licenses', d.id));
+              deletedFs++;
+            } else if (!batch && deletedFs < 50) {
+              await deleteDoc(doc(db, 'licenses', d.id)).catch(() => {});
+              deletedFs++;
+            }
+          }
         }
+        if (batch && deletedFs > 0) {
+          await batch.commit().catch(() => {});
+        }
+      } catch (err) {
+        reportFirestoreError(err);
       }
-    } catch {}
+    }
     res.json({ success: true, count, message: `Wiped ${count} unused licenses` });
   });
 

@@ -28,6 +28,26 @@ import { db, doc, getDoc, setDoc, deleteDoc, collection, getDocs, writeBatch } f
 import { isOwnerEmail } from '../services/admin-config.ts';
 import { findActiveLicenseByUser, getAllLicenseRecords } from './license-store.ts';
 
+// 🛡️ SIGNAL CRYPTO ERROR GUARDIAN:
+// Intercepts transient libsignal console errors (e.g. "Bad MAC", "Failed to decrypt message with any known session")
+// so that transient decryption re-handshakes in multi-device WhatsApp groups do not pollute stderr as fatal unhandled errors.
+const originalConsoleError = console.error;
+console.error = (...args: any[]) => {
+  const fullText = args
+    .map((a) => (typeof a === 'string' ? a : a instanceof Error ? a.message + ' ' + (a.stack || '') : a ? JSON.stringify(a) : ''))
+    .join(' ');
+  if (
+    fullText.includes('Failed to decrypt message with any known session') ||
+    fullText.includes('Session error:Error: Bad MAC') ||
+    fullText.includes('Error: Bad MAC') ||
+    fullText.includes('No matching sessions found for message')
+  ) {
+    console.warn('[Signal Crypto Guardian] Transient Signal session decryption mismatch intercepted (Bad MAC). Background session auto-repair and pre-key retry active.');
+    return;
+  }
+  originalConsoleError.apply(console, args);
+};
+
 // Shared greeting lock across all bot sessions to prevent multiple admin bots from welcoming the same user
 const globalAdminGreetingLock = new Map<string, number>();
 
@@ -480,12 +500,14 @@ export class WhatsAppManager {
   public reconnectTimedOut = false;
   private reconnectTimeoutTimer: NodeJS.Timeout | null = null;
   private recoveringMessageIds = new Set<string>();
+  private lastDecryptionRepair = new Map<string, number>();
   private messageCache = new Map<string, {
     key: proto.IMessageKey;
     sender: string;
     senderJid?: string;
     senderName?: string;
     text: string;
+    rawMessage?: proto.IMessage;
     timestamp: number;
     isGroup: boolean;
     group?: string;
@@ -665,40 +687,143 @@ export class WhatsAppManager {
 
   }
 
+  // 🛡️ Auto-repair Signal sessions when Bad MAC or decryption failures occur
+  public async handleDecryptionFailure(remoteJid: string, participantJid?: string | null, msgId?: string | null) {
+    const targetJid = participantJid || remoteJid;
+    if (!targetJid) return;
+    const cacheKey = `${remoteJid}__${targetJid}`;
+    const now = Date.now();
+    // Throttle repairs to at most once per 6 seconds per peer to avoid excessive disk I/O
+    if (now - (this.lastDecryptionRepair.get(cacheKey) || 0) < 6000) {
+      return;
+    }
+    this.lastDecryptionRepair.set(cacheKey, now);
+
+    console.warn(`[Signal Crypto Repair (${this.userId})] Decryption session desynchronization (Bad MAC / CIPHERTEXT) detected for ${targetJid} in ${remoteJid}. Initiating auto-recovery...`);
+
+    try {
+      const cleanTargetPhone = targetJid.split('@')[0].split(':')[0].replace(/\D/g, '');
+      const filesToPurge: string[] = [];
+
+      if (fs.existsSync(this.authDir)) {
+        const allFiles = fs.readdirSync(this.authDir);
+        for (const file of allFiles) {
+          if (!file.endsWith('.json')) continue;
+          // 1. Purge 1-on-1 session files matching target phone or JID
+          if (file.startsWith('session-') && cleanTargetPhone && file.includes(cleanTargetPhone)) {
+            filesToPurge.push(file);
+          }
+          // 2. Purge sender-key files for group messages involving this sender
+          if (remoteJid.endsWith('@g.us') && file.startsWith('sender-key-')) {
+            const cleanGroup = remoteJid.split('@')[0];
+            if (file.includes(cleanGroup) && (!cleanTargetPhone || file.includes(cleanTargetPhone))) {
+              filesToPurge.push(file);
+            }
+          }
+        }
+
+        for (const f of filesToPurge) {
+          try {
+            const fullPath = path.join(this.authDir, f);
+            if (fs.existsSync(fullPath)) {
+              fs.unlinkSync(fullPath);
+            }
+          } catch {}
+        }
+      }
+
+      // 3. Clear from in-memory Signal Key Store cache so libsignal does not reuse stale ratchets
+      if (this.sock?.authState?.keys) {
+        try {
+          const keysStore = this.sock.authState.keys as any;
+          const clearPayload: any = {};
+          if (cleanTargetPhone) {
+            clearPayload.session = {
+              [`${cleanTargetPhone}.0`]: null,
+              [`${cleanTargetPhone}:0`]: null,
+              [`${cleanTargetPhone}_1.0`]: null,
+            };
+            if (remoteJid.endsWith('@g.us')) {
+              clearPayload['sender-key'] = {
+                [`${remoteJid}::${cleanTargetPhone}::0`]: null,
+                [`${remoteJid}::${cleanTargetPhone}:0`]: null,
+              };
+            }
+            await keysStore.set(clearPayload);
+          }
+        } catch {}
+      }
+
+      console.log(`[Signal Crypto Repair (${this.userId})] Auto-recovery complete: cleared ${filesToPurge.length} desynced session/sender keys for ${cleanTargetPhone || targetJid}. Ready for fresh Signal pre-key exchange.`);
+    } catch (err: any) {
+      console.warn(`[Signal Crypto Repair (${this.userId})] Error during auto-recovery:`, err?.message || err);
+    }
+  }
+
+  public repairCorruptedSessions(): number {
+    let repaired = 0;
+    if (!fs.existsSync(this.authDir)) return repaired;
+    try {
+      const files = fs.readdirSync(this.authDir);
+      for (const file of files) {
+        if (!file.endsWith('.json')) continue;
+        if (file === 'creds.json') continue; // Never delete master credentials
+        const fullPath = path.join(this.authDir, file);
+        try {
+          const stats = fs.statSync(fullPath);
+          if (stats.size === 0) {
+            fs.unlinkSync(fullPath);
+            repaired++;
+            continue;
+          }
+          // Validate JSON syntax for session and sender-key files
+          if (file.startsWith('session-') || file.startsWith('sender-key-')) {
+            const content = fs.readFileSync(fullPath, 'utf-8');
+            const parsed = JSON.parse(content);
+            if (!parsed || typeof parsed !== 'object') {
+              fs.unlinkSync(fullPath);
+              repaired++;
+              continue;
+            }
+            if (file.startsWith('session-') && parsed._sessions && Object.keys(parsed._sessions).length === 0) {
+              fs.unlinkSync(fullPath);
+              repaired++;
+              continue;
+            }
+          }
+        } catch {
+          // File is empty or has invalid JSON: delete corrupt file to allow Signal clean renegotiation
+          try {
+            fs.unlinkSync(fullPath);
+            repaired++;
+          } catch {}
+        }
+      }
+    } catch {}
+    return repaired;
+  }
+
   public pruneStaleSessionFiles(): { prunedKeys: number; prunedMedia: number } {
     let prunedKeys = 0;
     let prunedMedia = 0;
     try {
-      // 1. Prune auth directory: remove old ephemeral keys while strictly preserving creds.json and app-state
+      // 1. Repair and remove any corrupted 0-byte or invalid JSON session files
+      prunedKeys += this.repairCorruptedSessions();
+
+      // 2. Auth directory: strictly preserve creds.json, pre-keys, identity-keys, and sessions
+      // NEVER delete pre-key-*.json or identity-key-*.json — doing so causes "Bad MAC" and "Failed to decrypt message" errors!
       if (fs.existsSync(this.authDir)) {
         const files = fs.readdirSync(this.authDir);
         const now = Date.now();
-        const maxKeyAgeMs = 36 * 60 * 60 * 1000; // 36 hours retention for rotating keys
-
-        const protectedPatterns = [
-          'creds.json',
-          'app-state-sync',
-          'account-signature',
-          'device-list',
-        ];
+        const maxTransientKeyAgeMs = 7 * 24 * 60 * 60 * 1000; // 7 days retention only for transient group memory
 
         for (const file of files) {
-          if (protectedPatterns.some((pat) => file.includes(pat))) {
-            continue; // Core identity files must NEVER be deleted
-          }
-
-          // Transient/stale keys generated by group chatter:
-          // pre-key-*.json, sender-key-*.json, sender-key-memory-*.json, identity-key-*.json, lid-mapping-*.json
-          if (
-            file.startsWith('pre-key-') ||
-            file.startsWith('sender-key-') ||
-            file.startsWith('identity-key-') ||
-            file.startsWith('lid-mapping-')
-          ) {
+          // Only prune stale group memory keys older than 7 days
+          if (file.startsWith('sender-key-memory-')) {
             const fullPath = path.join(this.authDir, file);
             try {
               const stats = fs.statSync(fullPath);
-              if (now - stats.mtimeMs > maxKeyAgeMs) {
+              if (now - stats.mtimeMs > maxTransientKeyAgeMs) {
                 fs.unlinkSync(fullPath);
                 prunedKeys++;
               }
@@ -837,9 +962,14 @@ export class WhatsAppManager {
     if (isFirestoreQuotaExhausted()) {
       return Boolean(this.sessionLicenseExpiresAt || this.isSessionUnlimited || this.isOwnerEmail());
     }
-    // 🛡️ Zero-Quota Shield: If license was checked within the last 3 minutes and is valid, return immediately
     const now = Date.now();
-    if (now - this.lastLicenseFirestoreCheckTime < 180_000 && (this.sessionLicenseExpiresAt || this.isSessionUnlimited || this.isOwnerEmail())) {
+    const hasValidLocalLicense =
+      this.isOwnerEmail() ||
+      this.isSessionUnlimited ||
+      Boolean(this.sessionLicenseExpiresAt && new Date(this.sessionLicenseExpiresAt).getTime() > now);
+
+    // 🛡️ Zero-Quota Shield: If license is confirmed valid and unexpired locally, avoid repetitive remote reads
+    if (hasValidLocalLicense && now - this.lastLicenseFirestoreCheckTime < 900_000) {
       return true;
     }
     this.lastLicenseFirestoreCheckTime = now;
@@ -1052,19 +1182,35 @@ export class WhatsAppManager {
   private async syncConnectionStatusToFirestore(): Promise<void> {
     if (!this.userId || this.userId === 'default') return;
     if (isFirestoreQuotaExhausted()) return;
+    const isConn = Boolean(this.sock && this.currentStatus.isConnected);
+    const state = this.currentStatus.state;
+    const linkedPhone = this.currentStatus.user?.phone || this.currentStatus.targetPhone || null;
+    const phoneStr = linkedPhone || '';
+
+    // Zero-Quota Deduplication: If status, connection state, and phone have not changed, do NOT write to Firestore!
+    if (
+      this.lastPersistedIsConnected === isConn &&
+      this.lastPersistedState === state &&
+      this.lastPersistedPhone === phoneStr
+    ) {
+      return;
+    }
+
     try {
-      const linkedPhone = this.currentStatus.user?.phone || this.currentStatus.targetPhone || null;
       await setDoc(
         doc(db, 'users', this.userId),
         {
-          whatsappConnected: Boolean(this.sock && this.currentStatus.isConnected),
-          botConnected: Boolean(this.sock && this.currentStatus.isConnected),
-          connectionState: this.currentStatus.state,
+          whatsappConnected: isConn,
+          botConnected: isConn,
+          connectionState: state,
           ...(linkedPhone ? { linkedPhone } : {}),
           updatedAt: new Date().toISOString(),
         },
         { merge: true }
       );
+      this.lastPersistedIsConnected = isConn;
+      this.lastPersistedState = state;
+      this.lastPersistedPhone = phoneStr;
     } catch (err) {
       reportFirestoreError(err);
       console.warn(`[WhatsApp Status] Could not persist connection state for ${this.userId}:`, err);
@@ -2203,7 +2349,8 @@ export class WhatsAppManager {
           getMessage: async (key: any) => {
             if (key.id && this.messageCache.has(key.id)) {
               const cached = this.messageCache.get(key.id);
-              if (cached) return { conversation: cached.text };
+              if (cached?.rawMessage) return cached.rawMessage;
+              if (cached?.text) return { conversation: cached.text };
             }
             return undefined;
           },
@@ -2552,7 +2699,15 @@ export class WhatsAppManager {
         // Each message is handled in its own async execution task so multiple users' commands
         // execute simultaneously in parallel without any lining up or waiting.
         for (const msg of m.messages) {
-          if (!msg.message) continue;
+          if (!msg.message) {
+            // 🛡️ Auto-recover from Signal decryption failures (CIPHERTEXT stubs / Bad MAC)
+            if (msg.messageStubType === proto.WebMessageInfo.StubType.CIPHERTEXT) {
+              const remoteJid = msg.key?.remoteJid || '';
+              const participant = msg.key?.participant || remoteJid;
+              void this.handleDecryptionFailure(remoteJid, participant, msg.key?.id);
+            }
+            continue;
+          }
           void (async () => {
             const remoteJid = msg.key.remoteJid || '';
             const senderJid = msg.key.participant || remoteJid;
@@ -2596,6 +2751,7 @@ export class WhatsAppManager {
               senderJid,
               senderName: msg.pushName || undefined,
               text,
+              rawMessage: rawMsg,
               timestamp: Date.now(),
               isGroup,
               group: isGroup ? remoteJid : undefined,
@@ -4555,14 +4711,22 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
 
     // Anti-Delete Recovery Handlers: listens for message revokes / deletions
     sock.ev.on('messages.update', async (updates) => {
-      if (!this.antiDeleteEnabled) return;
       for (const update of updates) {
+        const stubType = (update.update as any)?.messageStubType;
+        if (stubType === 2) {
+          // CIPHERTEXT stub: handle decryption failure and session reset
+          const remoteJid = update.key?.remoteJid || '';
+          const participant = update.key?.participant || remoteJid;
+          void this.handleDecryptionFailure(remoteJid, participant, update.key?.id);
+          continue;
+        }
+
+        if (!this.antiDeleteEnabled) continue;
         if (
           update.key?.id &&
           (update.update?.message === null ||
-            (update.update as any)?.messageStubType === 1 ||
-            (update.update as any)?.messageStubType === 2 ||
-            (update.update as any)?.messageStubType === 68)
+            stubType === 1 ||
+            stubType === 68)
         ) {
           await this.handleMessageRevoke(update.key);
         }
@@ -5772,6 +5936,7 @@ export class WhatsAppSessionManager {
 
   private globalSyncInterval: NodeJS.Timeout | null = null;
   private globalSyncRunning = false;
+  private lastCloudScanTime = 0;
   private unlinkedSessionSince = new Map<string, number>();
   private lastSyncStats = {
     totalChecked: 0,
@@ -5790,21 +5955,21 @@ export class WhatsAppSessionManager {
     if (this.globalSyncInterval) {
       clearInterval(this.globalSyncInterval);
     }
-    console.log('[Global 1-Min Sync] Starting Railway account watchdog (syncs every 60 seconds)...');
+    console.log('[Global Watchdog] Starting Railway account watchdog (health pass every 5 minutes)...');
 
-    // Run first sync shortly after startup, then continue every minute.
+    // Run first sync shortly after startup, then continue every 5 minutes.
     setTimeout(() => {
-      this.runGlobalOneMinuteSync().catch((err) => console.warn('[Global 1-Min Sync] Startup pass error:', err));
+      this.runGlobalOneMinuteSync().catch((err) => console.warn('[Global Watchdog] Startup pass error:', err));
     }, 5000);
 
     this.globalSyncInterval = setInterval(() => {
-      this.runGlobalOneMinuteSync().catch((err) => console.warn('[Global 1-Min Sync] Periodic pass error:', err));
-    }, 60 * 1000);
+      this.runGlobalOneMinuteSync().catch((err) => console.warn('[Global Watchdog] Periodic pass error:', err));
+    }, 5 * 60 * 1000);
   }
 
   public async runGlobalOneMinuteSync(): Promise<{ totalChecked: number; activeOnline: number; reconnected: number; expiredDisconnected: number; unlockedForPairing: number }> {
     if (this.globalSyncRunning) {
-      console.warn('[Global 1-Min Sync] Skipping this pass because the previous pass is still running.');
+      console.warn('[Global Watchdog] Skipping this pass because the previous pass is still running.');
       return {
         totalChecked: 0,
         activeOnline: 0,
@@ -5818,7 +5983,7 @@ export class WhatsAppSessionManager {
     console.log(
       `[Runtime Memory] rss=${Math.round(rss / 1048576)}MB heap=${Math.round(heapUsed / 1048576)}MB external=${Math.round(external / 1048576)}MB sessions=${this.sessions.size} mediaCache=${Math.round(processMediaCacheBytes / 1048576)}MB`
     );
-    console.log('[Global 1-Min Sync] Auditing Firebase phone locks, paired sessions, and active connections...');
+    console.log('[Global Watchdog] Auditing local paired sessions and active connections...');
     let totalChecked = 0;
     let activeOnline = 0;
     let reconnected = 0;
@@ -5830,7 +5995,7 @@ export class WhatsAppSessionManager {
       const phoneLocks = new Map<string, string>();
       let cloudSessionScanCompleted = false;
 
-      // 1. Gather all local session folders
+      // 1. Gather all local session folders (Zero Firestore reads!)
       if (fs.existsSync(this.baseAuthDir)) {
         const items = fs.readdirSync(this.baseAuthDir, { withFileTypes: true });
         for (const item of items) {
@@ -5840,13 +6005,17 @@ export class WhatsAppSessionManager {
         }
       }
 
-      // 2. Gather active sessions in memory
+      // 2. Gather active sessions in memory (Zero Firestore reads!)
       for (const uid of this.sessions.keys()) {
         userIds.add(uid);
       }
 
-      // 3. Gather cloud sessions from Firestore 'column' collection
-      if (!isFirestoreQuotaExhausted()) {
+      // 3. Cloud sessions scan: Only query remote Firestore if disk has zero candidates (e.g. fresh boot)
+      // or periodically every 30 minutes to protect the daily 50k read quota for 1,000+ users!
+      const nowMs = Date.now();
+      const shouldScanCloud = userIds.size === 0 || (nowMs - this.lastCloudScanTime > 30 * 60 * 1000);
+      if (shouldScanCloud && !isFirestoreQuotaExhausted()) {
+        this.lastCloudScanTime = nowMs;
         try {
           const sessionDocs = await getDocs(collection(db, 'column'));
           cloudSessionScanCompleted = true;
@@ -5862,13 +6031,9 @@ export class WhatsAppSessionManager {
           }
         } catch (err: any) {
           reportFirestoreError(err);
-          console.debug('[Global 1-Min Sync] Firestore column note:', err?.message || err);
+          console.debug('[Global Watchdog] Firestore column note:', err?.message || err);
         }
-      }
 
-      // A Firebase phone lock can outlive the local/server session. Include every
-      // account that still has a linked phone so licensed users can be made pairable.
-      if (!isFirestoreQuotaExhausted()) {
         try {
           const usersSnap = await getDocs(collection(db, 'users'));
           for (const userDoc of usersSnap.docs) {
@@ -5880,7 +6045,7 @@ export class WhatsAppSessionManager {
           }
         } catch (err: any) {
           reportFirestoreError(err);
-          console.warn('[Global 1-Min Sync] Firestore phone-lock scan note:', err?.message || err);
+          console.warn('[Global Watchdog] Firestore phone-lock scan note:', err?.message || err);
         }
       }
 

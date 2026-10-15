@@ -687,27 +687,8 @@ export async function wipeAllUnusedLicenses(): Promise<{ count: number; message:
       const d = await res.json();
       wipedCount = d.count || 0;
     }
-  } catch {}
-
-  // 1. Delete from Firestore
-  try {
-    const colRef = collection(db, 'licenses');
-    const snap = await getDocs(colRef);
-    const deletePromises: Promise<void>[] = [];
-
-    snap.forEach((d) => {
-      const data = d.data() || {};
-      const status = data.status || 'unclaimed';
-      const claimedBy = data.claimedBy;
-      if (status === 'unclaimed' && !claimedBy) {
-        deletePromises.push(deleteDoc(doc(db, 'licenses', d.id)));
-        wipedCount++;
-      }
-    });
-
-    await Promise.all(deletePromises);
-  } catch (e) {
-    console.warn('Firestore wipe unused keys warning:', e);
+  } catch (err) {
+    console.warn('Server wipe unused licenses note:', err);
   }
 
   return {
@@ -719,7 +700,6 @@ export async function wipeAllUnusedLicenses(): Promise<{ count: number; message:
 // WIPE ALL EXPIRED KEYS FROM SYSTEM TO CLEAR SPACE
 export async function wipeAllExpiredLicenses(): Promise<{ count: number; message: string }> {
   let wipedCount = 0;
-  const now = Date.now();
 
   try {
     const res = await fetch('/api/licenses/wipe-expired', { method: 'POST' });
@@ -727,27 +707,8 @@ export async function wipeAllExpiredLicenses(): Promise<{ count: number; message
       const d = await res.json();
       wipedCount = d.count || 0;
     }
-  } catch {}
-
-  // 1. Delete from Firestore
-  try {
-    const colRef = collection(db, 'licenses');
-    const snap = await getDocs(colRef);
-    const deletePromises: Promise<void>[] = [];
-
-    snap.forEach((d) => {
-      const data = d.data() || {};
-      const isStatusExpired = data.status === 'expired';
-      const isDateExpired = data.expiresAt && new Date(data.expiresAt).getTime() < now;
-      if (isStatusExpired || isDateExpired) {
-        deletePromises.push(deleteDoc(doc(db, 'licenses', d.id)));
-        wipedCount++;
-      }
-    });
-
-    await Promise.all(deletePromises);
-  } catch (e) {
-    console.warn('Firestore wipe expired keys warning:', e);
+  } catch (err) {
+    console.warn('Server wipe expired licenses note:', err);
   }
 
   return {
@@ -807,9 +768,9 @@ export async function fetchAllUsers(): Promise<any[]> {
     const colRef = collection(db, 'users');
     let snap: any;
     try {
-      snap = await getDocsFromServer(colRef);
-    } catch {
       snap = await getDocs(colRef);
+    } catch {
+      snap = null;
     }
     if (snap) {
       snap.forEach((d: any) => {
