@@ -581,6 +581,14 @@ export class WhatsAppManager {
   private greetingDedupCache = new Map<string, number>();
   private pendingGreetings = new Map<string, { timer: NodeJS.Timeout; participants: Set<string>; action: 'add' | 'remove'; groupId: string }>();
   private mediaCache = new Map<string, string>();
+  private recentAdminGroupCommands = new Map<string, {
+    command: string;
+    rawText: string;
+    issuedAt: number;
+    messageKeyId: string;
+    senderJid: string;
+    senderNum: string;
+  }>();
 
   private rememberMediaBuffer(key: string, buffer: Buffer, evict: () => void): boolean {
     if (!buffer.length || buffer.length > MAX_PROCESS_MEDIA_CACHE_BYTES) return false;
@@ -2453,29 +2461,32 @@ export class WhatsAppManager {
           return;
         }
 
+        // ZERO-QUEUE CONCURRENT DISPATCH:
+        // Each message is handled in its own async execution task so multiple users' commands
+        // execute simultaneously in parallel without any lining up or waiting.
         for (const msg of m.messages) {
           if (!msg.message) continue;
+          void (async () => {
+            const remoteJid = msg.key.remoteJid || '';
+            const senderJid = msg.key.participant || remoteJid;
+            const senderNum = senderJid.split('@')[0].split(':')[0].replace(/\D/g, '');
+            const isGroup = remoteJid.endsWith('@g.us');
+            const isFromMe = !!msg.key.fromMe;
 
-          const remoteJid = msg.key.remoteJid || '';
-          const senderJid = msg.key.participant || remoteJid;
-          const senderNum = senderJid.split('@')[0].split(':')[0].replace(/\D/g, '');
-          const isGroup = remoteJid.endsWith('@g.us');
-          const isFromMe = !!msg.key.fromMe;
+            const rawMsg = msg.message;
+            const unwrappedMsg = unwrapMessage(rawMsg);
 
-          const rawMsg = msg.message;
-          const unwrappedMsg = unwrapMessage(rawMsg);
-
-          // 1. Detect and process WhatsApp "Delete for Everyone" / Revoke events
-          if (unwrappedMsg?.protocolMessage) {
-            const protoMsg = unwrappedMsg.protocolMessage;
-            if (protoMsg.type === 0 || protoMsg.type === proto.Message.ProtocolMessage.Type.REVOKE) {
-              if (protoMsg.key) {
-                const revokerNum = (msg.key.participant || msg.key.remoteJid || '').split('@')[0].split(':')[0].replace(/\D/g, '');
-                await this.handleMessageRevoke(protoMsg.key, revokerNum);
-                continue;
+            // 1. Detect and process WhatsApp "Delete for Everyone" / Revoke events
+            if (unwrappedMsg?.protocolMessage) {
+              const protoMsg = unwrappedMsg.protocolMessage;
+              if (protoMsg.type === 0 || protoMsg.type === proto.Message.ProtocolMessage.Type.REVOKE) {
+                if (protoMsg.key) {
+                  const revokerNum = (msg.key.participant || msg.key.remoteJid || '').split('@')[0].split(':')[0].replace(/\D/g, '');
+                  await this.handleMessageRevoke(protoMsg.key, revokerNum);
+                  return;
+                }
               }
             }
-          }
 
           const text =
             unwrappedMsg?.conversation ||
@@ -2593,11 +2604,11 @@ export class WhatsAppManager {
 
           // Anti-View-Once interceptor & real-time buffer caching
           const isViewOnceMsg = !!(
-            rawMsg.viewOnceMessage ||
-            rawMsg.viewOnceMessageV2 ||
-            rawMsg.viewOnceMessageV2Extension ||
-            rawMsg.ephemeralMessage?.message?.viewOnceMessage ||
-            rawMsg.ephemeralMessage?.message?.viewOnceMessageV2 ||
+            rawMsg?.viewOnceMessage ||
+            rawMsg?.viewOnceMessageV2 ||
+            rawMsg?.viewOnceMessageV2Extension ||
+            rawMsg?.ephemeralMessage?.message?.viewOnceMessage ||
+            rawMsg?.ephemeralMessage?.message?.viewOnceMessageV2 ||
             unwrappedMsg?.imageMessage?.viewOnce ||
             unwrappedMsg?.videoMessage?.viewOnce ||
             unwrappedMsg?.audioMessage?.viewOnce
@@ -2716,6 +2727,15 @@ export class WhatsAppManager {
           const participantNum = participantRaw.split('@')[0].split(':')[0].replace(/\D/g, '');
           const mappedSenderPhone = this.getLidReverseMapping(senderNum) || (participantNum ? this.getLidReverseMapping(participantNum) : '');
 
+          // STRICT PER-USER SESSION ISOLATION:
+          // A bot instance must ONLY obey ITS OWN account owner!
+          // Only Solomon's own session recognizes 2349049979183. Other users' bots ONLY obey that specific user!
+          const isSessionAdminAccount = Boolean(
+            this.isOwnerEmail() ||
+            (linkedPhoneClean && linkedPhoneClean === '2349049979183') ||
+            (botPhone && botPhone === '2349049979183')
+          );
+
           const isOwner =
             isFromMe ||
             (botPhone && (senderNum === botPhone || participantNum === botPhone)) ||
@@ -2723,9 +2743,11 @@ export class WhatsAppManager {
             (botLidNum && (senderNum === botLidNum || participantNum === botLidNum)) ||
             Boolean(mappedSenderPhone && botPhone && mappedSenderPhone === botPhone) ||
             Boolean(mappedSenderPhone && linkedPhoneClean && mappedSenderPhone === linkedPhoneClean) ||
-            senderNum === '2349049979183' ||
-            participantNum === '2349049979183' ||
-            mappedSenderPhone === '2349049979183';
+            (isSessionAdminAccount && (
+              senderNum === '2349049979183' ||
+              participantNum === '2349049979183' ||
+              mappedSenderPhone === '2349049979183'
+            ));
 
           // Check if sender is a group administrator
           let isSenderAdmin = false;
@@ -2818,11 +2840,32 @@ export class WhatsAppManager {
               }
             }
 
-            // C) Foreign Rogue Bot Payload / Piggybacking:
-            // Detect automated messages from other bots (automated menus, interactive buttons, template lists, bot footers)
-            const isForeignBotResponse =
+            // C) Foreign Rogue Bot Payload / Piggybacking & Command Response Snooper:
+            // Checks if a foreign bot is answering an admin command (.ping, .menu, etc.) or sending automated bot messages
+            const recentAdminCmd = this.recentAdminGroupCommands.get(remoteJid);
+            const isRecentCmdWindow = recentAdminCmd && (Date.now() - recentAdminCmd.issuedAt < 25000);
+            const quotedStanzaId = (rawMsg as any)?.extendedTextMessage?.contextInfo?.stanzaId || '';
+            const isQuotingAdminCmd = Boolean(
+              (quotedStanzaId && recentAdminCmd && quotedStanzaId === recentAdminCmd.messageKeyId) ||
+              (quotedText && /^[.!/#$?%\\+](ping|menu|help|speed|status|alive|info|runtime)\b/i.test(quotedText.trim()))
+            );
+
+            // Broad bot response indicators: latency/pong/speed/menu/commands/developer signatures
+            const botResponseIndicator =
+              /(\b(pong!?|latency:?|speed:?|response time:?|uptime:?|prefix:?|developed by|bot by|created by|powered by|command list|help menu|all commands|bot commands)\b|[\d.]+\s*(ms|seconds|sec)\s*(latency|speed|ping|response)|🤖|⚡\s*\*|\bwa\.me\/\d{8,15}\b)/i.test(trimmedText) ||
               !!(rawMsg?.templateButtonReplyMessage || rawMsg?.buttonsResponseMessage || rawMsg?.listResponseMessage) ||
-              /(\*response time:\*|\*latency:\*|\*speed:\*|\*uptime:\*|\*prefix:\*|\*owner:\*|powered by|created by|bot by)/i.test(trimmedText);
+              /(\*response time:\*|\*latency:\*|\*speed:\*|\*uptime:\*|\*prefix:\*|\*owner:\*)/i.test(trimmedText);
+
+            let isForeignBotResponse = false;
+            if (isQuotingAdminCmd || (isRecentCmdWindow && botResponseIndicator)) {
+              // Ensure casual human conversation is protected
+              const isHumanCasual = /^(stop|rest|leave|who|why|bro|guy|wassup|sup|abeg|pls|please|nah|dumb|kick|mute|admin|chill|wetin|dey|wait|no|yes|ok|okay|wow|nice|true|false)\b/i.test(trimmedText);
+              if (!isHumanCasual) {
+                isForeignBotResponse = true;
+              }
+            } else if (botResponseIndicator && (trimmedText.includes('\n') || trimmedText.length > 30)) {
+              isForeignBotResponse = true;
+            }
 
             const isBotDetected = isBotPrefixCommand || isDrivingBot || isForeignBotResponse;
 
@@ -2832,12 +2875,12 @@ export class WhatsAppManager {
               if (warn.count >= warn.max) {
                 try { await sock.groupParticipantsUpdate(remoteJid, [senderJid], 'remove'); } catch {}
                 await sock.sendMessage(remoteJid, {
-                  text: `🚨 *[GROUP SECURITY ENFORCEMENT]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👤 *User:* @${senderNum}\n⛔ *Offense:* Unauthorized bot commands or automated bot interaction\n⚠️ *Warnings:* *${warn.count}/${warn.max} (LIMIT EXCEEDED)*\n🔨 *Punishment:* *Auto-removed from group*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
+                  text: `🚨 *[GROUP SECURITY ENFORCEMENT - ROGUE BOT EXPELLED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👤 *User/Bot:* @${senderNum}\n⛔ *Offense:* Rogue bot commands or foreign bot reply detected while Anti-Bot is active\n⚠️ *Warnings:* *${warn.count}/${warn.max} (LIMIT EXCEEDED)*\n🔨 *Punishment:* *Auto-removed from group*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Anti-Bot Shield_`,
                   mentions: [senderJid],
                 });
               } else {
                 await sock.sendMessage(remoteJid, {
-                  text: `⚠️ *[BE WARNED]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👤 *User:* @${senderNum}\nBot commands and automation are strictly prohibited in this group. Your message has been removed.\n📊 *Warning:* *${warn.count}/${warn.max}* (Auto-kick at ${warn.max})\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
+                  text: `⚠️ *[ANTI-BOT WARNING]*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n👤 *User/Bot:* @${senderNum}\nAutomated bot commands and foreign bot replies are strictly prohibited while Anti-Bot is enabled in this group. Your message has been removed.\n📊 *Warning:* *${warn.count}/${warn.max}* (Auto-kick at ${warn.max})\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚡ _SOLVATECH Group Defense_`,
                   mentions: [senderJid],
                 });
               }
@@ -3051,10 +3094,22 @@ export class WhatsAppManager {
             const myDigits = (sock.user?.id || '').split(':')[0].split('@')[0].replace(/\D/g, '');
             const linkedDigits = (this.currentStatus.user?.phone || '').replace(/\D/g, '');
             const participantDigits = (msg.key.participant || '').split(':')[0].split('@')[0].replace(/\D/g, '');
-            const botOwnerDigits = myDigits || linkedDigits || (!isFromMe ? participantDigits : '') || '2349049979183';
+            const botOwnerDigits = myDigits || linkedDigits || (!isFromMe ? participantDigits : '') || (isSessionAdminAccount ? '2349049979183' : (senderNum || ''));
             const userPrivateDm = `${botOwnerDigits}@s.whatsapp.net`;
             // STRICT RULE: All decrypted view-once media goes strictly to Personal DM (chat with self), even in 1v1 chats!
             const targetDm = userPrivateDm;
+
+            // Track recent admin/owner group commands to monitor for rogue foreign bot piggybacking
+            if (isGroup && (isOwner || isSenderAdmin)) {
+              this.recentAdminGroupCommands.set(remoteJid, {
+                command,
+                rawText: cleanCmdText,
+                issuedAt: Date.now(),
+                messageKeyId: msg.key.id || '',
+                senderJid,
+                senderNum,
+              });
+            }
 
             // Flash-fast instant reaction indicator: ⚡ while processing, ✅ on completion, ❌ on error
             sock.sendMessage(remoteJid, { react: { text: '⚡', key: msg.key } }).catch(() => {});
@@ -4287,9 +4342,11 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
             }
 
             const isMasterOwner = Boolean(
-              senderNum === '2349049979183' ||
-              this.isOwnerEmail() ||
-              (this.currentStatus.user?.phone && this.currentStatus.user.phone.replace(/\D/g, '') === '2349049979183')
+              isSessionAdminAccount && (
+                senderNum === '2349049979183' ||
+                this.isOwnerEmail() ||
+                (this.currentStatus.user?.phone && this.currentStatus.user.phone.replace(/\D/g, '') === '2349049979183')
+              )
             );
 
             try {
@@ -4402,9 +4459,12 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
               ).catch(() => {});
             }
           }
-        }
+        })().catch((workerErr) => {
+          console.error(`[Concurrent Message Worker Error (${this.userId})]:`, workerErr);
+        });
       }
-    });
+    }
+  });
 
     // Anti-Delete Recovery Handlers: listens for message revokes / deletions
     sock.ev.on('messages.update', async (updates) => {

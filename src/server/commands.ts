@@ -239,7 +239,7 @@ class CommandHandler {
             if (d && gid) {
               this.securitySettings[gid] = {
                 antilink: d.antilink !== false,
-                antibot: d.antibot !== false,
+                antibot: Boolean(d.antibot === true),
                 antistatus: d.antistatus !== false,
                 antispam: d.antispam !== false,
                 autowelcome: d.autowelcome !== false,
@@ -340,7 +340,7 @@ class CommandHandler {
           if (docSnap.id.startsWith(this.accountSecurityProfilePrefix)) return;
           this.securitySettings[docSnap.id] = {
             antilink: d.antilink !== false,
-            antibot: d.antibot !== false,
+            antibot: Boolean(d.antibot === true),
             antistatus: d.antistatus !== false,
             antispam: d.antispam !== false,
             autowelcome: d.autowelcome !== false,
@@ -493,11 +493,11 @@ class CommandHandler {
     }
   }
 
-  // DEFAULT FOR ALL GROUPS: KEEPING EVERYTHING ON (true)
+  // DEFAULT FOR ALL GROUPS: Standard security on, but Anti-Bot strictly requires explicit admin activation
   private getGroupSecuritySettings(gid: string) {
     const defaults = {
       antilink: true,
-      antibot: true,
+      antibot: false, // Strictly false by default: only kicks/warns when an admin explicitly enables .antibot on!
       antistatus: true,
       antispam: true,
       autowelcome: true,
@@ -511,7 +511,7 @@ class CommandHandler {
       ...defaults,
       ...this.securitySettings[gid],
       antilink: this.securitySettings[gid].antilink !== false,
-      antibot: this.securitySettings[gid].antibot !== false,
+      antibot: Boolean(this.securitySettings[gid].antibot === true),
       antistatus: this.securitySettings[gid].antistatus !== false,
       antispam: this.securitySettings[gid].antispam !== false,
       autowelcome: this.securitySettings[gid].autowelcome !== false,
