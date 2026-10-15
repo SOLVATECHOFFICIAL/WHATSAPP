@@ -47,18 +47,30 @@ export function reportFirestoreError(err: any): void {
   }
 }
 
-export function setFirestoreQuotaExhaustedFor(durationMs: number = 15 * 60 * 1000): void {
-  firestoreQuotaExhaustedUntil = Math.max(
-    firestoreQuotaExhaustedUntil,
-    Date.now() + durationMs,
-  );
-  try {
-    if (typeof window !== 'undefined' && typeof localStorage !== 'undefined') {
-      localStorage.setItem(
-        'solvatech_firestore_quota_until',
-        String(firestoreQuotaExhaustedUntil),
-      );
-    }
-  } catch {}
+export function getNextFirebaseQuotaResetInfo(): {
+  resetUtc: string;
+  hoursRemaining: number;
+  minutesRemaining: number;
+  timeRemainingFormatted: string;
+  nextResetTimestamp: number;
+} {
+  const now = new Date();
+  // Firebase Firestore daily quotas reset at Midnight Pacific Time (00:00 PST / 08:00 UTC)
+  const nextReset = new Date();
+  nextReset.setUTCHours(8, 0, 0, 0); // 08:00 UTC = 00:00 PST
+  if (nextReset.getTime() <= now.getTime()) {
+    nextReset.setUTCDate(nextReset.getUTCDate() + 1);
+  }
+  const diffMs = Math.max(0, nextReset.getTime() - now.getTime());
+  const hoursRemaining = Math.floor(diffMs / (1000 * 60 * 60));
+  const minutesRemaining = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+
+  return {
+    resetUtc: nextReset.toISOString(),
+    hoursRemaining,
+    minutesRemaining,
+    timeRemainingFormatted: `${hoursRemaining}h ${minutesRemaining}m`,
+    nextResetTimestamp: nextReset.getTime(),
+  };
 }
 
