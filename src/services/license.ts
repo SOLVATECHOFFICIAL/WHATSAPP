@@ -870,10 +870,13 @@ export async function fetchAllUsers(): Promise<any[]> {
   try {
     const idToken = await auth?.currentUser?.getIdToken();
     const userEmail = auth?.currentUser?.email || '';
-    const headers: Record<string, string> = {};
+    const headers: Record<string, string> = {
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'Pragma': 'no-cache',
+    };
     if (idToken) headers.Authorization = `Bearer ${idToken}`;
     if (userEmail) headers['x-user-email'] = userEmail;
-    const res = await fetch('/api/admin/users', { headers });
+    const res = await fetch(`/api/admin/users?_t=${Date.now()}`, { headers });
     if (res.ok) {
       const data = await res.json();
       if (data?.success && Array.isArray(data.users)) {

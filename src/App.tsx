@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   Smartphone,
   CheckCircle2,
@@ -35,9 +35,16 @@ import {
   signInWithGoogle,
   signInWithEmail,
   signUpWithEmail,
+  syncUserProfile,
   isFirestoreQuotaExhausted,
   reportFirestoreError,
 } from './services/firebase';
+import { NotificationBanner } from './components/NotificationBanner';
+import {
+  checkAndDispatchExpiryWarnings,
+  notifyAdminAction,
+  notifyWelcomeFreeTrial,
+} from './services/notification-service';
 import { COUNTRIES, Country } from './data/countries';
 import { CountrySelect } from './components/CountrySelect';
 import { AuthModal } from './components/AuthModal';
@@ -318,6 +325,9 @@ export default function App() {
     }
   };
 
+  // Track previous license state to trigger notifications on admin actions
+  const prevLicenseStateRef = useRef<{ isUnlimited?: boolean; expiresAt?: string | null; status?: string }>({});
+
   // Listen to Auth State and real-time Firestore license sync
   // Zero property leakage: switching accounts completely resets state before fetching the new account's data
   useEffect(() => {
@@ -351,6 +361,30 @@ export default function App() {
       setAuthLoading(false);
 
       if (user) {
+        // Immediately sync user profile to ensure Firestore doc exists & auto-tether 30-min trial for new users
+        syncUserProfile(user).then((res) => {
+          if (res?.isNewUser) {
+            notifyWelcomeFreeTrial((title, body) => {
+              setToastNotification({
+                id: 'welcome_' + Date.now(),
+                type: 'system',
+                title,
+                body,
+                timestamp: new Date().toLocaleTimeString(),
+              });
+            });
+            if (res.trialExpiresAt) {
+              setHasClaimedTrial(true);
+              setUserLicenseData((prev) => ({
+                ...prev,
+                expiresAt: res.trialExpiresAt,
+                plan: '⚡ 30-Minute Free Trial (Active)',
+                isUnlimited: false,
+              }));
+            }
+          }
+        }).catch(() => {});
+
         // Check local storage immediately for zero-flicker UI
         try {
           const isLocallyClaimed =
@@ -422,6 +456,56 @@ export default function App() {
                   }
 
                   const isUserUnlimited = isOwner || Boolean(data.isUnlimited) || data.licenseStatus === 'unlimited' || Boolean(data.licensePlan?.includes('Unlimited'));
+
+                  // Detect Admin actions and dispatch notifications
+                  const prevLic = prevLicenseStateRef.current;
+                  const newExp = data.licenseExpiresAt || null;
+                  const newExpMs = newExp ? new Date(newExp).getTime() : 0;
+                  const prevExpMs = prevLic.expiresAt ? new Date(prevLic.expiresAt).getTime() : 0;
+
+                  // 1. Admin granted unlimited
+                  if (prevLic.isUnlimited === false && isUserUnlimited) {
+                    notifyAdminAction('unlimited_granted', {}, (title, body) => {
+                      setToastNotification({
+                        id: 'admin_unlim_' + Date.now(),
+                        type: 'system',
+                        title,
+                        body,
+                        timestamp: new Date().toLocaleTimeString(),
+                      });
+                    });
+                  }
+                  // 2. Admin added days (forward extension >= 23 hours)
+                  else if (!isUserUnlimited && prevExpMs > 0 && newExpMs > prevExpMs + 23 * 3600 * 1000) {
+                    const daysAdded = Math.round((newExpMs - prevExpMs) / (24 * 3600 * 1000));
+                    notifyAdminAction('days_added', { days: daysAdded, newExpiresAt: newExp }, (title, body) => {
+                      setToastNotification({
+                        id: 'admin_days_' + Date.now(),
+                        type: 'system',
+                        title,
+                        body,
+                        timestamp: new Date().toLocaleTimeString(),
+                      });
+                    });
+                  }
+                  // 3. Admin revoked/terminated
+                  else if (prevExpMs > Date.now() && (data.licenseStatus === 'expired' || data.licensePlan?.includes('Revoked') || data.licensePlan?.includes('Terminated'))) {
+                    notifyAdminAction('revoked', {}, (title, body) => {
+                      setToastNotification({
+                        id: 'admin_rev_' + Date.now(),
+                        type: 'system',
+                        title,
+                        body,
+                        timestamp: new Date().toLocaleTimeString(),
+                      });
+                    });
+                  }
+
+                  prevLicenseStateRef.current = {
+                    isUnlimited: isUserUnlimited,
+                    expiresAt: newExp,
+                    status: data.licenseStatus,
+                  };
 
                   setUserLicenseData((prev) => {
                     const now = Date.now();
@@ -526,6 +610,25 @@ export default function App() {
       }).catch(() => {});
     }
   }, [userLicenseData.expiresAt, userLicenseData.isUnlimited, isOwner, currentUser?.uid, currentUser?.email]);
+
+  // License Expiry Watchdog (dispatches 30m, 15m, 5m, and Expired alerts via Browser Notification & In-App Toast)
+  useEffect(() => {
+    if (!currentUser || userLicenseData.isUnlimited || !userLicenseData.expiresAt) return;
+    const checkExpiry = () => {
+      checkAndDispatchExpiryWarnings(userLicenseData.expiresAt, userLicenseData.isUnlimited, (title, body) => {
+        setToastNotification({
+          id: 'expiry_alert_' + Date.now(),
+          type: 'system',
+          title,
+          body,
+          timestamp: new Date().toLocaleTimeString(),
+        });
+      });
+    };
+    checkExpiry();
+    const timer = setInterval(checkExpiry, 10000);
+    return () => clearInterval(timer);
+  }, [userLicenseData.expiresAt, userLicenseData.isUnlimited, currentUser?.uid]);
 
   // Polling backend status and real-time notifications (isolated per user account)
   const isPairingActive =
@@ -1241,6 +1344,9 @@ export default function App() {
     return (
       <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-0 sm:p-4 font-sans">
         <div className="w-full sm:max-w-md bg-slate-900 sm:border border-slate-800 sm:rounded-[36px] rounded-none shadow-2xl flex flex-col h-screen sm:h-[840px] max-h-screen sm:max-h-[840px] overflow-hidden relative">
+          {/* Mandatory Persistent Allow Notification Banner */}
+          <NotificationBanner />
+
           {/* Header */}
           <div className="p-6 text-center border-b border-slate-800 bg-gradient-to-b from-slate-950 to-slate-900 shrink-0">
             <div className="relative inline-block mb-3">
@@ -1489,6 +1595,17 @@ export default function App() {
 
       {/* Main Container Phone Frame */}
       <div className="w-full max-w-lg mx-auto bg-slate-900 border-x sm:border border-slate-800 sm:rounded-3xl shadow-2xl flex flex-col h-full sm:h-[96vh] sm:max-h-[920px] relative overflow-hidden">
+        {/* Mandatory Persistent Allow Notification Banner */}
+        <NotificationBanner onPermissionGranted={() => {
+          setToastNotification({
+            id: 'notif_granted_' + Date.now(),
+            type: 'system',
+            title: 'Notifications Allowed 🔔',
+            body: 'You will receive instant alerts for license extensions and 30m/15m/5m expiry warnings.',
+            timestamp: new Date().toLocaleTimeString(),
+          });
+        }} />
+
         {/* Top Header */}
         <header className="shrink-0 z-40 px-3.5 pt-3 pb-2.5 bg-slate-950/95 backdrop-blur-md border-b border-slate-800/90 flex flex-col gap-2 shadow-md">
           <div className="flex items-center justify-between gap-1 sm:gap-2">

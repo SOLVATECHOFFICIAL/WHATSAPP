@@ -297,20 +297,42 @@ async function startServer() {
           (d) => typeof d.email === 'string' && d.email.trim().toLowerCase() === cleanEmail
         );
         if (!existingDoc) {
+          const trialStorePath = path.resolve(__dirname, '.trial_store.json');
+          let store: Record<string, any> = {};
+          if (fs.existsSync(trialStorePath)) {
+            try { store = JSON.parse(fs.readFileSync(trialStorePath, 'utf-8')); } catch {}
+          }
+          const emailKey = cleanEmail.replace(/[^a-z0-9]/g, '_');
+          const existingTrial = store[emailKey] || store[aUser.uid];
+          const now = Date.now();
+          const isTrialValid = existingTrial?.expiresAt && new Date(existingTrial.expiresAt).getTime() > now;
+          const trialExpiry = isTrialValid ? existingTrial.expiresAt : (!existingTrial ? new Date(now + 30 * 60 * 1000).toISOString() : null);
+          const hasTrial = Boolean(isTrialValid || !existingTrial);
+
           const freshDoc = {
             uid: aUser.uid,
             email: cleanEmail,
             displayName: aUser.displayName || cleanEmail.split('@')[0],
-            licenseKey: null,
-            licensePlan: 'New User (No Key)',
-            licenseStatus: 'expired',
-            licenseExpiresAt: null,
-            hasUsedTrial: false,
+            licenseKey: hasTrial ? 'FREE_TRIAL_30M' : null,
+            licensePlan: hasTrial ? '⚡ 30-Minute Free Trial (Active)' : 'Trial Expired',
+            licenseStatus: hasTrial ? 'active' : 'expired',
+            licenseExpiresAt: trialExpiry,
+            hasUsedTrial: true,
+            trialClaimedAt: existingTrial?.claimedAt || new Date(now).toISOString(),
+            trialEmail: cleanEmail,
+            lifetimeTrialLocked: true,
             createdAt: aUser.createdAt || new Date().toISOString(),
           };
           rawDocs.push(freshDoc);
           try {
             await setDoc(doc(db, 'users', aUser.uid), freshDoc, { merge: true });
+            if (hasTrial && trialExpiry) {
+              store[emailKey] = { userUid: aUser.uid, userEmail: cleanEmail, expiresAt: trialExpiry, claimedAt: freshDoc.trialClaimedAt, lifetimeLocked: true };
+              store[aUser.uid] = { userUid: aUser.uid, userEmail: cleanEmail, expiresAt: trialExpiry, claimedAt: freshDoc.trialClaimedAt, lifetimeLocked: true };
+              fs.writeFileSync(trialStorePath, JSON.stringify(store, null, 2), 'utf-8');
+              const session = sessionManager.getSession(aUser.uid, cleanEmail);
+              session.setSessionLicense(trialExpiry, false);
+            }
           } catch {}
         }
       }
@@ -400,18 +422,44 @@ async function startServer() {
       const userRef = doc(db, 'users', uid);
       const userSnap = await getDoc(userRef);
       if (!userSnap.exists) {
+        const trialStorePath = path.resolve(__dirname, '.trial_store.json');
+        let store: Record<string, any> = {};
+        if (fs.existsSync(trialStorePath)) {
+          try { store = JSON.parse(fs.readFileSync(trialStorePath, 'utf-8')); } catch {}
+        }
+        const emailKey = email.replace(/[^a-z0-9]/g, '_');
+        const existingTrial = store[emailKey] || store[uid];
+        const now = Date.now();
+        const isTrialValid = existingTrial?.expiresAt && new Date(existingTrial.expiresAt).getTime() > now;
+        const trialExpiry = req.body?.expiresAt || (isTrialValid ? existingTrial.expiresAt : (!existingTrial ? new Date(now + 30 * 60 * 1000).toISOString() : null));
+        const hasTrial = Boolean(isTrialValid || !existingTrial);
+        const claimedAt = existingTrial?.claimedAt || new Date(now).toISOString();
+
         await setDoc(userRef, {
           uid,
           email,
           displayName: displayName || email.split('@')[0],
-          licenseKey: null,
-          licensePlan: 'New User (No Key)',
-          licenseStatus: 'expired',
-          licenseExpiresAt: null,
-          hasUsedTrial: false,
+          licenseKey: hasTrial ? 'FREE_TRIAL_30M' : null,
+          licensePlan: hasTrial ? '⚡ 30-Minute Free Trial (Active)' : 'Trial Expired',
+          licenseStatus: hasTrial ? 'active' : 'expired',
+          licenseExpiresAt: trialExpiry,
+          hasUsedTrial: true,
+          trialClaimedAt: claimedAt,
+          trialEmail: email,
+          lifetimeTrialLocked: true,
           createdAt: new Date().toISOString(),
           lastLogin: new Date().toISOString(),
         });
+
+        if (hasTrial && trialExpiry) {
+          try {
+            store[emailKey] = { userUid: uid, userEmail: email, expiresAt: trialExpiry, claimedAt, lifetimeLocked: true };
+            store[uid] = { userUid: uid, userEmail: email, expiresAt: trialExpiry, claimedAt, lifetimeLocked: true };
+            fs.writeFileSync(trialStorePath, JSON.stringify(store, null, 2), 'utf-8');
+            const session = sessionManager.getSession(uid, email);
+            session.setSessionLicense(trialExpiry, false);
+          } catch {}
+        }
       } else {
         await setDoc(userRef, {
           email,
