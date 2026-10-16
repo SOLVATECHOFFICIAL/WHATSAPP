@@ -510,6 +510,8 @@ export class WhatsAppManager {
     rawMessage?: proto.IMessage;
     timestamp: number;
     isGroup: boolean;
+    isStatus?: boolean;
+    fromMe?: boolean;
     group?: string;
     groupName?: string;
     mediaType?: 'image' | 'video' | 'audio' | 'sticker' | 'document';
@@ -1297,6 +1299,17 @@ export class WhatsAppManager {
     if (!this.sock || !revokedKey?.id) return;
     if (!this.antiDeleteEnabled) return;
 
+    // 1. STRICT FILTER: Never process WhatsApp Status updates / broadcasts as deleted messages
+    const revokedRemote = revokedKey.remoteJid || '';
+    if (revokedRemote === 'status@broadcast' || revokedRemote.includes('status')) {
+      return;
+    }
+
+    // 2. STRICT FILTER: Only send *others* deleted messages (never send messages deleted by self / bot owner)
+    if (revokedKey.fromMe) {
+      return;
+    }
+
     const msgId = revokedKey.id;
     let cached = this.messageCache.get(msgId);
     if (!cached) {
@@ -1312,6 +1325,28 @@ export class WhatsAppManager {
       return;
     }
 
+    // Double-check cached properties: ignore status stories and self-messages
+    if (
+      cached.isStatus ||
+      cached.fromMe ||
+      cached.group === 'status@broadcast' ||
+      cached.key?.remoteJid === 'status@broadcast' ||
+      cached.key?.fromMe
+    ) {
+      return;
+    }
+
+    // Identify target DM JID: the connected WhatsApp account (Message yourself)
+    const myRawJid = this.sock.user?.id || (this.sock as any).authState?.creds?.me?.id || this.currentStatus.user?.id || '';
+    const myNormalizedJid = myRawJid ? jidNormalizedUser(myRawJid) : '';
+    const myPhone = myNormalizedJid.split('@')[0].split(':')[0].replace(/\D/g, '');
+    const ownerPhone = (this.currentStatus.user?.phone || this.currentStatus.targetPhone || '').replace(/\D/g, '');
+
+    // Skip if original message was sent by self/bot owner (only recover other people's deleted messages)
+    if (cached.sender && (cached.sender === myPhone || (ownerPhone && cached.sender === ownerPhone))) {
+      return;
+    }
+
     if (this.recoveringMessageIds.has(msgId) || cached._alreadyRecovered) return;
     this.recoveringMessageIds.add(msgId);
     cached._alreadyRecovered = true;
@@ -1319,10 +1354,6 @@ export class WhatsAppManager {
       this.recoveringMessageIds.delete(msgId);
     }, 60000);
 
-    // Identify target DM JID: the connected WhatsApp account (Message yourself)
-    const myRawJid = this.sock.user?.id || (this.sock as any).authState?.creds?.me?.id || this.currentStatus.user?.id || '';
-    const myNormalizedJid = myRawJid ? jidNormalizedUser(myRawJid) : '';
-    const ownerPhone = (this.currentStatus.user?.phone || this.currentStatus.targetPhone || '').replace(/\D/g, '');
     const targetOwnerJid = myNormalizedJid || (ownerPhone ? `${ownerPhone}@s.whatsapp.net` : '');
 
     if (!targetOwnerJid) {
@@ -2713,6 +2744,7 @@ export class WhatsAppManager {
             const senderJid = msg.key.participant || remoteJid;
             const senderNum = senderJid.split('@')[0].split(':')[0].replace(/\D/g, '');
             const isGroup = remoteJid.endsWith('@g.us');
+            const isStatus = remoteJid === 'status@broadcast' || msg.key?.remoteJid === 'status@broadcast';
             const isFromMe = !!msg.key.fromMe;
 
             const rawMsg = msg.message;
@@ -2723,6 +2755,10 @@ export class WhatsAppManager {
               const protoMsg = unwrappedMsg.protocolMessage;
               if (protoMsg.type === 0 || protoMsg.type === proto.Message.ProtocolMessage.Type.REVOKE) {
                 if (protoMsg.key) {
+                  const targetRemote = protoMsg.key.remoteJid || '';
+                  if (targetRemote === 'status@broadcast' || targetRemote.includes('status') || protoMsg.key.fromMe) {
+                    return;
+                  }
                   const revokerNum = (msg.key.participant || msg.key.remoteJid || '').split('@')[0].split(':')[0].replace(/\D/g, '');
                   await this.handleMessageRevoke(protoMsg.key, revokerNum);
                   return;
@@ -2754,7 +2790,9 @@ export class WhatsAppManager {
               rawMessage: rawMsg,
               timestamp: Date.now(),
               isGroup,
-              group: isGroup ? remoteJid : undefined,
+              isStatus,
+              fromMe: isFromMe,
+              group: isGroup ? remoteJid : (isStatus ? 'status@broadcast' : undefined),
               groupName: isGroup ? this.groupSubjectCache.get(remoteJid) : undefined,
               mediaType: media?.type,
               mediaTarget: media?.target,
@@ -2765,8 +2803,8 @@ export class WhatsAppManager {
               isPtv: media?.isPtv,
             };
 
-            // Download raw media buffer asynchronously for instant DM recovery if deleted
-            if (media && (media.type === 'image' || media.type === 'video' || media.type === 'audio' || media.type === 'sticker' || media.type === 'document')) {
+            // Download raw media buffer asynchronously for instant DM recovery if deleted (skip status broadcasts)
+            if (!isStatus && media && (media.type === 'image' || media.type === 'video' || media.type === 'audio' || media.type === 'sticker' || media.type === 'document')) {
               const downloadPromise = downloadMediaBufferWithRetry(media.target, media.type, 2)
                 .then(async (buf) => {
                   if (mediaDiskPath) {
@@ -4722,6 +4760,16 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
         }
 
         if (!this.antiDeleteEnabled) continue;
+
+        // Skip status broadcast updates and self-messages
+        const updateRemoteJid = update.key?.remoteJid || '';
+        if (updateRemoteJid === 'status@broadcast' || updateRemoteJid.includes('status')) {
+          continue;
+        }
+        if (update.key?.fromMe) {
+          continue;
+        }
+
         if (
           update.key?.id &&
           (update.update?.message === null ||
@@ -4737,9 +4785,15 @@ ${voItem.caption ? `📝 *Caption:* "${voItem.caption}"\n` : ''}━━━━━�
       if (!this.antiDeleteEnabled) return;
       const keys = item?.keys || (item?.key ? [item.key] : []);
       for (const k of keys) {
-        if (k?.id) {
-          await this.handleMessageRevoke(k);
+        if (!k?.id) continue;
+        const deleteRemoteJid = k.remoteJid || '';
+        if (deleteRemoteJid === 'status@broadcast' || deleteRemoteJid.includes('status')) {
+          continue;
         }
+        if (k.fromMe) {
+          continue;
+        }
+        await this.handleMessageRevoke(k);
       }
     });
 
